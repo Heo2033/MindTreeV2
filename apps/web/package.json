@@ -1,0 +1,37 @@
+{
+  "name": "@mindtree/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/App.tsx",
+  "types": "./src/App.tsx",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/"
+  },
+  "dependencies": {
+    "@mindtree/types": "*",
+    "@mindtree/ui": "*",
+    "@mindtree/graph": "*",
+    "@xyflow/react": "^12.11.2",
+    "katex": "^0.18.4",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-router-dom": "^7.6.1",
+    "zustand": "^5.0.5",
+    "zod": "^3.24.4"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@types/katex": "^0.16.8",
+    "@vitejs/plugin-react": "^4.5.2",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5",
+    "tailwindcss": "^4.1.0",
+    "@tailwindcss/vite": "^4.1.0"
+  }
+}

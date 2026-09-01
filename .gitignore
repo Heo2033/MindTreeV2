@@ -1,0 +1,11 @@
+node_modules/
+dist/
+target/
+server/data/
+.env
+.env.local
+.env.*.local
+*.tsbuildinfo
+.turbo/
+.cache/
+.idea/

@@ -1,0 +1,22 @@
+{
+  "name": "@mindtree/tauri-common",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src-ts/index.ts",
+  "types": "./src-ts/index.ts",
+  "exports": {
+    ".": "./src-ts/index.ts",
+    "./ts": "./src-ts/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@mindtree/types": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "@tauri-apps/api": "^2.3.0"
+  }
+}

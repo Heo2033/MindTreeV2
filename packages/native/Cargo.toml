@@ -1,0 +1,13 @@
+[package]
+name = "mindtree-native"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "mindtree_native"
+path = "src/lib.rs"
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+keyring = { version = "3", features = ["apple-native", "sync-secret-service", "windows-native"] }

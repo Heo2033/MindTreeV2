@@ -140,6 +140,25 @@ function migrate(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_learning_events_session ON learning_events(session_id);
     CREATE INDEX IF NOT EXISTS idx_learner_models_topic ON learner_models(topic_id);
   `);
+
+  ensureColumn(db, "learning_sessions", "activity_json", "TEXT DEFAULT '[]'");
+  ensureColumn(db, "learning_sessions", "current_activity_step", "INTEGER DEFAULT 0");
+  ensureColumn(db, "knowledge_nodes", "sources_json", "TEXT DEFAULT '[]'");
+  ensureColumn(db, "learner_models", "initial_overall_level", "TEXT DEFAULT 'awareness'");
+}
+
+function ensureColumn(
+  db: Database.Database,
+  table: string,
+  column: string,
+  ddl: string,
+) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{
+    name: string;
+  }>;
+  if (!cols.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
+  }
 }
 
 declare module "fastify" {

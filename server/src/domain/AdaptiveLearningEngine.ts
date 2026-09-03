@@ -15,6 +15,17 @@ export interface AdaptiveDecision {
   dueReviews: string[];
   nextMilestone?: string;
   reasons: string[];
+  eta?: SessionEta;
+}
+
+export interface SessionEta {
+  totalEstimatedMinutes: number;
+  elapsedMinutes: number;
+  completedItems: number;
+  totalItems: number;
+  remainingMinutesMin: number;
+  remainingMinutesMax: number;
+  pace: "faster" | "on_track" | "slower";
 }
 
 /**
@@ -56,6 +67,7 @@ export class AdaptiveLearningEngine {
         recommendedAction: "final_assessment",
         dueReviews: dueReviews.map((d) => d.nodeId),
         reasons: [...reasons, "Сессия почти завершена — пора проверить освоение"],
+        eta: this.computeEta(session.id, completed, session.curriculum.items.length, session.curriculum.totalEstimatedMinutes),
       };
     }
 
@@ -66,6 +78,7 @@ export class AdaptiveLearningEngine {
         currentItem,
         dueReviews: dueReviews.map((d) => d.nodeId),
         reasons: [...reasons, "Продолжаем по расписанию сессии"],
+        eta: this.computeEta(session.id, completed, session.curriculum.items.length, session.curriculum.totalEstimatedMinutes),
       };
     }
 
@@ -74,6 +87,67 @@ export class AdaptiveLearningEngine {
       recommendedAction: "final_assessment",
       dueReviews: dueReviews.map((d) => d.nodeId),
       reasons: [...reasons, "Все запланированные понятия изучены"],
+      eta: this.computeEta(session.id, completed, session.curriculum.items.length, session.curriculum.totalEstimatedMinutes),
     };
   }
+
+  /**
+   * §39–40. Динамическая оценка времени (Learning ETA).
+   * Считает реальный темп из learning_events и обновляет оценку оставшегося
+   * времени, избегая ложной точности (отдаём диапазон).
+   */
+  private computeEta(
+    sessionId: string,
+    completedItems: number,
+    totalItems: number,
+    baseTotalMinutes: number,
+  ): SessionEta {
+    const elapsedRow = getDb()
+      .prepare(
+        `SELECT COALESCE(SUM(duration_ms), 0) AS ms
+         FROM learning_events WHERE session_id = ? AND duration_ms > 0`,
+      )
+      .get(sessionId) as { ms: number } | undefined;
+    const elapsedMinutes = Math.max(0, Math.round((elapsedRow?.ms ?? 0) / 60000));
+    return computeEtaFrom(elapsedMinutes, completedItems, totalItems, baseTotalMinutes);
+  }
+}
+
+/**
+ * §39–40. Чистая функция динамической оценки времени (Learning ETA).
+ * Считает реальный темп и выдаёт диапазон оставшегося времени,
+ * избегая ложной точности.
+ */
+export function computeEtaFrom(
+  elapsedMinutes: number,
+  completedItems: number,
+  totalItems: number,
+  baseTotalMinutes: number,
+): SessionEta {
+  const totalItemsSafe = Math.max(1, totalItems);
+
+  // Базовый ориентир: на весь план заложено totalEstimatedMinutes.
+  // Темп = сколько минут уже потрачено на одну завершённую веху.
+  const completedSafe = Math.max(1, completedItems);
+  const minutesPerItem = elapsedMinutes / completedSafe;
+  const remainingItems = Math.max(0, totalItems - completedItems);
+  const projectedRemaining = minutesPerItem * remainingItems;
+
+  // Сравнение с плановым темпом.
+  const plannedMinutesPerItem = baseTotalMinutes / totalItemsSafe;
+  const ratio = plannedMinutesPerItem > 0 ? minutesPerItem / plannedMinutesPerItem : 1;
+  const pace: SessionEta["pace"] =
+    ratio < 0.85 ? "faster" : ratio > 1.2 ? "slower" : "on_track";
+
+  // Диапазон ±40% вокруг прогноза, минимум 5 минут.
+  const mid = Math.max(5, Math.round(projectedRemaining));
+  return {
+    totalEstimatedMinutes: baseTotalMinutes,
+    elapsedMinutes,
+    completedItems,
+    totalItems: totalItemsSafe,
+    remainingMinutesMin: Math.max(0, Math.round(mid * 0.6)),
+    remainingMinutesMax: Math.round(mid * 1.4),
+    pace,
+  };
 }

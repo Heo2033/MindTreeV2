@@ -8,3 +8,4 @@ export * from "./assessment.js";
 export * from "./provider.js";
 export * from "./api.js";
 export * from "./schemas.js";
+export * from "./llmResult.js";

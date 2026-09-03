@@ -17,7 +17,7 @@ export interface AssessmentItem {
 
 export interface Assessment {
   id: string;
-  sessionId: string;
+  sessionId: string | null;
   type: "quiz" | "final" | "diagnostic" | "mastery";
   questions: AssessmentQuestionResult[];
 }
@@ -124,7 +124,7 @@ export class AssessmentEngine {
     }
     return {
       id: String(row.id),
-      sessionId: String(row.session_id),
+      sessionId: row.session_id ? String(row.session_id) : null,
       type: String(row.type) as Assessment["type"],
       questions,
     };

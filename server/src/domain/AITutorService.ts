@@ -7,6 +7,7 @@ import { getDb } from "../db/connection.js";
 export interface TutorReply {
   text: string;
   usedFallback: boolean;
+  timeRemainingMinutes?: number;
 }
 
 export class AITutorService {
@@ -31,6 +32,13 @@ export class AITutorService {
         : undefined;
     const misconceptions = this.recentMisconceptions(topicId);
     const timeLeft = opts.sessionId ? this.remainingMinutes(opts.sessionId) : undefined;
+    const currentNodeProfile = currentNode?.id
+      ? this.learnerModel.getConceptProfile(currentNode.id, topicId)
+      : undefined;
+    const currentMastery = currentNodeProfile
+      ? `освоение ${Math.round(currentNodeProfile.masteryScore * 100)}%`
+      : undefined;
+    const recentAttempts = this.recentAttempts(topicId);
 
     const prompt = buildTutorPrompt({
       topic: topic?.name ?? "",
@@ -39,7 +47,9 @@ export class AITutorService {
       currentLevel,
       currentNode: currentNode?.label,
       nodePath: currentNode?.path,
+      currentMastery,
       misconceptions,
+      recentAttempts,
       timeRemainingMinutes: timeLeft,
       message,
     });
@@ -50,7 +60,7 @@ export class AITutorService {
         () => prompt,
         (raw) => raw,
       );
-      return { text: res.result, usedFallback: false };
+      return { text: res.result, usedFallback: false, timeRemainingMinutes: timeLeft };
     } catch (err) {
       return {
         text:
@@ -58,6 +68,7 @@ export class AITutorService {
           `Тема: ${topic?.name ?? ""}. Ваш вопрос: ${message}. ` +
           `(Ошибка: ${err instanceof Error ? err.message : String(err)})`,
         usedFallback: true,
+        timeRemainingMinutes: timeLeft,
       };
     }
   }
@@ -111,6 +122,34 @@ export class AITutorService {
   private recentMisconceptions(topicId: string, limit = 3): string[] {
     const masteries = this.learnerModel.getWeakConcepts(topicId, limit);
     return masteries;
+  }
+
+  /**
+   * Последние ошибки/слабые понятия с описанием заблуждения — история обучения
+   * для репетитора (§35), чтобы тот исправлял именно известные проблемы.
+   */
+  private recentAttempts(topicId: string, limit = 4): string[] {
+    const profiles = this.learnerModel.getConceptProfiles(topicId);
+    const withErrors = profiles.filter((p) => p.errors && p.errors.length > 0);
+    const items: string[] = [];
+    for (const p of withErrors) {
+      for (const err of p.errors) {
+        items.push(
+          `${p.nodeId}: ${err.description || err.type || "ошибка"}`,
+        );
+        if (items.length >= limit) break;
+      }
+      if (items.length >= limit) break;
+    }
+    if (items.length < limit) {
+      for (const p of profiles) {
+        if (items.length >= limit) break;
+        if (p.masteryScore < 0.6) {
+          items.push(`${p.nodeId}: слабое освоение (${Math.round(p.masteryScore * 100)}%)`);
+        }
+      }
+    }
+    return items.slice(0, limit);
   }
 
   private remainingMinutes(sessionId: string): number | undefined {

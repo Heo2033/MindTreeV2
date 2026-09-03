@@ -1,5 +1,26 @@
 import { ALPHABET_RULE, NO_META_RULE } from "./rules.js";
 
+/**
+ * §64: domain detection for factual reliability.
+ * Topics in these domains require source citations — AI-generated content
+ * must not be automatically considered reliable.
+ */
+const CRITICAL_DOMAIN_KEYWORDS = [
+  "медицина", "медицин", "фармаколог", "фармац", "терапи", "хирург",
+  "патолог", "анатом", "физиолог", "клини", "диагност",
+  "law", "право", "юрис", "уголовн", "гражданск",
+  "finance", "финанс", "экономик", "бухгалт", "налог",
+  "medicine", "medical", "pharmacolog", "clinical", "surgery",
+  "legal", "jurisprud",
+  "exam", "экзамен", "сертиф", " licens",
+  "наук", "scientific", "исследован",
+];
+
+export function isCriticalDomain(topicName: string, nodePath: string[] = []): boolean {
+  const text = [topicName, ...nodePath].join(" ").toLowerCase();
+  return CRITICAL_DOMAIN_KEYWORDS.some((kw) => text.includes(kw));
+}
+
 export const PROMPT_CONTENT = `# Роль
 Ты — эксперт-энциклопедист. Дай точное, краткое описание понятия.
 
@@ -55,7 +76,7 @@ export const PROMPT_CONTENT = `# Роль
 - Не противоречь parent, ancestors и siblings.
 ${NO_META_RULE}
 ${ALPHABET_RULE}
-
+{{sources_block}}
 # Язык
 Отвечай СТРОГО на русском языке.
 Все термины в one_liner и details — на русском. Исключение: устоявшиеся аббревиатуры
@@ -64,10 +85,11 @@ ${ALPHABET_RULE}
 
 # Формат
 Только JSON:
-{"one_liner":"...","details":"...","analogy":"...","relations":[{"from":"id_этого_узла","to":"id_другого_узла","type":"requires","label":"опционально"}],"claims":[{"subject":"название_узла","predicate":"is_a","object":"категория"},{"subject":"название_узла","predicate":"alternative_to","object":"альтернатива"}]}
+{"one_liner":"...","details":"...","analogy":"...","relations":[{"from":"id_этого_узла","to":"id_другого_узла","type":"requires","label":"опционально"}],"claims":[{"subject":"название_узла","predicate":"is_a","object":"категория"},{"subject":"название_узла","predicate":"alternative_to","object":"альтернатива"}],"sources":["URL_or_название_источника"]}
 
 Claims — это список утверждений, которые содержит этот узел. Они используются для валидации.
 Predicates: is_a, has_a, part_of, alternative_to, implements, requires, enables, contradicts, depends_on, related_to.
+{{sources_format_note}}
 
 Если analogy не нужна: "analogy": "".
 Если relations нет: "relations": [].
@@ -86,6 +108,8 @@ export interface IContentPromptContext {
   };
   siblings: string[];
   level?: string;
+  /** §64: when true, LLM is asked to include source citations. */
+  isCriticalDomain?: boolean;
   ontologyContext?: {
     canonical_definition?: string;
     semantic_axis?: string;
@@ -146,5 +170,17 @@ export function buildContentPrompt(ctx: IContentPromptContext): string {
     .replace("{{node_path}}", ctx.nodePath.join(" → "))
     .replace("{{siblings}}", ctx.siblings.join(", "))
     .replace("{{node_id}}", ctx.node.id)
-    .replace("{{node_title}}", ctx.node.label ?? ctx.node.oneLiner ?? "");
+    .replace("{{node_title}}", ctx.node.label ?? ctx.node.oneLiner ?? "")
+    .replace(
+      "{{sources_block}}",
+      ctx.isCriticalDomain
+        ? `# Источники (§64: factual reliability)\nЭта тема относится к критически важной области (медицина, право, финансы, наука, экзамен).\nВключи в JSON поле sources — массив из 2–4 наиболее авторитетных источников (название книги/статьи/URL или DOI), на которые опирается описание.\nНе придумывай источники — указывай только реальные, общепризнанные.\nЕсли достоверных источников нет — верни "sources": [].\n`
+        : "",
+    )
+    .replace(
+      "{{sources_format_note}}",
+      ctx.isCriticalDomain
+        ? 'Если sources запрошены: "sources": ["источник1", "источник2"].\nЕсли sources нет: "sources": [].'
+        : 'Если sources нет: "sources": [].',
+    );
 }

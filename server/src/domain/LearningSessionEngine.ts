@@ -3,7 +3,6 @@ import type {
   CurriculumItem,
   Curriculum,
   KnowledgeNode,
-  MasteryLevel,
 } from "@mindtree/types";
 import crypto from "crypto";
 import { getDb } from "../db/connection.js";
@@ -15,7 +14,7 @@ import { LearnerModelService } from "./LearnerModelService.js";
 import { EventBus } from "./EventBus.js";
 import { getScheduler } from "../llm/scheduler.js";
 import { parseLLMJson } from "../llm/client.js";
-import { buildContentPrompt } from "../prompts/content.js";
+import { buildContentPrompt, isCriticalDomain } from "../prompts/content.js";
 import { readingOrder } from "../lib/treeUtils/reading.js";
 
 export interface CreateSessionInput {
@@ -53,7 +52,7 @@ export class LearningSessionEngine {
     const targetLevel = this.getTargetLevel(input.topicId);
 
     // Diagnostic current level comes from learner model; use it for curriculum
-    const curriculum = await this.curriculumEngine.generate({
+    const { curriculum } = await this.curriculumEngine.generate({
       topicId: input.topicId,
       topicName: this.getTopicName(input.topicId),
       goal: input.goal,
@@ -140,7 +139,7 @@ export class LearningSessionEngine {
   async studyNode(
     sessionId: string,
     nodeId: string,
-  ): Promise<{ content: { one_liner: string; details: string; analogy?: string }; node: KnowledgeNode }> {
+  ): Promise<{ content: { one_liner: string; details: string; analogy?: string; sources?: string[] }; node: KnowledgeNode }> {
     const session = this.getSession(sessionId);
     if (!session) throw new Error("Сессия не найдена");
 
@@ -163,6 +162,7 @@ export class LearningSessionEngine {
         nodePath: path,
         siblings,
         level: this.learnerModel.getCurrentLevel(session.topicId),
+        isCriticalDomain: isCriticalDomain(topicName, path),
         ontologyContext: {
           canonical_definition: node.oneLiner,
           semantic_axis: node.conceptType,
@@ -170,13 +170,13 @@ export class LearningSessionEngine {
         node: { id: node.id, label: node.label },
       });
 
-      let content: { one_liner: string; details: string; analogy?: string; relations: unknown[] };
+      let content: { one_liner: string; details: string; analogy?: string; relations: unknown[]; sources?: string[] };
       try {
         const res = await getScheduler().execute(
           "content",
           () => prompt,
           (raw) =>
-            parseLLMJson<{ one_liner?: string; details?: string; analogy?: string; relations?: unknown[] }>(raw),
+            parseLLMJson<{ one_liner?: string; details?: string; analogy?: string; relations?: unknown[]; sources?: string[] }>(raw),
         );
         content = {
           one_liner: String(res.result.one_liner ?? node.oneLiner),
@@ -186,23 +186,32 @@ export class LearningSessionEngine {
               ? String(res.result.analogy)
               : undefined,
           relations: Array.isArray(res.result.relations) ? res.result.relations : [],
+          sources: Array.isArray(res.result.sources) ? res.result.sources.map(String) : [],
         };
       } catch {
-        content = { one_liner: node.oneLiner, details: node.details, relations: [] };
+        content = { one_liner: node.oneLiner, details: node.details, relations: [], sources: [] };
       }
 
       getDb()
         .prepare(
-          `UPDATE knowledge_nodes SET one_liner = ?, details = ?, analogy = ?, relations_json = ?, content_loaded = 1, state = 'content_generated' WHERE id = ?`,
+          `UPDATE knowledge_nodes SET one_liner = ?, details = ?, analogy = ?, relations_json = ?, sources_json = ?, content_loaded = 1, state = 'content_generated' WHERE id = ?`,
         )
-        .run(content.one_liner, content.details, content.analogy ?? null, JSON.stringify(content.relations), nodeId);
-      node = { ...node, oneLiner: content.one_liner, details: content.details, analogy: content.analogy, relations: content.relations as KnowledgeNode["relations"] };
+        .run(
+          content.one_liner,
+          content.details,
+          content.analogy ?? null,
+          JSON.stringify(content.relations),
+          JSON.stringify(content.sources ?? []),
+          nodeId,
+        );
+      node = { ...node, oneLiner: content.one_liner, details: content.details, analogy: content.analogy, relations: content.relations as KnowledgeNode["relations"], sources: content.sources };
       nodeRow = getDb().prepare(`SELECT * FROM knowledge_nodes WHERE id = ?`).get(nodeId) as Record<string, unknown>;
     } else {
       const content = {
         one_liner: node.oneLiner,
         details: node.details,
         analogy: node.analogy,
+        sources: node.sources,
       };
       EventBus.emit({
         sessionId,
@@ -227,6 +236,7 @@ export class LearningSessionEngine {
         one_liner: node.oneLiner,
         details: node.details,
         analogy: node.analogy,
+        sources: node.sources,
       },
       node,
     };
@@ -264,12 +274,11 @@ export class LearningSessionEngine {
   }
 
   /**
-   * Финализация сессии: генерация финальной проверки и оценка освоения.
+   * Генерирует финальную проверку для сессии.
+   * Завершение сессии (status = completed) происходит после сабмита assessment,
+   * когда реальная оценка mastery сохранена.
    */
-  async finalize(sessionId: string): Promise<{
-    assessmentId: string;
-    mastery: Awaited<ReturnType<MasteryEngine["evaluate"]>>;
-  }> {
+  async generateFinalAssessment(sessionId: string): Promise<{ assessmentId: string }> {
     const session = this.getSession(sessionId);
     if (!session) throw new Error("Сессия не найдена");
 
@@ -290,12 +299,6 @@ export class LearningSessionEngine {
       true,
     );
 
-    getDb()
-      .prepare(
-        `UPDATE learning_sessions SET status = 'completed', completed_at = ? WHERE id = ?`,
-      )
-      .run(new Date().toISOString(), sessionId);
-
     EventBus.emit({
       sessionId,
       topicId: session.topicId,
@@ -303,7 +306,7 @@ export class LearningSessionEngine {
       payload: { assessmentId: assessment.id },
     });
 
-    return { assessmentId: assessment.id, mastery: { topicId: session.topicId, newLevel: { label: "solid_understanding" as MasteryLevel, score: 0.5 }, reachedTarget: false, perConcept: {}, gaps: [] } };
+    return { assessmentId: assessment.id };
   }
 
   private nodeBrief(topicId: string, nodeId: string): { nodeId: string; label: string; oneLiner: string; details: string } {
@@ -384,6 +387,12 @@ function rowToNode(row: Record<string, unknown>): KnowledgeNode {
   } catch {
     sequences = [];
   }
+  let sources: string[] = [];
+  try {
+    sources = JSON.parse(String(row.sources_json ?? "[]"));
+  } catch {
+    sources = [];
+  }
   return {
     id: String(row.id),
     topicId: String(row.topic_id),
@@ -393,6 +402,7 @@ function rowToNode(row: Record<string, unknown>): KnowledgeNode {
     oneLiner: String(row.one_liner ?? ""),
     details: String(row.details ?? ""),
     analogy: row.analogy ? String(row.analogy) : undefined,
+    sources,
     conceptType: row.concept_type ? (String(row.concept_type) as KnowledgeNode["conceptType"]) : undefined,
     importance: Number(row.importance ?? 0.5),
     difficulty: Number(row.difficulty ?? 0.5),

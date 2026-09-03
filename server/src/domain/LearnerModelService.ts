@@ -35,11 +35,17 @@ export class LearnerModelService {
     if (!exists) {
       this.db
         .prepare(
-          `INSERT INTO learner_models (user_id, topic_id, concept_masteries_json, updated_at)
-           VALUES ('default', ?, '[]', ?)`,
+          `INSERT INTO learner_models (user_id, topic_id, concept_masteries_json, initial_overall_level, updated_at)
+           VALUES ('default', ?, '[]', 'awareness', ?)`,
         )
         .run(topicId, new Date().toISOString());
     }
+  }
+
+  getInitialLevel(topicId: string): MasteryLevel {
+    const row = this.getRow(topicId);
+    if (!row?.initial_overall_level) return "awareness";
+    return String(row.initial_overall_level) as MasteryLevel;
   }
 
   private conceptMasteries(topicId: string): ConceptMastery[] {

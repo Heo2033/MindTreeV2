@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import crypto from "crypto";
+import { PlannerCoordinator } from "../application/PlannerCoordinator.js";
 
 export async function topicRoutes(app: FastifyInstance) {
   app.get("/", async (_request, reply) => {
@@ -26,6 +27,24 @@ export async function topicRoutes(app: FastifyInstance) {
 
     const topic = app.db.prepare("SELECT * FROM topics WHERE id = ?").get(id);
     return reply.status(201).send(topic);
+  });
+
+  // §44: смена цели темы с перестройкой плана вокруг недостающего знания.
+  app.post("/:id/goal", async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const { goal } = request.body as { goal?: string };
+    if (!goal || String(goal).trim() === "") {
+      return reply.status(400).send({ error: "goal is required" });
+    }
+    try {
+      const planner = new PlannerCoordinator();
+      const result = await planner.changeTopicGoal(id, String(goal).trim());
+      return reply.send(result);
+    } catch (err) {
+      return reply.status(500).send({
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   });
 
   app.delete("/:id", async (request, reply) => {

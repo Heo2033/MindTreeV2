@@ -18,6 +18,7 @@ import { configRoutes } from "./routes/config.js";
 import { quizRoutes } from "./routes/quiz.js";
 import { learnerModelRoutes } from "./routes/learnerModel.js";
 import { adminRoutes } from "./routes/admin.js";
+import { analyticsRoutes } from "./routes/analytics.js";
 
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const HOST = process.env.HOST || "0.0.0.0";
@@ -45,6 +46,7 @@ async function main() {
   await app.register(quizRoutes, { prefix: "/api/quiz" });
   await app.register(learnerModelRoutes, { prefix: "/api/learner-model" });
   await app.register(adminRoutes, { prefix: "/api/admin" });
+  await app.register(analyticsRoutes, { prefix: "/api/analytics" });
 
   try {
     await app.listen({ port: PORT, host: HOST });

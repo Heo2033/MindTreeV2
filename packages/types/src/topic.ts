@@ -82,6 +82,8 @@ export interface KnowledgeNode {
   oneLiner: string;
   details: string;
   analogy?: string;
+  /** §64: sources/citations for critical domains (medicine, law, finance, science). */
+  sources?: string[];
   conceptType?: ConceptType;
   importance: number;
   difficulty: number;

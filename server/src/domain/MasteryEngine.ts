@@ -157,7 +157,7 @@ const MASTERY_ORDER = [
   "expert",
 ];
 
-function levelFromScore(score: number): MasteryLevelMeta {
+export function levelFromScore(score: number): MasteryLevelMeta {
   const n = MASTERY_ORDER.length;
   let idx = 0;
   for (let i = 0; i < n; i++) {

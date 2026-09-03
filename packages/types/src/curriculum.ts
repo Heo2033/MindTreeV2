@@ -13,4 +13,5 @@ export interface CurriculumItem {
   priority: number;
   status: "pending" | "active" | "completed" | "skipped";
   content?: string;
+  reason?: string;
 }

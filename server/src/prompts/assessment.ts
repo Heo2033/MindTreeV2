@@ -16,22 +16,26 @@ export const PROMPT_ASSESSMENT = `# Роль
 Изученные понятия (в рамках сессии):
 {{session_items}}
 
-# Типы вопросов
-Сгенерируй финальную проверку, включающую:
-- **recall** — вопросы на запоминание/воспроизведение определений и фактов
-- **explanation** — вопросы, где пользователь должен объяснить механизм своими словами (structure matters)
-- **application** — (если include_application=true) задачи на применение знания к новому случаю
-- **transfer** — (если включено) перенос знания на смежную ситуацию
+# Типы вопросов (всего их 6)
+Сгенерируй финальную проверку, используя следующие типы:
+- **recognition** — узнавание: выбери корректный вариант из четырёх (формулировка, а не заучивание)
+- **recall** — припоминание: воспроизведи определение или ключевой факт (multiple choice)
+- **explanation** — объясни механизм своими словами (structure matters; rubric обязателен)
+- **diagnosis** — найди и объясни ошибку/несоответствие в приведённом утверждении (rubric обязателен)
+- **application** — примени знание к новой конкретной ситуации (rubric обязателен)
+- **transfer** — перенеси знание на смежную/нестандартную ситуацию (rubric обязателен)
 
-Всего {{question_count}} вопросов. Не менее одного explanation и одного recall.
-Порядок: recall → explanation → application → transfer.
+Всего {{question_count}} вопросов. Обеспечь разнообразие типов: это должен быть честный замер, а не только фактология.
+Для recognition/recall укажи options и correctAnswer (индекс корректного варианта, начиная с 0).
+Для explanation/diagnosis/application/transfer — options=[] и correctAnswer=""; explanation (рубрика) содержит конкретные критерии оценивания: какие элементы должны присутствовать в свободном ответе.
 
 # Формат ответа
 Строгий JSON-объект:
-{"questions":[{"id":"a1","type":"recall","nodeId":"n2_a","question":"...","options":["A","B","C","D"],"correctAnswer":"A","explanation":"..."},{"id":"a2","type":"explanation","nodeId":"n2_b","question":"Объясните своими словами, как работает X (порядок шагов, причинно-следственные связи).","options":[],"correctAnswer":"","explanation":"Ключевые элементы, которые должны быть в ответе: 1) ..., 2) ..."}]}
+{"questions":[{"id":"a1","type":"recall","nodeId":"n2_a","question":"...","options":["A","B","C","D"],"correctAnswer":"0","explanation":"..."},{"id":"a2","type":"explanation","nodeId":"n2_b","question":"Объясните своими словами, как работает X (порядок шагов, причинно-следственные связи).","options":[],"correctAnswer":"","explanation":"Ключевые элементы ответа: 1) ..., 2) ..."}]}
 
-- Для recall/recognition — укажите options и correctAnswer (индекс корректного варианта).
-- Для explanation/application/transfer — options=[] и correctAnswer=""; explanation содержит рубрику (критерии) оценивания: какие элементы должны присутствовать в свободном ответе.
+# Примечания
+- correctAnswer для recognition/recall — ИНДЕКС правильного варианта (строка "0","1","2","3").
+- Вопросы проверяют глубокое понимание, не поверхностную фактологию.
 
 ${NO_META_RULE}
 ${ALPHABET_RULE}
@@ -43,9 +47,8 @@ ${ALPHABET_RULE}
 
 # Проверь перед ответом
 - [ ] Ровно {{question_count}} вопросов
-- [ ] Не менее одного recall и одного explanation
-- [ ] Application/transfer вопросы — если включены
-- [ ] Explanation rubric содержит конкретные критерии оценивания
+- [ ] Есть вопросы с options (recognition/recall) и открытые вопросы (explanation/diagnosis/application/transfer)
+- [ ] У всех открытых вопросов rubric (explanation) содержит конкретные критерии
 - [ ] Вопросы проверяют глубокое понимание, не поверхностную фактологию
 - [ ] Формат — строго JSON с ключом "questions"`;
 

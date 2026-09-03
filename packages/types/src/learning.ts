@@ -16,12 +16,12 @@ export interface LearningMilestone {
   description: string;
   capabilities: string[];
   estimatedHours: number;
-  status: "not_started" | "in_progress" | "achieved";
+  status: "not_started" | "active" | "completed";
   alternativePaths: LearningPath[];
 }
 
 export interface LearningPath {
-  nextMilestoneId: string;
+  id: string;
   title: string;
   estimatedHours: number;
   description: string;

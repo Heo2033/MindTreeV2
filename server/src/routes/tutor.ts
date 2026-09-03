@@ -18,6 +18,7 @@ export async function tutorRoutes(app: FastifyInstance) {
     return reply.send({
       response: result.text,
       usedFallback: result.usedFallback,
+      timeRemainingMinutes: result.timeRemainingMinutes,
       context: { topic_id, session_id, node_id },
     });
   });

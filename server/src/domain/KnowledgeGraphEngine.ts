@@ -1,6 +1,6 @@
 import type { KnowledgeNode } from "@mindtree/types";
 import { getScheduler } from "../llm/scheduler.js";
-import { parseLLMJson } from "../llm/client.js";
+import { parseLLMJson, LLMMockError, LLMRetriesExhaustedError } from "../llm/client.js";
 import {
   buildStructurePrompt,
   type IStructurePromptOptions,
@@ -69,9 +69,19 @@ export class KnowledgeGraphEngine {
       );
       nodes = normalizeDrafts(result);
     } catch (err) {
-      throw new Error(
-        `Не удалось построить дерево: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      // Офлайн-режим (LLM_MOCK=1): строим детерминированный скелет с уникальными id.
+      // Планировщик оборачивает LLMMockError в LLMRetriesExhaustedError, поэтому
+      // проверяем оба.
+      const isOffline = err instanceof LLMMockError
+        || (err instanceof LLMRetriesExhaustedError && err.lastError instanceof LLMMockError);
+      if (isOffline) {
+        nodes = fallbackStructure(query);
+        warnings.push("Офлайн-режим: построено демо-дерево знаний вместо LLM.");
+      } else {
+        throw new Error(
+          `Не удалось построить дерево: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
 
     // expand to depth
@@ -116,6 +126,12 @@ export class KnowledgeGraphEngine {
     } catch (err) {
       warnings.push(`Контент заполнен не полностью: ${err instanceof Error ? err.message : String(err)}`);
     }
+
+    // Гарантируем глобальную уникальность id узлов: реальный LLM (и заглушки)
+    // могут возвращать повторяющиеся id, что вызывало UNIQUE violation при
+    // персистентности (persistNodes). Дубликаты схлопываются, оставшиеся
+    // коллизии получают новые id, а ссылки parentId обновляются.
+    nodes = dedupeNodeIds(nodes);
 
     const stats = {
       total: nodes.length,
@@ -322,15 +338,16 @@ export class KnowledgeGraphEngine {
       forbidden_interpretations?: string[];
       level?: string;
     },
-  ): Promise<{ one_liner: string; details: string; analogy?: string; relations: unknown[] }> {
+  ): Promise<{ one_liner: string; details: string; analogy?: string; relations: unknown[]; sources?: string[] }> {
     const scheduler = getScheduler();
-    const { buildContentPrompt } = await import("../prompts/content.js");
+    const { buildContentPrompt, isCriticalDomain } = await import("../prompts/content.js");
 
     const prompt = buildContentPrompt({
       rootTopic: query,
       nodePath: context.nodePath,
       siblings: context.siblings,
       level: context.level,
+      isCriticalDomain: isCriticalDomain(query, context.nodePath),
       ontologyContext: {
         canonical_definition: context.canonical_definition,
         semantic_axis: context.semantic_axis,
@@ -343,7 +360,7 @@ export class KnowledgeGraphEngine {
       "content",
       () => prompt,
       (raw) =>
-        parseLLMJson<{ one_liner?: string; details?: string; analogy?: string; relations?: unknown[] }>(
+        parseLLMJson<{ one_liner?: string; details?: string; analogy?: string; relations?: unknown[]; sources?: string[] }>(
           raw,
         ),
     );
@@ -353,6 +370,7 @@ export class KnowledgeGraphEngine {
       details: String(result.details ?? ""),
       analogy: typeof result.analogy === "string" && result.analogy !== "" ? result.analogy : undefined,
       relations: Array.isArray(result.relations) ? result.relations : [],
+      sources: Array.isArray(result.sources) ? result.sources.map(String) : [],
     };
   }
 
@@ -450,6 +468,7 @@ export class KnowledgeGraphEngine {
     details: string;
     analogy?: string;
     relations: unknown[];
+    sources?: string[];
   }> {
     const { getDb } = await import("../db/connection.js");
     const db = getDb();
@@ -494,7 +513,7 @@ export class KnowledgeGraphEngine {
     });
 
     db.prepare(
-      `UPDATE knowledge_nodes SET one_liner = ?, details = ?, analogy = ?, relations_json = ?,
+      `UPDATE knowledge_nodes SET one_liner = ?, details = ?, analogy = ?, relations_json = ?, sources_json = ?,
          state = 'content_generated', content_loaded = 1
        WHERE id = ?`,
     ).run(
@@ -502,6 +521,7 @@ export class KnowledgeGraphEngine {
       content.details,
       content.analogy ?? null,
       JSON.stringify(content.relations),
+      JSON.stringify(content.sources ?? []),
       nodeId,
     );
 
@@ -596,3 +616,106 @@ function mergeRepairs(nodes: NodeDraft[], repaired: NodeDraft[]): NodeDraft[] {
     ...repaired, // add repaired versions
   ];
 }
+
+/**
+ * Детерминированное демо-дерево для офлайн-режима (LLM_MOCK=1).
+ * Возвращает скелет уровня 1–2 с гарантированно уникальными id,
+ * чтобы persistNodes не падал на UNIQUE constraint.
+ */
+export function fallbackStructure(query: string): NodeDraft[] {
+  const topic = query.split(/\r?\n/)[0].trim().slice(0, 80) || "Тема";
+  return [
+    {
+      id: "n1",
+      title: topic,
+      parentId: null,
+      level: 1,
+      canonical_definition: `Общий обзор темы «${topic}» и её ключевых разделов.`,
+      semantic_axis: "theory",
+      conceptType: "topic",
+    },
+    {
+      id: "n2_1",
+      title: "Основы",
+      parentId: "n1",
+      level: 2,
+      canonical_definition: "Базовые понятия и определения, с которых начинается изучение темы.",
+      semantic_axis: "theory",
+      conceptType: "concept",
+    },
+    {
+      id: "n2_2",
+      title: "Ключевые направления",
+      parentId: "n1",
+      level: 2,
+      canonical_definition: "Главные подтемы и принципы, составляющие ядро предмета.",
+      semantic_axis: "architecture",
+      conceptType: "concept",
+    },
+    {
+      id: "n2_3",
+      title: "Применение",
+      parentId: "n1",
+      level: 2,
+      canonical_definition: "Практические области использования знаний по теме.",
+      semantic_axis: "application",
+      conceptType: "example",
+    },
+  ];
+}
+
+/**
+ * Схлопывает точные дубли узлов и переименовывает оставшиеся коллизии id,
+ * обновляя ссылки parentId, чтобы дерево было внутренне согласованным и
+ * персистентность не падала на UNIQUE constraint.
+ */
+export function dedupeNodeIds(nodes: NodeDraft[]): NodeDraft[] {
+  const seen = new Set<string>();
+  const out: NodeDraft[] = [];
+  // исходный id -> новый уникальный id (для всех, включая неизменённые)
+  const idMap = new Map<string, string>();
+
+  for (const n of nodes) {
+    if (!n.id) continue;
+    // Точный дубль (тот же id и тот же контент) — пропускаем.
+    const existing = out.find((o) => o.id === n.id);
+    const isExactDup = existing !== undefined
+      && existing.title === n.title
+      && existing.level === n.level
+      && existing.parentId === n.parentId;
+    if (isExactDup) {
+      idMap.set(n.id, n.id);
+      continue;
+    }
+
+    let newId = n.id;
+    if (seen.has(n.id)) {
+      const base = n.id.replace(/-\d+$/, "");
+      let i = 1;
+      do {
+        newId = `${base}-${i}`;
+        i++;
+      } while (seen.has(newId));
+    }
+    seen.add(newId);
+    // parentId-ссылки должны указывать на первый (канонический) узел с данным id,
+    // поэтому маппинг исходного id сохраняем только при первом вхождении.
+    if (!idMap.has(n.id)) {
+      idMap.set(n.id, newId);
+    }
+    out.push({ ...n, id: newId });
+  }
+
+  // Обновляем parentId по переименованию.
+  for (const n of out) {
+    if (n.parentId && idMap.has(n.parentId) && n.parentId !== n.id) {
+      const mapped = idMap.get(n.parentId)!;
+      if (mapped !== n.parentId) {
+        n.parentId = mapped;
+      }
+    }
+  }
+
+  return out;
+}
+

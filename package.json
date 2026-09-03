@@ -8,6 +8,7 @@
   ],
   "scripts": {
     "dev:server": "npm run dev -w server",
+    "dev:server:mock": "npm run dev:server:mock -w server",
     "dev:web": "npm run dev -w @mindtree/web",
     "dev:desktop": "npm run dev -w @mindtree/desktop",
     "dev:studio": "npm run dev -w @mindtree/studio",
@@ -20,8 +21,8 @@
     "build:all": "npm run build:types && npm run build:ui && npm run build:server && npm run build:web",
     "typecheck": "npm run typecheck -w @mindtree/types && npm run typecheck -w @mindtree/ui && npm run typecheck -w @mindtree/graph && npm run typecheck -w @mindtree/tauri-common && npm run typecheck -w mindtree-server && npm run typecheck -w @mindtree/web && npm run typecheck -w @mindtree/desktop && npm run typecheck -w @mindtree/studio",
     "lint": "eslint packages/ apps/ server/src/",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "test": "vitest run -c server/vitest.config.ts",
+    "test:watch": "vitest -c server/vitest.config.ts"
   },
   "devDependencies": {
     "typescript": "^5.8.3",

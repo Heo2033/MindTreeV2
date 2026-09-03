@@ -29,7 +29,16 @@ export async function pipelineRoutes(app: FastifyInstance) {
       });
 
       // Persist nodes to DB if a topic_id was provided
-      const persistCount = await persistNodes(topic_id, query, nodes);
+      let persistCount = 0;
+      try {
+        persistCount = await persistNodes(topic_id, query, nodes);
+      } catch (err) {
+        sendEvent("error", {
+          message: `Не удалось сохранить дерево: ${err instanceof Error ? err.message : String(err)}`,
+        });
+        reply.raw.end();
+        return;
+      }
 
       sendEvent("done", { nodes, warnings, persisted: persistCount });
     } catch (err) {
@@ -59,7 +68,7 @@ function persistNodes(
   const rootLabel = query.split(/\r?\n/)[0].trim().slice(0, 80) || "Тема";
 
   const insert = db.prepare(
-    `INSERT INTO knowledge_nodes
+    `INSERT OR IGNORE INTO knowledge_nodes
        (id, topic_id, parent_id, label, one_liner, concept_type, importance, difficulty,
         estimated_time_minutes, state, content_loaded, leaf, level, created_at)
      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,

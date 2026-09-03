@@ -27,6 +27,7 @@ interface LLMConfig {
   numCtx: number;
   timeoutMs: number;
   provider: "ollama" | "openai" | "auto";
+  isMock: boolean;
 }
 
 /** Таймаут одного HTTP-запроса к LLM (мс): env LLM_TIMEOUT_MS или 180 с. */
@@ -93,10 +94,16 @@ function readLLMConfig(): LLMConfig {
       ? Math.trunc(Number(seedRaw))
       : null;
 
+  const isMock = (process.env.LLM_MOCK ?? "") === "1" || (process.env.LLM_MOCK ?? "").toLowerCase() === "true";
+
   const isOllama = provider === "ollama" || (provider === "auto" && isOllamaBaseUrl(baseUrl));
 
-  if (!apiKey && !isOllama) {
-    throw new Error("LLM_API_KEY (или OPENAI_API_KEY) не задан");
+  // Режим демо без ключа: LLM_MOCK=1 включает офлайн-режим, в котором
+  // callLLM возвращает заглушку, а движки используют собственные фолбэки.
+  if (!apiKey && !isOllama && !isMock) {
+    throw new Error(
+      "LLM_API_KEY (или OPENAI_API_KEY) не задан. Задайте ключ либо включите офлайн-режим LLM_MOCK=1.",
+    );
   }
   if (temperature < 0 || temperature > 2) {
     throw new Error("LLM_TEMPERATURE должен быть числом в диапазоне 0..2");
@@ -117,6 +124,7 @@ function readLLMConfig(): LLMConfig {
     numCtx,
     timeoutMs: resolveTimeoutMs(process.env.LLM_TIMEOUT_MS),
     provider,
+    isMock,
   };
 }
 
@@ -169,6 +177,17 @@ export class LLMRateLimitError extends Error {
     this.name = "LLMRateLimitError";
     this.status = status;
     this.retryAfter = retryAfter;
+  }
+}
+
+/**
+ * Бросается в офлайн-режиме (LLM_MOCK=1). Движки ловят его и используют
+ * встроенные фолбэки; планировщик не делает лишних повторных попыток.
+ */
+export class LLMMockError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LLMMockError";
   }
 }
 
@@ -408,6 +427,14 @@ export async function callLLM(
   options: CallLLMOptions = {},
 ): Promise<ILLMResult> {
   const cfg = readLLMConfig();
+
+  // Офлайн-режим: вместо сетевых вызовов сообщаем движкам, что LLM недоступен.
+  // Движки ловят эту ошибку и используют встроенные детерминированные фолбэки.
+  if (cfg.isMock) {
+    throw new LLMMockError(
+      "Офлайн-режим (LLM_MOCK=1): LLM недоступен, используются встроенные заготовки.",
+    );
+  }
 
   const providerKey = cfg.baseUrl;
   const now = Date.now();

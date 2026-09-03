@@ -1,6 +1,7 @@
 import {
   callLLM,
   getModelsForTier,
+  LLMMockError,
   LLMRateLimitError,
   LLMRetriesExhaustedError,
   type ModelTier,
@@ -93,6 +94,8 @@ export function retryDelayMs(err: Error, attempt: number): number {
 
 export function shouldRetry(err: Error, attempt: number, maxRetries: number): boolean {
   if (attempt >= maxRetries) return false;
+  // В офлайн-режиме повторные попытки бессмысленны — сразу переходим к фолбэку.
+  if (err instanceof LLMMockError) return false;
   const status = extractStatus(err);
   if (status !== null && GATEWAY_RETRY_STATUSES.has(status) && attempt >= 2) {
     return false;

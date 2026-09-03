@@ -179,6 +179,9 @@ export function FocusScreen() {
   const [tocOpen, setTocOpen] = useState(true);
   const [treeOpen, setTreeOpen] = useState(true);
   const [explain, setExplain] = useState<{ term: string; explanation?: string; loading: boolean } | null>(null);
+  // Узлы, для которых автогенерация контента уже запрошена (успех или ошибка),
+  // чтобы при сбое не уйти в бесконечный цикл повторных запросов контента.
+  const [attemptedContent, setAttemptedContent] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     const fromState = (location.state as { nodeId?: string } | null)?.nodeId;
@@ -194,12 +197,18 @@ export function FocusScreen() {
       selected &&
       !selected.details &&
       selectedId &&
-      loadingNodeId !== selectedId
+      loadingNodeId !== selectedId &&
+      !attemptedContent.has(selectedId)
     ) {
       setLoadingNodeId(selectedId);
-      generateContent(selectedId, String(selected.level)).finally(() => setLoadingNodeId(null));
+      generateContent(selectedId)
+        .catch(() => {})
+        .finally(() => {
+          setLoadingNodeId(null);
+          setAttemptedContent((prev) => new Set(prev).add(selectedId));
+        });
     }
-  }, [selected, selectedId, generateContent, loadingNodeId]);
+  }, [selected, selectedId, generateContent, loadingNodeId, attemptedContent]);
 
   const go = useCallback(
     (delta: number) => {
@@ -322,7 +331,7 @@ export function FocusScreen() {
                 )}
                 {selected.details && selected.details.length > 400 && (
                   <div className="mt-6">
-                    <Button variant="secondary" size="sm" onClick={() => generateContent(selected.id, String(selected.level))}>
+                    <Button variant="secondary" size="sm" onClick={() => generateContent(selected.id)}>
                       Обновить контент
                     </Button>
                   </div>

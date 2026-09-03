@@ -29,12 +29,19 @@ export const PROMPT_CONTENT = `# Роль
 Путь: {{node_path}}
 Соседи: {{siblings}}
 {{audience_block}}
+{{goal_block}}
+{{root_block}}
+{{root_formula_ban}}
 {{ontology_context}}
 # Задача
 Опиши узел «{{node_title}}»:
 
 - one_liner — СУТЬ в одном предложении (макс. 120 символов). Без воды, без вводных фраз. Прямо к делу.
-- details — КРАТКАЯ справка: 1–2 предложения (макс. 500 символов). Факты, цифры, ключевые свойства. Никаких рассуждений. Если понятие включает формулу или математическое выражение, записывай его в LaTeX: инлайн — $формула$, блочная — $$формула$$.
+- details — КРАТКАЯ справка. {{details_instruction}}
+- analogy — НЕОБЯЗАТЕЛЬНО: бытовая метафора, 1 предложение (макс. 120 символов). Если метафора не приходит в голову — верни "".
+- relations — СВЯЗИ с другими понятиями (см. формат ниже). Генерируй 2–4 связи, если они есть.
+
+{{details_structure_block}}
 - analogy — НЕОБЯЗАТЕЛЬНО: бытовая метафора, 1 предложение (макс. 120 символов). Если метафора не приходит в голову — верни "".
 - relations — СВЯЗИ с другими понятиями (см. формат ниже). Генерируй 2–4 связи, если они есть.
 
@@ -75,6 +82,7 @@ export const PROMPT_CONTENT = `# Роль
 - Не смешивай semantic_axis — не описывай архитектуру как процесс и наоборот.
 - Не противоречь parent, ancestors и siblings.
 ${NO_META_RULE}
+{{anti_jargon_block}}
 ${ALPHABET_RULE}
 {{sources_block}}
 # Язык
@@ -107,7 +115,13 @@ export interface IContentPromptContext {
     oneLiner?: string;
   };
   siblings: string[];
-  level?: string;
+  /** KnowledgeLevel аудитории (beginner|intermediate|expert) — от уровня цели темы. */
+  knowledgeLevel?: string;
+  /** Цель изучения темы (overview|exam|deep). */
+  goal?: string;
+  /** Уровень узла в дереве (1 = корень). */
+  nodeLevel?: number;
+  isRoot?: boolean;
   /** §64: when true, LLM is asked to include source citations. */
   isCriticalDomain?: boolean;
   ontologyContext?: {
@@ -120,10 +134,42 @@ export interface IContentPromptContext {
 }
 
 const LEVEL_TONES: Record<string, string> = {
-  beginner: "Пиши максимально доступно для новичка, без профессионального жаргона.",
-  intermediate: "Пиши для знакомого с основами читателя.",
-  expert: "Пиши для специалиста, используй точную терминологию.",
+  beginner: "Пиши максимально доступно для новичка, без профессионального жаргона. Каждый специальный термин объясняй сразу простыми словами.",
+  intermediate: "Пиши для знакомого с основами читателя. Термины раскрывай через интуицию: сначала «как работает», затем термин.",
+  expert: "Пиши для специалиста, используй точную терминологию. Можно опускать базовые объяснения.",
 };
+
+const GOAL_HINTS: Record<string, string> = {
+  overview: "Цель — общий обзор: опиши суть и место понятия в теме, без глубоких деталей.",
+  exam: "Цель — подготовка к экзамену: делай акцент на ключевых фактах, определениях и формулировках.",
+  deep: "Цель — глубокое изучение: кроме сути кратко обозначь механизм/устройство и подтемы, которые стоит разобрать.",
+};
+
+const ROOT_GUIDANCE = `\n# Корневой узел (обзор темы)
+Это корневой/обзорный узел. СТРОГО соблюдай:
+- ТОЛЬКО интуиция «как это работает» + краткий перечень подтем (roadmap «что разберём дальше»).
+- НЕ углубляйся в механику, математику и формулы на корневом узле — это задача дочерних узлов.
+- Для цели deep особенно: покажи «зачем» и «что дальше», а не сжатую сводку.
+- Не противоречь дочерним узлам — не опережай их content.`;
+
+const ANTI_JARGON_RULE = `\n# Антижаргон (обязательное правило)
+- КАЖДЫЙ специальный термин (например «градиент лог-плотности», «score», «марковская цепь», «максимизация правдоподобия») объясни простыми словами в ТОМ ЖЕ предложении.
+- ЗАПРЕЩЕНО использовать термин, который ты не можешь объяснить простыми словами без жаргона.
+- ЗАПРЕЩЕНО давать плотную энциклопедическую выжимку: обучай читателя, а не перечисляй термины.
+- Если термин не влияет на понимание сути — опусти его.`;
+
+const DETAILS_INSTRUCTION = `1–2 предложения (макс. 500 символов). Факты, цифры, ключевые свойства. Если понятие включает формулу или математическое выражение, записывай его в LaTeX: инлайн — $формула$, блочная — $$формула$$.`;
+
+/** Двухчастная структура details для non-expert + цель deep: «Интуиция» + «Механика». */
+const TWO_PART_DETAILS_BLOCK = `\n# Структура подробностей
+Для этой аудитории и цели (intermediate/beginner + deep) оформи details в ДВА абзаца, разделённых пустой строкой (\n\n), начинающихся со следующих заголовков:
+1. «Интуиция:» — 1–2 предложения простыми словами, БЕЗ терминов: как это работает.
+2. «Механика:» — ключевые термины/механизм, но КАЖДЫЙ термин сопровождай однострочным пояснением сразу после него.
+Не вылезай за лимит символов.`;
+
+/** Запрет голых формул в корневом узле. */
+const ROOT_FORMULA_BAN = `\n# Формулы на корневом узле
+Это корневой узел. НЕ пиши голые математические формулы. Опиши смысл словами (например: «сеть по более зашумленному кадру восстанавливает чуть менее зашумлённый»). Формулы и математика — на дочерние узлы.`;
 
 export function buildContentPrompt(ctx: IContentPromptContext): string {
   const sanitizedTopic = ctx.rootTopic
@@ -133,9 +179,27 @@ export function buildContentPrompt(ctx: IContentPromptContext): string {
     .trim();
 
   const tone =
-    ctx.level && LEVEL_TONES[ctx.level]
-      ? `\n# Аудитория\n${LEVEL_TONES[ctx.level]}\n`
+    ctx.knowledgeLevel && LEVEL_TONES[ctx.knowledgeLevel]
+      ? `\n# Аудитория\n${LEVEL_TONES[ctx.knowledgeLevel]}\n`
       : "";
+
+  const goalBlock = ctx.goal && GOAL_HINTS[ctx.goal] ? `\n# Цель\n${GOAL_HINTS[ctx.goal]}\n` : "";
+
+  const rootBlock = ctx.isRoot || ctx.nodeLevel === 1 ? ROOT_GUIDANCE : "";
+
+  const antiJargon =
+    ctx.knowledgeLevel && ctx.knowledgeLevel !== "expert" ? ANTI_JARGON_RULE : "";
+
+  const detailsInstruction = DETAILS_INSTRUCTION;
+
+  // Двухчастная структура «Интуиция + Механика» — для non-expert + цель deep
+  const twoPartDetails =
+    ctx.knowledgeLevel && ctx.knowledgeLevel !== "expert" && ctx.goal === "deep"
+      ? TWO_PART_DETAILS_BLOCK
+      : "";
+
+  // На корневом узле голые формулы запрещены
+  const rootFormulaBan = ctx.isRoot || ctx.nodeLevel === 1 ? ROOT_FORMULA_BAN : "";
 
   let ontologyBlock = "";
   if (ctx.ontologyContext) {
@@ -165,6 +229,12 @@ export function buildContentPrompt(ctx: IContentPromptContext): string {
 
   return PROMPT_CONTENT
     .replace("{{audience_block}}", tone)
+    .replace("{{goal_block}}", goalBlock)
+    .replace("{{root_block}}", rootBlock)
+    .replace("{{anti_jargon_block}}", antiJargon)
+    .replace("{{details_instruction}}", detailsInstruction)
+    .replace("{{details_structure_block}}", twoPartDetails)
+    .replace("{{root_formula_ban}}", rootFormulaBan)
     .replace("{{ontology_context}}", ontologyBlock)
     .replace("{{root_topic}}", sanitizedTopic)
     .replace("{{node_path}}", ctx.nodePath.join(" → "))

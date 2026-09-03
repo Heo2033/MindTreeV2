@@ -7,6 +7,8 @@ export interface Curriculum {
 export interface CurriculumItem {
   id: string;
   nodeId: string;
+  /** Читаемое название понятия (label узла дерева знаний). */
+  label?: string;
   order: number;
   type: "explain" | "example" | "recall" | "apply" | "assessment" | "synthesis";
   estimatedMinutes: number;

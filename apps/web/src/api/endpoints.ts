@@ -55,7 +55,13 @@ export interface TreeGenDone {
 
 export const pipelineApi = {
   generate(
-    body: { topic_id?: string; query: string; goal?: string; level?: string },
+    body: {
+      topic_id?: string;
+      query: string;
+      goal?: string;
+      level?: string;
+      time_budget_minutes?: number;
+    },
   ): SSEStream {
     return postSSE("/api/pipeline/generate", body);
   },
@@ -69,7 +75,7 @@ export const treeApi = {
       method: "POST",
       json: { topic_id, node_id },
     }),
-  content: (topic_id: string, node_id: string, level?: string) =>
+  content: (topic_id: string, node_id: string) =>
     request<{
       node_id: string;
       one_liner: string;
@@ -77,7 +83,7 @@ export const treeApi = {
       analogy?: string;
       relations: unknown[];
       sources?: string[];
-    }>("/api/tree/content", { method: "POST", json: { topic_id, node_id, level } }),
+    }>("/api/tree/content", { method: "POST", json: { topic_id, node_id } }),
   fillContent: (topic_id: string, level?: number, limit?: number) =>
     request<{ completed: number; results: Array<{ node_id: string; ok: boolean }> }>(
       "/api/tree/fill-content",

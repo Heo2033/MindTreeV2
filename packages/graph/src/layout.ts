@@ -95,7 +95,25 @@ function computeRadialPositions(tree: KnowledgeNode[]): Map<string, GraphPositio
   }
 
   const roots = tree.filter((n) => !n.parentId).map((n) => n.id);
-  if (roots.length === 0) return result;
+
+  // Повреждённое дерево без корней (например, все узлы «сироты» — ссылаются на
+  // отсутствующий parentId): всё равно назначаем позиции, чтобы рендер не падал.
+  if (roots.length === 0) {
+    const byLevel = new Map<number, string[]>();
+    for (const n of tree) {
+      if (!byLevel.has(n.level)) byLevel.set(n.level, []);
+      byLevel.get(n.level)!.push(n.id);
+    }
+    for (const [lv, ids] of byLevel) {
+      const r = Math.max(MIN_RING_RADIUS, (lv <= 1 ? 0 : MIN_RING_RADIUS) + (lv - 1) * RING_STEP);
+      const total = ids.length || 1;
+      ids.forEach((id, i) => {
+        const theta = (i / total) * TAU;
+        result.set(id, { x: r * Math.cos(theta), y: r * Math.sin(theta) });
+      });
+    }
+    return result;
+  }
 
   // Уровни и их радиусы: по числу узлов на уровне, с учётом минимального роста колец.
   const levels = new Map<number, string[]>();
@@ -214,8 +232,10 @@ export function convertTreeToGraphFlow(tree: KnowledgeNode[]): GraphFlow {
 
   for (const n of tree) {
     if (!n.parentId) continue;
-    const sp = positions.get(n.parentId)!;
-    const tp = positions.get(n.id)!;
+    const sp = positions.get(n.parentId);
+    const tp = positions.get(n.id);
+    // Родитель/узел без позиции (битый parentId или сирота) — ребро пропускаем.
+    if (!sp || !tp) continue;
     const handles = getEdgeHandles(sp.x, sp.y, tp.x, tp.y);
     flowEdges.push({
       id: `${n.parentId}-${n.id}`,
@@ -234,9 +254,10 @@ export function convertTreeToGraphFlow(tree: KnowledgeNode[]): GraphFlow {
       if (!nodeIds.has(rel.from) || !nodeIds.has(rel.to)) continue;
       const eid = `rel:${rel.from}-${rel.to}`;
       if (existingIds.has(eid)) continue;
+      const sp = positions.get(rel.from);
+      const tp = positions.get(rel.to);
+      if (!sp || !tp) continue;
       existingIds.add(eid);
-      const sp = positions.get(rel.from)!;
-      const tp = positions.get(rel.to)!;
       const handles = getEdgeHandles(sp.x, sp.y, tp.x, tp.y);
       const color = RELATION_COLORS[rel.type] ?? "#64748b";
       flowEdges.push({

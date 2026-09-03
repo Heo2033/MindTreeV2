@@ -24,6 +24,7 @@ export const PROMPT_EXPAND = `# Роль
 - Если родитель описывает класс архитектур или подходов, дочерние узлы должны покрывать все основные варианты.
 - Дети должны быть в той же semantic_axis, что и родитель, или в смежной. Не смешивай оси (архитектура ≠ процесс ≠ сэмплинг).
 - Для каждого ребенка укажи semantic_axis и conceptType.
+- Для каждого ребенка укажи метаданные: importance (0..1), difficulty (0..1), estimated_time_minutes (целое), prerequisites (массив id понятий из этого дерева, на которые опирается), relations (массив {to, type} или []).
 ${NO_META_RULE}
 ${ALPHABET_RULE}
 
@@ -37,8 +38,8 @@ ${ALPHABET_RULE}
     {
       "id": "id_родителя",
       "children": [
-        {"id": "n_new1", "title": "Название 1", "parentId": "id_родителя", "conceptType": "concept", "semantic_axis": "architecture"},
-        {"id": "n_new2", "title": "Название 2", "parentId": "id_родителя", "conceptType": "mechanism", "semantic_axis": "process"}
+        {"id": "n_new1", "title": "Название 1", "parentId": "id_родителя", "conceptType": "concept", "semantic_axis": "architecture", "importance": 0.7, "difficulty": 0.5, "estimated_time_minutes": 12, "prerequisites": ["n2_a"], "relations": [{"to": "n2_a", "type": "requires"}]},
+        {"id": "n_new2", "title": "Название 2", "parentId": "id_родителя", "conceptType": "mechanism", "semantic_axis": "process", "importance": 0.6, "difficulty": 0.8, "estimated_time_minutes": 15, "prerequisites": ["n_new1"], "relations": [{"to": "n_new1", "type": "enables"}]}
       ]
     }
   ]

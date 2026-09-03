@@ -19,6 +19,11 @@ export const PROMPT_VALIDATE = `# Роль
 11. **FORBIDDEN_INTERPRETATION** — узел использует запрещённую интерпретацию из forbidden_interpretations.
 12. **SCOPE_ERROR** — условное утверждение превращено в абсолютное.
 13. **CAUSAL_ERROR** — неверная причинно-следственная связь.
+14. **MISSING_PREREQUISITE** — узел опирается (в relations/prerequisites) на понятие, которого нет в дереве, или мысль очевидно требует понятия, отсутствующего в предках.
+15. **CIRCULAR_DEPENDENCY** — обнаружен цикл в связях requires/depends_on/enables.
+16. **UNREALISTIC_TIMING** — суммарная оценка estimated_time_minutes одного узла или родителя с детьми выходит за разумные пределы (например, > 120 мин на узел).
+17. **OVERLY_BROAD** — узел слишком глобален/расплывчат для своего уровня и его логично расширить на детей.
+18. **IRRELEVANT** — узел не относится к теме/цели дерева.
 
 ${NO_META_RULE}
 ${ALPHABET_RULE}
@@ -71,6 +76,11 @@ export const VALIDATION_ISSUE_TYPES = [
   "FORBIDDEN_INTERPRETATION",
   "SCOPE_ERROR",
   "CAUSAL_ERROR",
+  "MISSING_PREREQUISITE",
+  "CIRCULAR_DEPENDENCY",
+  "UNREALISTIC_TIMING",
+  "OVERLY_BROAD",
+  "IRRELEVANT",
 ] as const;
 
 export type ValidationIssueType = (typeof VALIDATION_ISSUE_TYPES)[number];

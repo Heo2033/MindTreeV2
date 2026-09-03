@@ -15,6 +15,7 @@ const TABS = [
   { to: "milestones", label: "Путь" },
   { to: "review", label: "Повторение" },
   { to: "analytics", label: "Метрики" },
+  { to: "final", label: "Итоговый тест" },
 ];
 
 const GOAL_OPTIONS = [

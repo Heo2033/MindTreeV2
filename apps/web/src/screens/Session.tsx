@@ -39,6 +39,7 @@ export function SessionScreen() {
     loading,
     error,
     createSession,
+    resume,
     startStudy,
     ensureActivity,
     answerStep,
@@ -54,13 +55,25 @@ export function SessionScreen() {
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [answerText, setAnswerText] = useState("");
   const [showPlan, setShowPlan] = useState(true);
+  const [finalizeError, setFinalizeError] = useState<string | null>(null);
+  const [advancing, setAdvancing] = useState(false);
 
   // загрузка активности при смене шага
+  // Гвард на error: не зацикливать ensureActivity, когда текущий концепт не найден
+  // (например, после завершения последнего концепта до перехода на итоговый тест).
   useEffect(() => {
-    if (session && !activity && !loading) {
+    if (session && !activity && !loading && !error && !advancing) {
       void ensureActivity();
     }
-  }, [session?.id, activity, loading]);
+  }, [session?.id, activity, loading, error, advancing]);
+
+  // Восстановление сессии после перезагрузки/персиста: session есть, а currentItem ещё нет.
+  useEffect(() => {
+    if (session && !currentItem && !loading && !error) {
+      void resume();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session?.id]);
 
   async function onStart() {
     if (!topicId) return;
@@ -69,15 +82,19 @@ export function SessionScreen() {
       await createSession(topicId, goal, undefined, Number(budget));
     } catch {
       // ошибка уже в сторе
+    } finally {
+      setBusy(false);
     }
-    setBusy(false);
   }
 
   async function onStudyFirst() {
     if (!currentItem?.nodeId) return;
     setBusy(true);
-    await startStudy(currentItem.nodeId);
-    setBusy(false);
+    try {
+      await startStudy(currentItem.nodeId);
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function onAnswer() {
@@ -88,32 +105,55 @@ export function SessionScreen() {
     const answer =
       step.type === "recall" ? String(selectedIndex) : answerText;
     setBusy(true);
-    await answerStep(activity.currentStep, answer);
-    setSelectedIndex(null);
-    setAnswerText("");
-    setBusy(false);
+    try {
+      await answerStep(activity.currentStep, answer);
+    } finally {
+      setSelectedIndex(null);
+      setAnswerText("");
+      setBusy(false);
+    }
   }
 
   async function onClearFeedback() {
     clearAnsweredView();
   }
 
+  // Нажатие в блоке «все шаги пройдены»: следующий концепт либо итоговый тест.
   async function onComplete() {
+    // На последнем концепте «Завершить сессию» уводит сразу на итоговый тест.
+    if (session && currentIndex >= session.curriculum.items.length - 1) {
+      return onFinalize();
+    }
     if (!currentItem) return;
     setBusy(true);
-    await completeConcept(currentItem.id, currentItem.nodeId);
-    if (topicId) await loadTopic(topicId);
-    setSelectedIndex(null);
-    setAnswerText("");
-    setBusy(false);
+    setAdvancing(true);
+    setFinalizeError(null);
+    try {
+      await completeConcept(currentItem.id, currentItem.nodeId);
+      if (topicId) await loadTopic(topicId);
+    } finally {
+      setSelectedIndex(null);
+      setAnswerText("");
+      setBusy(false);
+      setAdvancing(false);
+    }
   }
 
   async function onFinalize() {
     setBusy(true);
-    const res = await finalize();
-    setBusy(false);
-    if (res && typeof res === "object" && "assessmentId" in res && res.assessmentId) {
-      navigate("../final", { state: { assessmentId: res.assessmentId } });
+    setAdvancing(true);
+    setFinalizeError(null);
+    try {
+      const res = await finalize();
+      if (res && typeof res === "object" && "assessmentId" in res && res.assessmentId) {
+        navigate("../final", { state: { assessmentId: res.assessmentId } });
+      } else if (!error) {
+        // Ошибка не ушла в стор (напр. ответ без assessmentId) — показываем локально.
+        setFinalizeError("Не удалось завершить сессию: итоговая проверка не была создана. Попробуйте ещё раз.");
+      }
+    } finally {
+      setBusy(false);
+      setAdvancing(false);
     }
   }
 
@@ -246,7 +286,7 @@ export function SessionScreen() {
                       {done ? "✓" : i + 1}
                     </span>
                     <div className="min-w-0 flex-1">
-                      <div className="truncate text-sm font-medium text-ink">{it.nodeId}</div>
+                      <div className="truncate text-sm font-medium text-ink">{it.label ?? it.nodeId}</div>
                       {it.reason && <div className="truncate text-xs text-ink-4">{it.reason}</div>}
                     </div>
                     <span className="shrink-0 text-xs tabular-nums text-ink-4">{it.estimatedMinutes}м</span>
@@ -281,6 +321,7 @@ export function SessionScreen() {
       {/* Body */}
       <div className="flex-1 px-6 py-6">
         {error && <div className="mb-4"><ErrorBanner message={error} /></div>}
+        {finalizeError && <div className="mb-4"><ErrorBanner message={finalizeError} /></div>}
 
         {isActivityLoading && (
           <div className="flex flex-col items-center gap-3 py-16">
@@ -315,6 +356,11 @@ export function SessionScreen() {
         {!isActivityLoading && !feedbackViewStep && currentStep && !isComplete && (
           <div className="mx-auto max-w-2xl space-y-4">
             <Badge>{TYPE_LABEL[currentStep.type] ?? currentStep.type}</Badge>
+            {activity?.nodeLabel && (
+              <p className="text-sm font-medium text-ink-4">
+                Концепт: {activity.nodeLabel}
+              </p>
+            )}
             <h2 className="text-xl font-bold text-ink">{currentStep.title || TYPE_LABEL[currentStep.type]}</h2>
 
             {/* explain / example — body */}
@@ -388,8 +434,20 @@ export function SessionScreen() {
           </div>
         )}
 
-        {/* All steps complete — prompt completeConcept */}
-        {!isActivityLoading && isComplete && (
+        {/* Генерация следующего концепта / итогового теста */}
+        {!isActivityLoading && advancing && (
+          <div className="flex flex-col items-center gap-4 py-16 text-center">
+            <Spinner />
+            <p className="text-sm text-ink-4">
+              {currentIndex >= session.curriculum.items.length - 1
+                ? "Формируем итоговый тест…"
+                : "Генерируем следующий концепт…"}
+            </p>
+          </div>
+        )}
+
+        {/* All steps complete — prompt completeConcept / finalize */}
+        {!isActivityLoading && !advancing && isComplete && (
           <div className="flex flex-col items-center gap-4 py-16 text-center">
             <p className="text-ink-2">Все шаги этого концепта пройдены.</p>
             <Button disabled={busy} onClick={onComplete}>
@@ -398,7 +456,19 @@ export function SessionScreen() {
           </div>
         )}
 
-        {!isActivityLoading && !activity && !error && (
+        {/* Все концепты завершены — предложить итоговый тест */}
+        {!isActivityLoading && !advancing && !activity && !error &&
+          session && currentIndex >= session.curriculum.items.length - 1 && (
+          <div className="flex flex-col items-center gap-4 py-16 text-center">
+            <p className="text-ink-2">Все концепты сессии пройдены.</p>
+            <Button disabled={busy} onClick={onFinalize}>
+              Пройти итоговый тест
+            </Button>
+          </div>
+        )}
+
+        {!isActivityLoading && !activity && !error &&
+          session && currentIndex < session.curriculum.items.length - 1 && (
           <div className="flex flex-col items-center gap-4 py-16 text-center">
             <p className="text-ink-4">Не удалось загрузить активность.</p>
             <Button variant="secondary" onClick={() => void onStudyFirst()}>

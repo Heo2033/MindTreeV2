@@ -15,6 +15,7 @@ import { EventBus } from "./EventBus.js";
 import { getScheduler } from "../llm/scheduler.js";
 import { parseLLMJson } from "../llm/client.js";
 import { buildContentPrompt, isCriticalDomain } from "../prompts/content.js";
+import { masteryLevelToKnowledgeLevel } from "../prompts/structure.js";
 import { readingOrder } from "../lib/treeUtils/reading.js";
 
 export interface CreateSessionInput {
@@ -161,7 +162,10 @@ export class LearningSessionEngine {
         rootTopic: topicName,
         nodePath: path,
         siblings,
-        level: this.learnerModel.getCurrentLevel(session.topicId),
+        knowledgeLevel: masteryLevelToKnowledgeLevel(this.learnerModel.getCurrentLevel(session.topicId)),
+        goal: session.goal,
+        nodeLevel: Number(nodeRow.level),
+        isRoot: Number(nodeRow.level) <= 1 && !nodeRow.parent_id,
         isCriticalDomain: isCriticalDomain(topicName, path),
         ontologyContext: {
           canonical_definition: node.oneLiner,
@@ -249,13 +253,17 @@ export class LearningSessionEngine {
     const items = session.curriculum.items.map((it) =>
       it.id === itemId ? { ...it, status: "completed" as const } : it,
     );
-    const nextIdx = Math.min(session.currentIndex + 1, items.length);
+    // Текущий индекс не должен выходить за пределы последнего концепта:
+    // при завершении последнего шага остаёмся на нём (getCurrentItem корректно
+    // вернёт item, а дальнейшую финализацию инициирует сам UI через /finalize).
+    const maxIdx = Math.max(0, items.length - 1);
+    const nextIdx = Math.min(session.currentIndex + 1, maxIdx);
     const completed = items.filter((i) => i.status === "completed").length;
     const progress = items.length > 0 ? completed / items.length : 0;
 
     getDb()
       .prepare(
-        `UPDATE learning_sessions SET curriculum_json = ?, current_index = ? WHERE id = ?`,
+        `UPDATE learning_sessions SET curriculum_json = ?, current_index = ?, activity_json = NULL, current_activity_step = 0 WHERE id = ?`,
       )
       .run(JSON.stringify({ ...session.curriculum, items }), nextIdx, sessionId);
 

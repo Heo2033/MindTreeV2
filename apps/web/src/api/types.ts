@@ -57,6 +57,7 @@ export interface LearningEventRow {
 export interface CurriculumItemDto {
   id: string;
   nodeId: string;
+  label?: string;
   order: number;
   type:
     | "explain"

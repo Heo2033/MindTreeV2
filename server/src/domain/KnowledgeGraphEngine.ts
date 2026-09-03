@@ -1,4 +1,8 @@
-import type { KnowledgeNode } from "@mindtree/types";
+import type {
+  KnowledgeNode,
+  Relation,
+  RelationType,
+} from "@mindtree/types";
 import { getScheduler } from "../llm/scheduler.js";
 import { parseLLMJson, LLMMockError, LLMRetriesExhaustedError } from "../llm/client.js";
 import {
@@ -26,6 +30,12 @@ export interface NodeDraft {
   semantic_axis?: string;
   conceptType?: string;
   forbidden_interpretations?: string[];
+  /** §20/§52: метаданные для приоритизации и curriculum engine. */
+  importance?: number;
+  difficulty?: number;
+  estimatedMinutes?: number;
+  prerequisites?: string[];
+  relations?: Relation[];
 }
 
 export interface TreeBuildResult {
@@ -46,18 +56,19 @@ export class KnowledgeGraphEngine {
    */
   async generate(
     query: string,
-    options: { goal?: string; level?: string } = {},
+    options: { goal?: string; level?: string; timeBudgetMinutes?: number } = {},
     onProgress?: ProgressCallback,
   ): Promise<TreeBuildResult> {
     const scheduler = getScheduler();
     const warnings: string[] = [];
 
-    onProgress?.("structure", "Генерация скелета дерева знаний...");
+    onProgress?.("structure", "Генерация базового скелета дерева знаний...");
     let nodes: NodeDraft[] = [];
     try {
       const structurePrompt = buildStructurePrompt(query, {
         goal: options.goal as IStructurePromptOptions["goal"],
         level: options.level as IStructurePromptOptions["level"],
+        timeBudgetMinutes: options.timeBudgetMinutes,
       });
       const { result } = await scheduler.execute(
         "structure",
@@ -84,24 +95,9 @@ export class KnowledgeGraphEngine {
       }
     }
 
-    // expand to depth
-    let maxLevel = maxLevelOf(nodes);
-    onProgress?.("expand", "Углубление веток...");
-    try {
-      for (let level = maxLevel; level < MAX_DEPTH; level++) {
-        const expandable = nodes.filter((n) => n.level === level && needsExpand(n));
-        if (expandable.length === 0) break;
-        const expanded = await this.expandNodes(query, nodes, expandable, onProgress);
-        if (expanded.length > 0) {
-          nodes = [...nodes, ...expanded];
-          maxLevel = maxLevelOf(nodes);
-        } else {
-          break;
-        }
-      }
-    } catch (err) {
-      warnings.push(`Углубление не завершено: ${err instanceof Error ? err.message : String(err)}`);
-    }
+    // Базовая генерация даёт shallow-скелет (L1–L2).
+    // Углубление выполняется выборочно по запросу пользователя (expandNode),
+    // поэтому автоматическое расширение до MAX_DEPTH здесь не выполняется.
 
     // validate
     onProgress?.("validate", "Проверка дерева на дубли и структуру...");
@@ -202,6 +198,7 @@ export class KnowledgeGraphEngine {
           forbidden_interpretations: Array.isArray(c.forbidden_interpretations)
             ? (c.forbidden_interpretations as unknown[]).filter((f): f is string => typeof f === "string")
             : undefined,
+          ...parseNodeMetadata(c),
         });
       }
     }
@@ -336,7 +333,10 @@ export class KnowledgeGraphEngine {
       canonical_definition?: string;
       semantic_axis?: string;
       forbidden_interpretations?: string[];
-      level?: string;
+      knowledgeLevel?: string;
+      goal?: string;
+      nodeLevel?: number;
+      isRoot?: boolean;
     },
   ): Promise<{ one_liner: string; details: string; analogy?: string; relations: unknown[]; sources?: string[] }> {
     const scheduler = getScheduler();
@@ -346,7 +346,10 @@ export class KnowledgeGraphEngine {
       rootTopic: query,
       nodePath: context.nodePath,
       siblings: context.siblings,
-      level: context.level,
+      knowledgeLevel: context.knowledgeLevel,
+      goal: context.goal,
+      nodeLevel: context.nodeLevel,
+      isRoot: context.isRoot,
       isCriticalDomain: isCriticalDomain(query, context.nodePath),
       ontologyContext: {
         canonical_definition: context.canonical_definition,
@@ -387,9 +390,6 @@ export class KnowledgeGraphEngine {
       .get(nodeId, topicId) as Record<string, unknown> | undefined;
     if (!nodeRow) throw new Error("Узел не найден");
 
-    if (Number(nodeRow.leaf) === 1) {
-      throw new Error("Узел является листом и не требует расширения");
-    }
     const nodeLevel = Number(nodeRow.level);
     if (nodeLevel >= MAX_DEPTH) {
       throw new Error(`Достигнута максимальная глубина (${MAX_DEPTH})`);
@@ -423,27 +423,40 @@ export class KnowledgeGraphEngine {
       [target],
     );
 
+    // Согласование с полным деревом (§63): отбрасываем дубли уже существующих
+    // понятий и коллизии id, чтобы не вносить противоречия.
+    const consistent = consistencyCheckAgainstTree(allNodes, added);
+
     const insert = db.prepare(
       `INSERT OR IGNORE INTO knowledge_nodes
          (id, topic_id, parent_id, label, one_liner, concept_type, importance, difficulty,
-          estimated_time_minutes, state, content_loaded, leaf, level, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          estimated_time_minutes, relations_json, state, content_loaded, leaf, level, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     );
+
+    const relationByTo = new Map<string, Relation[]>();
+    for (const c of consistent.nodes) {
+      if (c.relations && c.relations.length > 0) {
+        relationByTo.set(c.id, c.relations);
+      }
+    }
 
     const tx = db.transaction((items: NodeDraft[]) => {
       for (const c of items) {
         const childLevel = nodeLevel + 1;
         const leaf = childLevel >= MAX_DEPTH ? 1 : 0;
+        const relations = relationByTo.get(c.id) ?? [];
         insert.run(
           c.id,
           topicId,
           nodeId,
           c.title.trim(),
-          "",
+          c.canonical_definition ?? "",
           c.conceptType ? String(c.conceptType) : null,
-          0.5,
-          0.5,
-          5,
+          c.importance ?? 0.5,
+          c.difficulty ?? 0.5,
+          c.estimatedMinutes ?? 5,
+          JSON.stringify(relations),
           "structure_generated",
           0,
           leaf,
@@ -451,12 +464,17 @@ export class KnowledgeGraphEngine {
           new Date().toISOString(),
         );
       }
-      // update parent state
-      db.prepare("UPDATE knowledge_nodes SET state = 'expanded' WHERE id = ?").run(nodeId);
+      // update parent state; если детей не появилось — узел оказался естественным
+      // листом (терминальным), помечаем его как leaf=1
+      const gotChildren = items.length > 0;
+      db.prepare("UPDATE knowledge_nodes SET state = 'expanded', leaf = ? WHERE id = ?").run(
+        gotChildren ? 0 : 1,
+        nodeId,
+      );
     });
 
-    tx(added);
-    return added;
+    tx(consistent.nodes);
+    return consistent.nodes;
   }
 
   /**
@@ -478,10 +496,15 @@ export class KnowledgeGraphEngine {
       .get(nodeId, topicId) as Record<string, unknown> | undefined;
     if (!nodeRow) throw new Error("Узел не найден");
 
-    const topicRow = db.prepare(`SELECT name FROM topics WHERE id = ?`).get(topicId) as
-      | { name: string }
+    const topicRow = db.prepare(`SELECT name, goal, target_level FROM topics WHERE id = ?`).get(topicId) as
+      | { name: string; goal?: string | null; target_level?: string | null }
       | undefined;
     const rootTopic = topicRow?.name ?? "Тема";
+    const { masteryLevelToKnowledgeLevel } = await import("../prompts/structure.js");
+    const knowledgeLevel =
+      typeof topicRow?.target_level === "string"
+        ? masteryLevelToKnowledgeLevel(topicRow.target_level)
+        : undefined;
 
     const allRows = db
       .prepare(`SELECT * FROM knowledge_nodes WHERE topic_id = ?`)
@@ -509,7 +532,10 @@ export class KnowledgeGraphEngine {
           ? String(nodeRow.one_liner)
           : undefined,
       semantic_axis: nodeRow.concept_type ? String(nodeRow.concept_type) : undefined,
-      level,
+      knowledgeLevel,
+      goal: topicRow?.goal ?? undefined,
+      nodeLevel: Number(nodeRow.level),
+      isRoot: Number(nodeRow.level) <= 1 && !nodeRow.parent_id,
     });
 
     db.prepare(
@@ -557,6 +583,7 @@ function normalizeDrafts(raw: unknown[]): NodeDraft[] {
       forbidden_interpretations: Array.isArray(rec.forbidden_interpretations)
         ? (rec.forbidden_interpretations as unknown[]).filter((f): f is string => typeof f === "string")
         : undefined,
+      ...parseNodeMetadata(rec),
     };
   });
 
@@ -587,13 +614,71 @@ function guessLevel(rec: Record<string, unknown>): number {
   return 2;
 }
 
-function maxLevelOf(nodes: NodeDraft[]): number {
-  return nodes.reduce((max, n) => Math.max(max, n.level), 0);
+/**
+ * Извлекает метаданные узла (importance/difficulty/estimated_time/prerequisites/relations)
+ * из ответа LLM. Возвращает undefined-поля, если значения отсутствуют или невалидны.
+ * relations — массив объектов { to, type, label? }, при невалидной записи пропускается.
+ */
+export function parseNodeMetadata(rec: Record<string, unknown>): Partial<NodeDraft> {
+  const importance = typeof rec.importance === "number" ? clamp01(rec.importance) : undefined;
+  const difficulty = typeof rec.difficulty === "number" ? clamp01(rec.difficulty) : undefined;
+  const estimatedMinutes =
+    typeof rec.estimated_time_minutes === "number" && rec.estimated_time_minutes > 0
+      ? Math.round(rec.estimated_time_minutes)
+      : typeof rec.estimated_time_minutes === "string" &&
+        Number(rec.estimated_time_minutes) > 0
+        ? Math.round(Number(rec.estimated_time_minutes))
+        : undefined;
+
+  const prerequisites = Array.isArray(rec.prerequisites)
+    ? (rec.prerequisites as unknown[]).filter((p): p is string => typeof p === "string")
+    : undefined;
+
+  const relations = Array.isArray(rec.relations)
+    ? (rec.relations as unknown[]).flatMap((rel) => {
+        const r = rel as Record<string, unknown>;
+        if (!r || typeof r.to !== "string" || !r.to) return [];
+        const type = String(r.type ?? "related");
+        return [
+          {
+            from: String(rec.id ?? ""),
+            to: r.to,
+            type: (VALID_RELATION_TYPES.has(type) ? type : "related") as RelationType,
+            label: typeof r.label === "string" && r.label !== "" ? r.label : undefined,
+          } satisfies Relation,
+        ];
+      })
+    : undefined;
+
+  return {
+    ...(importance !== undefined ? { importance } : {}),
+    ...(difficulty !== undefined ? { difficulty } : {}),
+    ...(estimatedMinutes !== undefined ? { estimatedMinutes } : {}),
+    ...(prerequisites !== undefined && prerequisites.length > 0 ? { prerequisites } : {}),
+    ...(relations !== undefined && relations.length > 0 ? { relations } : {}),
+  };
 }
 
-function needsExpand(n: NodeDraft): boolean {
-  // heuristic: nodes that seem to be categories need children
-  return true;
+function clamp01(v: number): number {
+  return Math.min(1, Math.max(0, v));
+}
+
+const VALID_RELATION_TYPES = new Set<string>([
+  "related",
+  "depends_on",
+  "requires",
+  "example_of",
+  "similar_to",
+  "contrasts_with",
+  "causes",
+  "enables",
+  "used_for",
+  "alternative_to",
+]);
+
+
+function maxLevelOf(nodes: NodeDraft[]): number {
+  return nodes.reduce((max, n) => Math.max(max, n.level), 0);
 }
 
 function buildPath(nodes: NodeDraft[], nodeId: string): string[] {
@@ -609,12 +694,67 @@ function buildPath(nodes: NodeDraft[], nodeId: string): string[] {
   return path;
 }
 
-function mergeRepairs(nodes: NodeDraft[], repaired: NodeDraft[]): NodeDraft[] {
-  const repairedIds = new Set(repaired.map((r) => r.id));
-  return [
-    ...nodes.filter((n) => !repairedIds.has(n.id)), // remove repaired nodes
-    ...repaired, // add repaired versions
-  ];
+/**
+ * Согласует новые узлы (дети при расширении) с уже существующим деревом:
+ * - отбрасывает узлы, чьё понятие уже присутствует в дереве (по нормализованному title);
+ * - отбрасывает коллизии id с существующими узлами;
+ * - отбрасывает детей, дублирующих title среди своих же сиблингов.
+ * Возвращает согласованный список и число отброшенных узлов.
+ */
+export function consistencyCheckAgainstTree(
+  existing: NodeDraft[],
+  incoming: NodeDraft[],
+): { nodes: NodeDraft[]; skipped: number } {
+  const existingTitles = new Set<string>();
+  for (const n of existing) {
+    const t = normalizeTitle(n.title);
+    if (t) existingTitles.add(t);
+  }
+  const existingIds = new Set(existing.map((n) => n.id));
+
+  const seenTitles = new Map<string, string>(); // нормализованный title -> id в этой партии
+  const seenIds = new Set<string>();
+  const nodes: NodeDraft[] = [];
+
+  for (const n of incoming) {
+    const t = normalizeTitle(n.title);
+    if (!t) continue;
+    if (existingTitles.has(t)) continue; // дубль с существующим понятием
+    if (n.id && existingIds.has(n.id)) continue; // коллизия id
+    if (seenTitles.has(t)) continue; // дубль title среди сиблингов
+    const id = n.id || `c_${nodes.length + 1}`;
+    if (seenIds.has(id)) continue; // коллизия id внутри партии
+    seenIds.add(id);
+    seenTitles.set(t, id);
+    nodes.push({ ...n, id });
+  }
+
+  return { nodes, skipped: incoming.length - nodes.length };
+}
+
+function normalizeTitle(title: string): string {
+  return title.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+/**
+ * Применяет результаты repair-шага к дереву.
+ * Проблемный узел заменяется исправленной версией ТОЛЬКО если repair вернул
+ * узел с тем же id; в противном случае исходный узел сохраняется, чтобы
+ * repair, опустивший часть узлов (в т.ч. корень), не удалял их из дерева
+ * (иначе дети становились сиротами без родителя).
+ * Новые узлы, которых не было в исходном дереве, добавляются.
+ */
+export function mergeRepairs(nodes: NodeDraft[], repaired: NodeDraft[]): NodeDraft[] {
+  const byId = new Map(repaired.map((r) => [r.id, r]));
+  const out: NodeDraft[] = nodes.map((n) => {
+    const rep = byId.get(n.id);
+    return rep ? { ...rep } : n;
+  });
+  const existingIds = new Set(out.map((o) => o.id));
+  for (const r of repaired) {
+    if (!existingIds.has(r.id)) out.push(r);
+  }
+  return out;
 }
 
 /**

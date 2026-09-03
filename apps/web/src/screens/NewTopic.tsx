@@ -48,7 +48,7 @@ export function NewTopicScreen() {
       useGraphStore.setState({ topicId: topic.id, topicName: topic.name });
 
       const fullQuery = [query.trim(), notes.trim()].filter(Boolean).join("\n\n---\n\n");
-      const ok = await generateTree(fullQuery, goal, level);
+      const ok = await generateTree(fullQuery, goal, level, Number(timeBudget) || 60);
       if (ok) {
         navigate(`/topic/${topic.id}/graph`);
       } else {

@@ -4,6 +4,7 @@ import {
   rotateIndex,
   nextPendingIndex,
   parseSteps,
+  parseActivityBlob,
   type ActivityStep,
 } from "../LearningActivityService.js";
 
@@ -57,6 +58,32 @@ describe("LearningActivityService helpers", () => {
     it("возвращает [] на битый JSON", () => {
       expect(parseSteps("{oops")).toEqual([]);
       expect(parseSteps("")).toEqual([]);
+    });
+  });
+
+  describe("parseActivityBlob", () => {
+    it("разбирает новый формат { itemId, steps }", () => {
+      const blob = JSON.stringify({
+        itemId: "ci_2",
+        steps: [{ type: "explain" as const, status: "current" as const }],
+      });
+      const { itemId, steps } = parseActivityBlob(blob);
+      expect(itemId).toBe("ci_2");
+      expect(steps).toHaveLength(1);
+      expect(steps[0].type).toBe("explain");
+    });
+
+    it("обрабатывает старый формат (простой массив) как steps без itemId", () => {
+      const blob = JSON.stringify([{ type: "recall" as const, status: "current" as const }]);
+      const { itemId, steps } = parseActivityBlob(blob);
+      expect(itemId).toBeUndefined();
+      expect(steps).toHaveLength(1);
+    });
+
+    it("возвращает пустой результат на битый JSON или пустой steps", () => {
+      expect(parseActivityBlob("{oops")).toEqual({ steps: [] });
+      expect(parseActivityBlob("")).toEqual({ steps: [] });
+      expect(parseActivityBlob('{"itemId":"ci_1","steps":{}}')).toEqual({ steps: [] });
     });
   });
 });

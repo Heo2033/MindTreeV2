@@ -76,6 +76,7 @@ export class CurriculumEngine {
         return {
           id: `ci_${crypto.randomUUID().slice(0, 8)}`,
           nodeId: item.node_id,
+          label: node?.label ?? item.node_id,
           order,
           type: this.itemTypeFor(node),
           estimatedMinutes: item.estimated_minutes,

@@ -20,9 +20,9 @@ interface GraphState {
   error: string | null;
   pipeline: PipelineState;
   loadTopic: (id: string) => Promise<void>;
-  generateTree: (query: string, goal?: string, level?: string) => Promise<boolean>;
+  generateTree: (query: string, goal?: string, level?: string, timeBudgetMinutes?: number) => Promise<boolean>;
   expandNode: (nodeId: string) => Promise<void>;
-  generateContent: (nodeId: string, level?: string) => Promise<void>;
+  generateContent: (nodeId: string) => Promise<void>;
   setGoal: (goal: string) => void;
   clear: () => void;
 }
@@ -62,7 +62,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     }
   },
 
-  async generateTree(query, goal, level) {
+  async generateTree(query, goal, level, timeBudgetMinutes) {
     const { topicId } = get();
     if (!topicId) return false;
     set({
@@ -70,7 +70,13 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       error: null,
     });
 
-    const stream = pipelineApi.generate({ topic_id: topicId, query, goal, level });
+    const stream = pipelineApi.generate({
+      topic_id: topicId,
+      query,
+      goal,
+      level,
+      time_budget_minutes: timeBudgetMinutes,
+    });
     try {
       for await (const ev of stream.events) {
         if (ev.event === "progress") {
@@ -131,7 +137,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     }
   },
 
-  async generateContent(nodeId, level) {
+  async generateContent(nodeId) {
     const { topicId } = get();
     if (!topicId) return;
     set({ error: null });
@@ -144,7 +150,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           status: "running",
         },
       });
-      await treeApi.content(topicId, nodeId, level);
+      await treeApi.content(topicId, nodeId);
       await get().loadTopic(topicId);
       set({ pipeline: idlePipeline() });
     } catch (err) {

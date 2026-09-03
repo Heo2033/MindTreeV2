@@ -50,10 +50,17 @@ export class LearningActivityService {
       .prepare(`SELECT activity_json FROM learning_sessions WHERE id = ?`)
       .get(sessionId) as { activity_json: string } | undefined;
     if (!row) return null;
-    const steps = parseSteps(row.activity_json);
+    const { itemId: storedItemId, steps } = parseActivityBlob(row.activity_json);
     if (steps.length === 0) return null;
 
     const current = this.engine.getCurrentItem(sessionId)?.item;
+    if (!current) return null;
+
+    // Сохранённая активность должна принадлежать текущему концепту плана.
+    // Иначе (после перехода к следующему концепту или правок учебного плана)
+    // считаем её устаревшей и заставляем ensureActivity перестроить шаги для нового узла.
+    if (storedItemId && storedItemId !== current.id) return null;
+
     const nodeLabel = current?.nodeId ? nodeRow(current.nodeId)?.label ?? "" : "";
     const goal = session.goal;
     const currentStep = nextPendingIndex(steps);
@@ -87,7 +94,7 @@ export class LearningActivityService {
       .prepare(
         `UPDATE learning_sessions SET activity_json = ?, current_activity_step = 0 WHERE id = ?`,
       )
-      .run(JSON.stringify(steps), sessionId);
+      .run(JSON.stringify({ itemId: current.item.id, steps }), sessionId);
 
     EventBus.emit({
       sessionId,
@@ -169,7 +176,7 @@ export class LearningActivityService {
       });
     }
 
-    this.persistSteps(sessionId, activity.steps);
+    this.persistSteps(sessionId, activity.itemId, activity.steps);
     return this.getActivity(sessionId)!;
   }
 
@@ -259,12 +266,12 @@ export class LearningActivityService {
     return steps.map((s, i) => ({ ...s, status: i === 0 ? ("current" as const) : s.status }));
   }
 
-  private persistSteps(sessionId: string, steps: ActivityStep[]) {
+  private persistSteps(sessionId: string, itemId: string, steps: ActivityStep[]) {
     getDb()
       .prepare(
         `UPDATE learning_sessions SET activity_json = ?, current_activity_step = ? WHERE id = ?`,
       )
-      .run(JSON.stringify(steps), nextPendingIndex(steps), sessionId);
+      .run(JSON.stringify({ itemId, steps }), nextPendingIndex(steps), sessionId);
   }
 
   private targetLevel(topicId: string): string {
@@ -286,6 +293,25 @@ export function parseSteps(raw: string): ActivityStep[] {
     return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
+  }
+}
+
+/**
+ * Разбирает блоб активности, который хранится как { itemId, steps }.
+ * Старые/внешние форматы (простой массив шагов) обрабатываются как steps без itemId.
+ */
+export function parseActivityBlob(raw: string): { itemId?: string; steps: ActivityStep[] } {
+  try {
+    const parsed = JSON.parse(raw || "{}") as { itemId?: string; steps?: ActivityStep[] } | ActivityStep[];
+    if (Array.isArray(parsed)) {
+      return { steps: parsed };
+    }
+    if (parsed && Array.isArray(parsed.steps)) {
+      return { itemId: parsed.itemId, steps: parsed.steps };
+    }
+    return { steps: [] };
+  } catch {
+    return { steps: [] };
   }
 }
 

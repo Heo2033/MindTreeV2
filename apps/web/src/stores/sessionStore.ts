@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { persist, createJSONStorage } from "zustand/middleware";
 import { sessionsApi } from "../api";
 import type { SessionDetailDto, CurriculumItemDto, AdaptiveDecisionDto, FinalizeResultDto, ActivityDto } from "../api";
 
@@ -19,6 +20,7 @@ interface SessionState {
     timeBudget?: number,
   ) => Promise<SessionDetailDto>;
   loadCurrent: () => Promise<void>;
+  resume: () => Promise<void>;
   startStudy: (nodeId: string) => Promise<unknown>;
   ensureActivity: () => Promise<ActivityDto | null>;
   answerStep: (stepIndex: number, answer: string) => Promise<void>;
@@ -28,16 +30,18 @@ interface SessionState {
   reset: () => void;
 }
 
-export const useSessionStore = create<SessionState>((set, get) => ({
-  session: null,
-  currentItem: null,
-  currentIndex: 0,
-  adaptive: null,
-  studying: false,
-  activity: null,
-  answeredStepView: null,
-  loading: false,
-  error: null,
+export const useSessionStore = create<SessionState>()(
+  persist(
+    (set, get) => ({
+      session: null,
+      currentItem: null,
+      currentIndex: 0,
+      adaptive: null,
+      studying: false,
+      activity: null,
+      answeredStepView: null,
+      loading: false,
+      error: null,
 
   async createSession(topicId, goal, milestoneId, timeBudget) {
     set({ loading: true, error: null });
@@ -75,6 +79,31 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       });
     } catch (err) {
       set({ error: err instanceof Error ? err.message : "Ошибка получения шага сессии", loading: false });
+    }
+  },
+
+  // Восстановление сессии после перезагрузки/персиста: подтянуть текущий шаг и активность.
+  async resume() {
+    const { session } = get();
+    if (!session) return;
+    set({ loading: true, error: null });
+    try {
+      const { current, adaptive } = await sessionsApi.current(session.id);
+      set({
+        currentItem: current.item,
+        currentIndex: current.index,
+        adaptive,
+        loading: false,
+      });
+      await get().ensureActivity();
+    } catch (err) {
+      const isMissing = err instanceof Error && /(не найдена|not found|404)/i.test(err.message);
+      if (isMissing) {
+        // сессия удалена/завершена — сбросить персист
+        set({ session: null, currentItem: null, currentIndex: 0, adaptive: null, activity: null, loading: false, error: null });
+      } else {
+        set({ error: err instanceof Error ? err.message : "Ошибка восстановления сессии", loading: false });
+      }
     }
   },
 
@@ -163,4 +192,16 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   reset() {
     set({ session: null, currentItem: null, currentIndex: 0, adaptive: null, activity: null, answeredStepView: null, error: null });
   },
-}));
+    }),
+    {
+      name: "mindtree-session",
+      storage: createJSONStorage(() => localStorage),
+      partialize: (s) => ({
+        session: s.session,
+        currentIndex: s.currentIndex,
+        adaptive: s.adaptive,
+        activity: s.activity,
+      }),
+    },
+  ),
+);

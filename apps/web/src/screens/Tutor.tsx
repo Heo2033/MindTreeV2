@@ -106,7 +106,7 @@ function TutorToc({
 
 export function TutorScreen() {
   const { topicId, topicName, nodes } = useGraphStore();
-  const { messages, sending, error, send, reset } = useTutorStore();
+  const { messages, sending, error, send, reset, timeRemainingMinutes } = useTutorStore();
   const sessionId = useSessionStore((s) => s.session?.id);
   const [input, setInput] = useState("");
   const [tocOpen, setTocOpen] = useState(true);
@@ -167,6 +167,11 @@ export function TutorScreen() {
             </h2>
             {contextNodeLabel && (
               <Badge variant="info">{contextNodeLabel}</Badge>
+            )}
+            {timeRemainingMinutes !== null && (
+              <Badge variant={timeRemainingMinutes <= 5 ? "warning" : "muted"}>
+                Осталось ≈ {timeRemainingMinutes} мин
+              </Badge>
             )}
           </div>
           <p className="text-xs text-ink-4">

@@ -12,9 +12,11 @@ export {
   diagnosticApi,
   configApi,
   learnerModelApi,
+  analyticsApi,
 } from "./endpoints";
 export type {
   AdaptiveDecisionDto,
+  ActivityDto,
   CurrentItemDto,
   StartSessionBody,
   FinalizeResultDto,
@@ -30,6 +32,8 @@ export type {
   DiagnosticQuestionDto,
   DiagnosticResultDto,
   DiagnosticAnswerIn,
+  TopicMetricsDto,
+  AnalyticsSummaryDto,
 } from "./endpoints";export type {
   TopicRow,
   KnowledgeNodeRow,

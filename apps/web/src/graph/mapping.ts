@@ -11,7 +11,18 @@ function parseRelations(json?: string | null): KnowledgeNode["relations"] {
   }
 }
 
+function parseSources(json?: string | null): string[] {
+  if (!json) return [];
+  try {
+    const parsed = JSON.parse(json);
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
 export function rowToKnowledgeNode(row: KnowledgeNodeRow): KnowledgeNode {
+  const sources = parseSources(row.sources_json);
   return {
     id: row.id,
     topicId: row.topic_id,
@@ -21,6 +32,7 @@ export function rowToKnowledgeNode(row: KnowledgeNodeRow): KnowledgeNode {
     oneLiner: row.one_liner,
     details: row.details,
     analogy: row.analogy ?? undefined,
+    sources: sources.length > 0 ? sources : undefined,
     conceptType: (row.concept_type as KnowledgeNode["conceptType"]) ?? undefined,
     importance: row.importance,
     difficulty: row.difficulty,

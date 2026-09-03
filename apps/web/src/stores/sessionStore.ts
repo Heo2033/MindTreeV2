@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { sessionsApi } from "../api";
-import type { SessionDetailDto, CurriculumItemDto, AdaptiveDecisionDto, FinalizeResultDto } from "../api";
+import type { SessionDetailDto, CurriculumItemDto, AdaptiveDecisionDto, FinalizeResultDto, ActivityDto } from "../api";
 
 interface SessionState {
   session: SessionDetailDto | null;
@@ -8,6 +8,8 @@ interface SessionState {
   currentIndex: number;
   adaptive: AdaptiveDecisionDto | null;
   studying: boolean;
+  activity: ActivityDto | null;
+  answeredStepView: number | null;
   loading: boolean;
   error: string | null;
   createSession: (
@@ -18,7 +20,10 @@ interface SessionState {
   ) => Promise<SessionDetailDto>;
   loadCurrent: () => Promise<void>;
   startStudy: (nodeId: string) => Promise<unknown>;
-  completeItem: (itemId: string, nodeId?: string, quality?: string) => Promise<void>;
+  ensureActivity: () => Promise<ActivityDto | null>;
+  answerStep: (stepIndex: number, answer: string) => Promise<void>;
+  clearAnsweredView: () => void;
+  completeConcept: (itemId: string, nodeId?: string, quality?: string) => Promise<void>;
   finalize: () => Promise<FinalizeResultDto | {}>;
   reset: () => void;
 }
@@ -29,6 +34,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   currentIndex: 0,
   adaptive: null,
   studying: false,
+  activity: null,
+  answeredStepView: null,
   loading: false,
   error: null,
 
@@ -78,7 +85,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     try {
       const result = await sessionsApi.study(session.id, nodeId);
       await get().loadCurrent();
-      // studying остаётся true: контент текущего шага показываем до перехода дальше.
+      await get().ensureActivity();
       return result;
     } catch (err) {
       set({ error: err instanceof Error ? err.message : "Ошибка study", studying: false });
@@ -86,7 +93,45 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
   },
 
-  async completeItem(itemId, nodeId, quality) {
+  async ensureActivity() {
+    const { session } = get();
+    if (!session) return null;
+    set({ loading: true, error: null });
+    try {
+      const activity = await sessionsApi.activity(session.id);
+      set({ activity, answeredStepView: null, studying: false, loading: false });
+      return activity;
+    } catch (err) {
+      set({ activity: null, error: err instanceof Error ? err.message : "Ошибка загрузки активности", studying: false, loading: false });
+      return null;
+    }
+  },
+
+  async answerStep(stepIndex, answer) {
+    const { session, activity } = get();
+    if (!session || !activity) return;
+    try {
+      const updated = await sessionsApi.activityAnswer(session.id, { step_index: stepIndex, answer });
+      const previousStep = activity.steps[stepIndex];
+      const showFeedback =
+        previousStep &&
+        previousStep.status !== "answered" &&
+        updated.steps[stepIndex]?.feedback &&
+        updated.steps[stepIndex].feedback!.trim() !== "";
+      set({
+        activity: updated,
+        answeredStepView: showFeedback ? stepIndex : null,
+      });
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : "Ошибка ответа" });
+    }
+  },
+
+  clearAnsweredView() {
+    set({ answeredStepView: null });
+  },
+
+  async completeConcept(itemId, nodeId, quality) {
     const { session } = get();
     if (!session) return;
     try {
@@ -96,10 +141,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         quality: quality ?? "correct",
       });
       await get().loadCurrent();
-      // Новый шаг снова начинается с кнопки «Изучить».
-      set({ studying: false });
+      await get().ensureActivity();
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : "Ошибка завершения шага" });
+      set({ error: err instanceof Error ? err.message : "Ошибка завершения концепта" });
     }
   },
 
@@ -117,6 +161,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   reset() {
-    set({ session: null, currentItem: null, currentIndex: 0, adaptive: null, error: null });
+    set({ session: null, currentItem: null, currentIndex: 0, adaptive: null, activity: null, answeredStepView: null, error: null });
   },
 }));

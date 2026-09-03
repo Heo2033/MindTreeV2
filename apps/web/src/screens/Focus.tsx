@@ -307,6 +307,19 @@ export function FocusScreen() {
                     {selected.analogy}
                   </div>
                 )}
+                {selected.sources && selected.sources.length > 0 && (
+                  <div className="mt-6 rounded-lg border border-border bg-surface px-4 py-3 text-sm">
+                    <span className="font-semibold text-ink-2">Источники:</span>
+                    <ul className="mt-1.5 list-disc space-y-1 pl-5 text-ink-3">
+                      {selected.sources.map((src, i) => (
+                        <li key={i}>{src}</li>
+                      ))}
+                    </ul>
+                    <p className="mt-2 text-xs text-ink-4">
+                      Контент сгенерирован ИИ и не считается автоматически достоверным — сверяйте с приведёнными источниками.
+                    </p>
+                  </div>
+                )}
                 {selected.details && selected.details.length > 400 && (
                   <div className="mt-6">
                     <Button variant="secondary" size="sm" onClick={() => generateContent(selected.id, String(selected.level))}>

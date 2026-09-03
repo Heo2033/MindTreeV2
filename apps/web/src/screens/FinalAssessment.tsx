@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { useGraphStore, useSessionStore } from "../stores";
-import { assessmentsApi } from "../api";
+import { assessmentsApi, sessionsApi } from "../api";
 import type { AssessmentDto, AssessmentSubmitResult } from "../api";
 import type { MasteryLevel } from "@mindtree/types";
 import { Button, Spinner, ErrorBanner, Badge } from "@mindtree/ui";
@@ -17,9 +17,21 @@ const LEVEL_LABEL: Record<MasteryLevel, string> = {
   expert: "Эксперт",
 };
 
+const MCQ_TYPES = new Set(["recognition", "recall"]);
+const OPEN_TYPES = new Set(["explanation", "diagnosis", "application", "transfer"]);
+
+const TYPE_LABEL: Record<string, string> = {
+  recognition: "Узнавание",
+  recall: "Припоминание",
+  explanation: "Объяснение",
+  diagnosis: "Диагностика ошибки",
+  application: "Применение",
+  transfer: "Перенос",
+};
+
 export function FinalAssessmentScreen() {
   const { topicId } = useGraphStore();
-  const { session, finalize } = useSessionStore();
+  const { session } = useSessionStore();
   const navigate = useNavigate();
   const location = useLocation();
   const passedId = (location.state as { assessmentId?: string } | null)?.assessmentId;
@@ -27,7 +39,8 @@ export function FinalAssessmentScreen() {
   const [phase, setPhase] = useState<Phase>("loading");
   const [assessment, setAssessment] = useState<AssessmentDto | null>(null);
   const [current, setCurrent] = useState(0);
-  const [answers, setAnswers] = useState<(number | null)[]>([]);
+  const [mcqAnswers, setMcqAnswers] = useState<(number | null)[]>([]);
+  const [openAnswers, setOpenAnswers] = useState<string[]>([]);
   const [result, setResult] = useState<AssessmentSubmitResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -45,14 +58,20 @@ export function FinalAssessmentScreen() {
       if (passedId) {
         a = await assessmentsApi.get(passedId);
       } else {
-        a = await assessmentsApi.create({
-          session_id: session.id,
-          type: "final",
-          question_count: 6,
-        });
+        try {
+          const prepared = await sessionsApi.finalize(session.id);
+          a = await assessmentsApi.get(prepared.assessmentId);
+        } catch {
+          a = await assessmentsApi.create({
+            session_id: session.id,
+            type: "final",
+            question_count: 6,
+          });
+        }
       }
       setAssessment(a);
-      setAnswers(new Array(a.questions.length).fill(null));
+      setMcqAnswers(new Array(a.questions.length).fill(null));
+      setOpenAnswers(new Array(a.questions.length).fill(""));
       setCurrent(0);
       setPhase(a.questions.length ? "playing" : "result");
     } catch (err) {
@@ -67,10 +86,24 @@ export function FinalAssessmentScreen() {
   }, [session?.id]);
 
   const select = (i: number) => {
-    if (answers[current] !== null) return;
-    const next = [...answers];
+    if (mcqAnswers[current] !== null) return;
+    const next = [...mcqAnswers];
     next[current] = i;
-    setAnswers(next);
+    setMcqAnswers(next);
+  };
+
+  const setOpen = (text: string) => {
+    const next = [...openAnswers];
+    next[current] = text;
+    setOpenAnswers(next);
+  };
+
+  const isAnswered = (idx: number) => {
+    const q = assessment!.questions[idx];
+    if (OPEN_TYPES.has(q.type ?? "")) return (openAnswers[idx] ?? "").trim().length > 0;
+    if (MCQ_TYPES.has(q.type ?? "")) return mcqAnswers[idx] !== null;
+    // unknown type: require MCQ if options exist, else text
+    return q.options.length > 0 ? mcqAnswers[idx] !== null : (openAnswers[idx] ?? "").trim().length > 0;
   };
 
   async function submit() {
@@ -78,19 +111,29 @@ export function FinalAssessmentScreen() {
     setBusy(true);
     setError(null);
     const attempts = assessment.questions.map((q, i) => {
-      const sel = answers[i];
-      const selectedOption = sel === null ? "" : q.options[sel];
+      if (MCQ_TYPES.has(q.type ?? "")) {
+        const sel = mcqAnswers[i];
+        const selectedOption = sel === null ? "" : q.options[sel] ?? "";
+        const correctIndex = Number(q.correctAnswer);
+        const correct = sel !== null && (Number.isFinite(correctIndex) ? sel === correctIndex : selectedOption === q.correctAnswer);
+        return {
+          question_id: q.id,
+          answer: selectedOption,
+          correct,
+        };
+      }
+      // open-ended: send text; correctness is judged server-side via mastery rubric
       return {
         question_id: q.id,
-        answer: selectedOption,
-        correct: selectedOption === q.correctAnswer,
+        answer: openAnswers[i] ?? "",
+        correct: false,
       };
     });
     try {
       const res = await assessmentsApi.submit(assessment.id, attempts);
       setResult(res);
       setPhase("result");
-      await finalize().catch(() => {});
+      // Сессия завершается на сервере при сабмите финального assessment.
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось сохранить результаты");
     } finally {
@@ -163,6 +206,8 @@ export function FinalAssessmentScreen() {
   }
 
   const question = assessment!.questions[current];
+  const isMcq = MCQ_TYPES.has(question.type ?? "");
+  const answered = isAnswered(current);
 
   return (
     <div className="flex h-full items-start justify-center overflow-y-auto p-8">
@@ -175,31 +220,51 @@ export function FinalAssessmentScreen() {
           <div className="h-full rounded-full bg-accent" style={{ width: `${((current + 1) / assessment!.questions.length) * 100}%` }} />
         </div>
 
+        <div className="mb-2 flex items-center gap-2">
+          <Badge variant="muted">{TYPE_LABEL[question.type ?? ""] ?? question.type ?? "Вопрос"}</Badge>
+        </div>
         <p className="mb-4 text-sm font-medium text-ink">{question.question}</p>
 
-        <div className="mb-4 space-y-2">
-          {question.options.map((opt, i) => {
-            const selected = answers[current] === i;
-            const cls = selected
-              ? "border-accent bg-surface-2 text-accent-ink"
-              : "border-border-strong bg-surface text-ink-2 hover:border-border-strong hover:bg-surface-2";
-            return (
-              <button
-                key={i}
-                className={`w-full rounded-lg border p-3 text-left text-sm transition-all ${cls}`}
-                disabled={answers[current] !== null}
-                onClick={() => select(i)}
-              >
-                <span className="mr-2 font-semibold">{String.fromCharCode(65 + i)})</span>
-                {opt}
-              </button>
-            );
-          })}
-        </div>
+        {isMcq ? (
+          <div className="mb-4 space-y-2">
+            {question.options.map((opt, i) => {
+              const selected = mcqAnswers[current] === i;
+              const cls = selected
+                ? "border-accent bg-surface-2 text-accent-ink"
+                : "border-border-strong bg-surface text-ink-2 hover:border-border-strong hover:bg-surface-2";
+              return (
+                <button
+                  key={i}
+                  className={`w-full rounded-lg border p-3 text-left text-sm transition-all ${cls}`}
+                  disabled={answered}
+                  onClick={() => select(i)}
+                >
+                  <span className="mr-2 font-semibold">{String.fromCharCode(65 + i)})</span>
+                  {opt}
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="mb-4">
+            <textarea
+              className="w-full rounded-lg border border-border bg-surface p-3 text-sm text-ink-2 outline-none placeholder:text-ink-4 focus:border-accent"
+              rows={5}
+              value={openAnswers[current] ?? ""}
+              onChange={(e) => setOpen(e.target.value)}
+              placeholder="Введите ответ своими словами…"
+            />
+            {question.explanation && (
+              <p className="mt-1 text-xs text-ink-4">
+                Рекомендация для проверки: {question.explanation}
+              </p>
+            )}
+          </div>
+        )}
 
         <ErrorBanner message={error} />
 
-        {answers[current] !== null && (
+        {answered && (
           <Button className="w-full" disabled={busy} onClick={() => (current < assessment!.questions.length - 1 ? setCurrent(current + 1) : void submit())}>
             {current < assessment!.questions.length - 1 ? "Следующий вопрос" : "Завершить"}
           </Button>

@@ -14,6 +14,7 @@ interface PipelineState {
 interface GraphState {
   topicId: string | null;
   topicName: string | null;
+  goal: string | null;
   nodes: KnowledgeNode[];
   loading: boolean;
   error: string | null;
@@ -22,6 +23,7 @@ interface GraphState {
   generateTree: (query: string, goal?: string, level?: string) => Promise<boolean>;
   expandNode: (nodeId: string) => Promise<void>;
   generateContent: (nodeId: string, level?: string) => Promise<void>;
+  setGoal: (goal: string) => void;
   clear: () => void;
 }
 
@@ -35,6 +37,7 @@ const idlePipeline = (): PipelineState => ({
 export const useGraphStore = create<GraphState>((set, get) => ({
   topicId: null,
   topicName: null,
+  goal: null,
   nodes: [],
   loading: false,
   error: null,
@@ -47,6 +50,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       set({
         topicId: id,
         topicName: topic.name,
+        goal: topic.goal,
         nodes: rowsToKnowledgeNodes(rows as KnowledgeNodeRow[]),
         loading: false,
       });
@@ -152,9 +156,14 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     set({
       topicId: null,
       topicName: null,
+      goal: null,
       nodes: [],
       error: null,
       pipeline: idlePipeline(),
     });
+  },
+
+  setGoal(goal: string) {
+    set({ goal });
   },
 }));

@@ -13,6 +13,13 @@ import type {
 
 // ---------- Topics ----------
 
+export interface ChangeGoalResultDto {
+  goal: string;
+  topicName: string;
+  alreadyKnown: string[];
+  plan: SessionPlanDto;
+}
+
 export const topicsApi = {
   list: () => request<TopicRow[]>("/api/topics"),
   get: (id: string) =>
@@ -24,6 +31,11 @@ export const topicsApi = {
     time_budget_minutes?: number;
   }) => request<TopicRow>("/api/topics", { method: "POST", json: body }),
   remove: (id: string) => request<{ ok: boolean }>(`/api/topics/${id}`, { method: "DELETE" }),
+  changeGoal: (id: string, goal: string) =>
+    request<ChangeGoalResultDto>(`/api/topics/${id}/goal`, {
+      method: "POST",
+      json: { goal },
+    }),
 };
 
 // ---------- Pipeline (SSE tree generation) ----------
@@ -64,6 +76,7 @@ export const treeApi = {
       details: string;
       analogy?: string;
       relations: unknown[];
+      sources?: string[];
     }>("/api/tree/content", { method: "POST", json: { topic_id, node_id, level } }),
   fillContent: (topic_id: string, level?: number, limit?: number) =>
     request<{ completed: number; results: Array<{ node_id: string; ok: boolean }> }>(
@@ -90,6 +103,17 @@ export interface AdaptiveDecisionDto {
   dueReviews: string[];
   nextMilestone?: string;
   reasons: string[];
+  eta?: SessionEtaDto;
+}
+
+export interface SessionEtaDto {
+  totalEstimatedMinutes: number;
+  elapsedMinutes: number;
+  completedItems: number;
+  totalItems: number;
+  remainingMinutesMin: number;
+  remainingMinutesMax: number;
+  pace: "faster" | "on_track" | "slower";
 }
 
 export interface CurrentItemDto {
@@ -111,10 +135,65 @@ export interface FinalizeResultDto {
   mastery: MasteryEvaluationDto | null;
 }
 
+export interface StudyResultDto {
+  content: { one_liner: string; details: string; analogy?: string; sources?: string[] };
+  node: import("@mindtree/types").KnowledgeNode;
+}
+
+export interface ActivityStepDto {
+  type: "explain" | "example" | "recall" | "apply";
+  title: string;
+  body?: string;
+  instruction?: string;
+  options?: string[];
+  correctIndex?: number;
+  bestAnswer?: string;
+  placeholder?: string;
+  status: "pending" | "current" | "answered";
+  userAnswer?: string;
+  correct?: boolean;
+  feedback?: string;
+}
+
+export interface ActivityDto {
+  sessionId: string;
+  itemId: string;
+  nodeId: string;
+  nodeLabel: string;
+  goal: string;
+  steps: ActivityStepDto[];
+  currentStep: number;
+  isComplete: boolean;
+}
+
+export interface SessionPlanItemDto {
+  itemId: string;
+  nodeId: string;
+  label: string;
+  order: number;
+  type: string;
+  estimatedMinutes: number;
+  priority: number;
+  status: string;
+  reason?: string;
+}
+
+export interface SessionPlanDto {
+  sessionId: string;
+  topicName: string;
+  items: SessionPlanItemDto[];
+  totalEstimatedMinutes: number;
+  skipped: Array<{ node_id: string; reason: string }>;
+}
+
 export const sessionsApi = {
-  list: () => request<Array<Record<string, unknown>>>("/api/sessions"),
+  list: () => request<SessionDetailDto[]>("/api/sessions"),
   get: (id: string) =>
-    request<{ session: SessionDetailDto; events: LearningEventRow[] }>(`/api/sessions/${id}`),
+    request<{
+      session: SessionDetailDto;
+      events: LearningEventRow[];
+      plan: SessionPlanDto;
+    }>(`/api/sessions/${id}`),
   create: (body: StartSessionBody) =>
     request<SessionDetailDto>("/api/sessions", { method: "POST", json: body }),
   current: (id: string) =>
@@ -122,7 +201,7 @@ export const sessionsApi = {
       `/api/sessions/${id}/current`,
     ),
   study: (id: string, node_id: string) =>
-    request<{ content?: unknown; details?: unknown; node?: unknown }>(`/api/sessions/${id}/study`, {
+    request<StudyResultDto>(`/api/sessions/${id}/study`, {
       method: "POST",
       json: { node_id },
     }),
@@ -140,6 +219,13 @@ export const sessionsApi = {
     }),
   complete: (id: string) =>
     request<{ ok: boolean }>(`/api/sessions/${id}/complete`, { method: "POST" }),
+  activity: (id: string) =>
+    request<ActivityDto>(`/api/sessions/${id}/activity`, { method: "POST" }),
+  activityAnswer: (id: string, body: { step_index: number; answer: string }) =>
+    request<ActivityDto>(`/api/sessions/${id}/activity/answer`, {
+      method: "POST",
+      json: body,
+    }),
 };
 
 // ---------- Assessments ----------
@@ -229,7 +315,7 @@ export const quizApi = {
 
 export const tutorApi = {
   chat: (body: { topic_id: string; session_id?: string; message: string; node_id?: string }) =>
-    request<{ response: string; usedFallback: boolean; context: Record<string, unknown> }>(
+    request<{ response: string; usedFallback: boolean; timeRemainingMinutes?: number; context: Record<string, unknown> }>(
       "/api/tutor",
       { method: "POST", json: body },
     ),
@@ -265,6 +351,21 @@ export const milestonesApi = {
     request<{ milestones: MilestoneDto[] }>(`/api/milestones/journey/${journeyId}`),
   patch: (id: string, status: string) =>
     request<{ ok: boolean }>(`/api/milestones/${id}`, { method: "PATCH", json: { status } }),
+  create: (input: {
+    journey_id: string;
+    level: MilestoneDto["level"];
+    title: string;
+    description?: string;
+    capabilities?: string[];
+    estimatedHours?: number;
+    status?: MilestoneDto["status"];
+  }) =>
+    request<{ milestone: MilestoneDto }>("/api/milestones/", {
+      method: "POST",
+      json: input,
+    }),
+  remove: (id: string) =>
+    request<{ ok: boolean }>(`/api/milestones/${id}`, { method: "DELETE" }),
 };
 
 // ---------- Diagnostic ----------
@@ -351,4 +452,47 @@ export interface LearnerModelDto {
 export const learnerModelApi = {
   get: (topicId: string) =>
     request<LearnerModelDto>(`/api/learner-model/${topicId}`),
+};
+
+// ---------- Analytics (§71) ----------
+
+export interface TopicMetricsDto {
+  topicId: string;
+  topicName: string;
+  currentLevel: import("@mindtree/types").MasteryLevel;
+  targetLevel: import("@mindtree/types").MasteryLevel;
+  goal: string;
+  masteryReached: boolean;
+  learningGain: number;
+  learningGainPerMinute: number;
+  meanMastery: number;
+  immediateRecall: number;
+  delayedRecall: number;
+  applicationAccuracy: number;
+  transferAccuracy: number;
+  sessionCompletion: number;
+  milestoneProgression: number;
+  timeToTargetMinutes: number | null;
+  studyMinutes: number;
+  conceptCount: number;
+}
+
+export interface AnalyticsSummaryDto {
+  topics: TopicMetricsDto[];
+  totals: {
+    completedSessions: number;
+    totalSessions: number;
+    sessionCompletion: number;
+    milestonesCompleted: number;
+    totalMilestones: number;
+    milestoneProgression: number;
+    studyMinutes: number;
+    meanLearningGain: number;
+  };
+}
+
+export const analyticsApi = {
+  summary: () => request<AnalyticsSummaryDto>("/api/analytics"),
+  topic: (topicId: string) =>
+    request<TopicMetricsDto>(`/api/analytics/topic/${topicId}`),
 };

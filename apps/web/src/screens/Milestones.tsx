@@ -2,9 +2,9 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useGraphStore, useSessionStore } from "../stores";
 import { milestonesApi, learnerModelApi } from "../api";
-import type { MilestoneDto, MasteryEvaluationDto } from "../api";
+import type { MilestoneDto, MilestonePathDto, MasteryEvaluationDto } from "../api";
 import type { MasteryLevel } from "@mindtree/types";
-import { Button, Spinner, ErrorBanner, Badge } from "@mindtree/ui";
+import { Button, Spinner, ErrorBanner, Badge, Input, Textarea, Select } from "@mindtree/ui";
 
 const LEVEL_LABEL: Record<MasteryLevel, string> = {
   awareness: "Ознакомление",
@@ -14,6 +14,11 @@ const LEVEL_LABEL: Record<MasteryLevel, string> = {
   advanced: "Продвинутый",
   expert: "Эксперт",
 };
+
+const LEVEL_OPTIONS = (Object.keys(LEVEL_LABEL) as MasteryLevel[]).map((lv) => ({
+  value: lv,
+  label: LEVEL_LABEL[lv],
+}));
 
 export function MilestonesScreen() {
   const { topicId } = useGraphStore();
@@ -25,6 +30,14 @@ export function MilestonesScreen() {
   const [loading, setLoading] = useState(false);
   const [starting, setStarting] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [formOpen, setFormOpen] = useState(false);
+  const [formLevel, setFormLevel] = useState<MasteryLevel>("awareness");
+  const [formTitle, setFormTitle] = useState("");
+  const [formDescription, setFormDescription] = useState("");
+  const [formCaps, setFormCaps] = useState("");
+  const [formHours, setFormHours] = useState("2");
+  const [deleting, setDeleting] = useState<string | null>(null);
 
   const journeyId = session?.journeyId ?? null;
 
@@ -40,10 +53,16 @@ export function MilestonesScreen() {
       }
       if (!jid) throw new Error("Не удалось получить путешествие темы");
 
-      const [{ milestones: ms }, model] = await Promise.all([
-        milestonesApi.generate(jid, topicId),
-        learnerModelApi.get(topicId).catch(() => null),
-      ]);
+      let ms: MilestoneDto[] = [];
+      const existing = await milestonesApi.journey(jid).catch(() => null);
+      if (existing && existing.milestones.length > 0) {
+        ms = existing.milestones;
+      } else {
+        const gen = await milestonesApi.generate(jid, topicId);
+        ms = gen.milestones;
+      }
+
+      const model = await learnerModelApi.get(topicId).catch(() => null);
       setMilestones(ms);
       setCurrentLevel(model?.model.overallLevel ?? null);
     } catch (err) {
@@ -68,6 +87,67 @@ export function MilestonesScreen() {
       setError(err instanceof Error ? err.message : "Не удалось начать веху");
     } finally {
       setStarting(null);
+    }
+  }
+
+  async function setStatus(m: MilestoneDto, status: MilestoneDto["status"]) {
+    try {
+      await milestonesApi.patch(m.id, status);
+      setMilestones((prev) =>
+        prev.map((x) => (x.id === m.id ? { ...x, status } : x)),
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось обновить статус вехи");
+    }
+  }
+
+  async function createMilestone() {
+    if (!journeyId) return;
+    if (formTitle.trim() === "") {
+      setError("Укажите название вехи");
+      return;
+    }
+    setCreating(true);
+    setError(null);
+    const capabilities = formCaps
+      .split(",")
+      .map((c) => c.trim())
+      .filter(Boolean);
+    const hours = Number(formHours);
+    try {
+      const { milestone } = await milestonesApi.create({
+        journey_id: journeyId,
+        level: formLevel,
+        title: formTitle.trim(),
+        description: formDescription.trim(),
+        capabilities,
+        estimatedHours: Number.isFinite(hours) && hours > 0 ? hours : 1,
+      });
+      setMilestones((prev) => [...prev, milestone]);
+      setFormOpen(false);
+      setFormTitle("");
+      setFormDescription("");
+      setFormCaps("");
+      setFormHours("2");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось создать веху");
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function removeMilestone(m: MilestoneDto) {
+    const confirmed = window.confirm(`Удалить веху «${m.title}»?`);
+    if (!confirmed) return;
+    setDeleting(m.id);
+    setError(null);
+    try {
+      await milestonesApi.remove(m.id);
+      setMilestones((prev) => prev.filter((x) => x.id !== m.id));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось удалить веху");
+    } finally {
+      setDeleting(null);
     }
   }
 
@@ -99,10 +179,38 @@ export function MilestonesScreen() {
 
         {milestones.length > 0 && (
           <div className="mx-auto max-w-3xl">
-            {currentLevel && (
-              <Badge variant="info" className="mb-4">
-                Текущий уровень: {LEVEL_LABEL[currentLevel] ?? currentLevel}
-              </Badge>
+            <div className="mb-4 flex items-center gap-2">
+              {currentLevel && (
+                <Badge variant="info">
+                  Текущий уровень: {LEVEL_LABEL[currentLevel] ?? currentLevel}
+                </Badge>
+              )}
+              <div className="ml-auto">
+                <Button size="sm" variant="secondary" onClick={() => setFormOpen((v) => !v)}>
+                  {formOpen ? "Скрыть форму" : "+ Добавить веху"}
+                </Button>
+              </div>
+            </div>
+
+            {formOpen && (
+              <div className="mb-4 space-y-3 rounded-xl border border-accent bg-surface p-4">
+                <h4 className="text-sm font-semibold text-ink">Новая веха</h4>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <Input label="Название" value={formTitle} onChange={(e) => setFormTitle(e.target.value)} placeholder="Например: Основы диагностики" />
+                  <Select label="Уровень" options={LEVEL_OPTIONS} value={formLevel} onChange={(e) => setFormLevel(e.target.value as MasteryLevel)} />
+                </div>
+                <Textarea label="Описание" value={formDescription} onChange={(e) => setFormDescription(e.target.value)} placeholder="Что ученик сможет после вехи…" />
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <Input label="Навыки (через запятую)" value={formCaps} onChange={(e) => setFormCaps(e.target.value)} placeholder="анализ, синтез" />
+                  <Input label="Оценка времени (ч)" type="number" min="0" step="0.5" value={formHours} onChange={(e) => setFormHours(e.target.value)} />
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button size="sm" onClick={() => void createMilestone()} disabled={creating || !journeyId}>
+                    {creating ? "Создание…" : "Создать"}
+                  </Button>
+                  <button onClick={() => setFormOpen(false)} className="text-sm text-ink-4 hover:text-ink">Отмена</button>
+                </div>
+              </div>
             )}
 
             <div className="relative space-y-4 before:absolute before:left-[15px] before:top-2 before:bottom-2 before:w-px before:bg-surface-3">
@@ -131,6 +239,14 @@ export function MilestonesScreen() {
                           {isNext ? "Следующая" : isActive ? "Активная" : LEVEL_LABEL[m.level] ?? m.level}
                         </Badge>
                         <span className="ml-auto text-xs text-ink-4">≈ {m.estimatedHours} ч</span>
+                        <button
+                          onClick={() => void removeMilestone(m)}
+                          disabled={deleting === m.id}
+                          className="rounded-md border border-border px-2 py-0.5 text-xs text-danger hover:bg-danger-soft disabled:opacity-50"
+                          title="Удалить веху"
+                        >
+                          {deleting === m.id ? "…" : "Удалить"}
+                        </button>
                       </div>
                       <p className="text-sm text-ink-4">{m.description}</p>
 
@@ -145,10 +261,41 @@ export function MilestonesScreen() {
                       )}
 
                       {!isCompleted && (
-                        <div className="mt-3">
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
                           <Button size="sm" variant={isActive ? "primary" : "secondary"} disabled={starting === m.id} onClick={() => void startMilestone(m)}>
                             {starting === m.id ? "Начинаем…" : isActive ? "Продолжить обучение" : "Начать эту веху"}
                           </Button>
+                          {m.status === "active" && (
+                            <Button size="sm" variant="secondary" onClick={() => void setStatus(m, "completed")}>
+                              Завершить веху
+                            </Button>
+                          )}
+                          {m.status === "not_started" && isActive && (
+                            <Button size="sm" variant="secondary" onClick={() => void setStatus(m, "active")}>
+                              Отметить активной
+                            </Button>
+                          )}
+                        </div>
+                      )}
+
+                      {m.alternativePaths.length > 0 && (
+                        <div className="mt-3 border-t border-border pt-3">
+                          <div className="text-xs font-medium text-ink-4">
+                            Альтернативные пути
+                          </div>
+                          <div className="mt-1.5 space-y-1.5">
+                            {m.alternativePaths.map((ap, ai) => (
+                              <div key={ai} className="rounded-md bg-surface-2 px-3 py-2 text-sm">
+                                <div className="flex items-center gap-2">
+                                  <span className="font-medium text-ink-2">{ap.title}</span>
+                                  <span className="ml-auto text-xs text-ink-4">≈ {ap.estimatedHours} ч</span>
+                                </div>
+                                {ap.description && (
+                                  <p className="mt-0.5 text-xs text-ink-4">{ap.description}</p>
+                                )}
+                              </div>
+                            ))}
+                          </div>
                         </div>
                       )}
                     </div>

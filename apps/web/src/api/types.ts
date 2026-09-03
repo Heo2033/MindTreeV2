@@ -26,6 +26,7 @@ export interface KnowledgeNodeRow {
   leaf: number;
   level: number;
   relations_json: string;
+  sources_json?: string | null;
   created_at: string;
 }
 
@@ -68,6 +69,7 @@ export interface CurriculumItemDto {
   priority: number;
   status: "pending" | "active" | "completed" | "skipped";
   content?: string;
+  reason?: string;
 }
 
 export interface CurriculumDto {

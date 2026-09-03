@@ -12,6 +12,7 @@ import { DiagnosticScreen } from "./screens/Diagnostic";
 import { MilestonesScreen } from "./screens/Milestones";
 import { ReviewScreen } from "./screens/Review";
 import { FinalAssessmentScreen } from "./screens/FinalAssessment";
+import { AnalyticsScreen } from "./screens/Analytics";
 
 export default function App() {
   return (
@@ -29,6 +30,7 @@ export default function App() {
         <Route path="diagnostic" element={<DiagnosticScreen />} />
         <Route path="milestones" element={<MilestonesScreen />} />
         <Route path="review" element={<ReviewScreen />} />
+        <Route path="analytics" element={<AnalyticsScreen />} />
         <Route path="final" element={<FinalAssessmentScreen />} />
       </Route>
     </Routes>

@@ -593,6 +593,142 @@ async function callOllama(
   };
 }
 
+/**
+ * Потоковый вызов OpenAI-совместимого API: отдаёт токены (`delta.content`) по
+ * мере генерации. Не поддерживает ollama (там нет SSE-потока / O(1)).
+ * Используется тьютором для отображения ответа «на лету» как в ChatGPT.
+ * Внешний `signal` позволяет прервать запрос при закрытии соединения клиентом.
+ */
+export async function* callLLMStream(
+  systemPrompt: string,
+  options: CallLLMOptions = {},
+  signal?: AbortSignal,
+): AsyncIterableIterator<string> {
+  const cfg = readLLMConfig();
+
+  if (cfg.isMock) {
+    throw new LLMMockError(
+      "Офлайн-режим (LLM_MOCK=1): LLM недоступен, используются встроенные заготовки.",
+    );
+  }
+
+  if (
+    cfg.provider === "ollama" ||
+    (cfg.provider === "auto" && isOllamaBaseUrl(cfg.baseUrl))
+  ) {
+    throw new Error("Потоковый вызов недоступен для провайдера Ollama");
+  }
+
+  const model = options.model ?? cfg.model;
+  const temperature = options.temperature ?? cfg.temperature;
+  const timeoutMs = options.timeoutMs ?? cfg.timeoutMs;
+  const url = `${cfg.baseUrl}/chat/completions`;
+
+  const body: Record<string, unknown> = {
+    model,
+    messages: [{ role: "system", content: systemPrompt }],
+    temperature,
+    stream: true,
+  };
+
+  const controller = new AbortController();
+  const onExternalAbort = () => controller.abort();
+  signal?.addEventListener("abort", onExternalAbort, { once: true });
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    clearTimeout(timeoutId);
+    signal?.removeEventListener("abort", onExternalAbort);
+  };
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${cfg.apiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    release();
+    throw err instanceof Error && err.name === "AbortError"
+      ? new Error("LLM API: таймаут запроса")
+      : err instanceof Error
+        ? err
+        : new Error("Сетевая ошибка LLM API");
+  }
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    release();
+    if (response.status === 429 || response.status === 408) {
+      throw new LLMRateLimitError(
+        response.status,
+        `LLM API ошибка (${response.status}): ${compactErrorBody(text)}`,
+        response.status === 429 ? parseRetryAfter(response.headers.get("Retry-After")) : null,
+      );
+    }
+    throw new Error(`LLM API ошибка (${response.status}): ${compactErrorBody(text)}`);
+  }
+
+  if (!response.body) {
+    release();
+    throw new Error("LLM API вернул пустой поток");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let emitted = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const events = buffer.split("\n\n");
+      buffer = events.pop() ?? "";
+      for (const event of events) {
+        for (const line of event.split("\n")) {
+          const trimmedLine = line.replace(/\r$/, "");
+          if (!trimmedLine.startsWith("data:")) continue;
+          const payload = trimmedLine.slice(5).trim();
+          if (!payload || payload === "[DONE]") continue;
+          let chunk: ChatPayload;
+          try {
+            chunk = JSON.parse(payload) as ChatPayload;
+          } catch {
+            continue;
+          }
+          const delta = chunk?.choices?.[0]?.delta;
+          const piece =
+            typeof delta?.content === "string"
+              ? delta.content
+              : typeof delta?.reasoning_content === "string"
+                ? delta.reasoning_content
+                : "";
+          if (piece.length > 0) {
+            emitted += piece.length;
+            yield piece;
+          }
+        }
+      }
+    }
+  } finally {
+    release();
+  }
+
+  if (emitted === 0) {
+    throw new Error("LLM API вернул пустой ответ");
+  }
+}
+
 export function findMatchingBracket(text: string, start: number): number {
   const open = text[start];
   const close = open === "{" ? "}" : "]";

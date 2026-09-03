@@ -1,5 +1,4 @@
 import { getScheduler } from "../llm/scheduler.js";
-import { parseLLMJson } from "../llm/client.js";
 import { buildTutorPrompt } from "../prompts/tutor.js";
 import { LearnerModelService } from "./LearnerModelService.js";
 import { getDb } from "../db/connection.js";
@@ -7,6 +6,17 @@ import { getDb } from "../db/connection.js";
 export interface TutorReply {
   text: string;
   usedFallback: boolean;
+  timeRemainingMinutes?: number;
+}
+
+interface TutorContext {
+  topic?: { name: string; goal: string; target_level: string };
+  currentLevel: string;
+  targetLevel: string;
+  currentNode?: { id: string; label: string; path?: string[] };
+  currentMastery?: string;
+  misconceptions: string[];
+  recentAttempts: string[];
   timeRemainingMinutes?: number;
 }
 
@@ -22,6 +32,76 @@ export class AITutorService {
     message: string,
     opts: { sessionId?: string; nodeId?: string } = {},
   ): Promise<TutorReply> {
+    const ctx = this.buildContext(topicId, opts);
+    const prompt = this.buildPrompt(ctx, message);
+
+    try {
+      const res = await getScheduler().execute(
+        "tutor",
+        () => prompt,
+        (raw) => raw,
+      );
+      return {
+        text: res.result,
+        usedFallback: false,
+        timeRemainingMinutes: ctx.timeRemainingMinutes,
+      };
+    } catch (err) {
+      return {
+        text: this.fallbackText(ctx, message, err),
+        usedFallback: true,
+        timeRemainingMinutes: ctx.timeRemainingMinutes,
+      };
+    }
+  }
+
+  /**
+   * Потоковая версия: отдаёт токены ответа по мере генерации (SSE).
+   * При сбое модели возвращает fallback-текст посимвольно и сигнализирует
+   * usedFallback в конце. Возвращает async-итератор объектов:
+   * { kind: "token", text } | { kind: "done", usedFallback, timeRemainingMinutes }
+   */
+  async *streamReply(
+    topicId: string,
+    message: string,
+    opts: { sessionId?: string; nodeId?: string; signal?: AbortSignal } = {},
+  ): AsyncIterableIterator<
+    | { kind: "token"; text: string }
+    | { kind: "done"; usedFallback: boolean; timeRemainingMinutes?: number }
+  > {
+    const ctx = this.buildContext(topicId, opts);
+    const prompt = this.buildPrompt(ctx, message);
+
+    try {
+      const stream = getScheduler().executeStream("tutor", () => prompt, {
+        signal: opts.signal,
+      });
+      let any = false;
+      for await (const token of stream) {
+        if (token.length > 0) {
+          any = true;
+          yield { kind: "token", text: token };
+        }
+      }
+      if (!any) throw new Error("LLM API вернул пустой ответ");
+    } catch (err) {
+      const text = this.fallbackText(ctx, message, err);
+      // Отдаём fallback порциями, чтобы клиент видел прогресс заполнения.
+      const chunk = 64;
+      for (let i = 0; i < text.length; i += chunk) {
+        yield { kind: "token", text: text.slice(i, i + chunk) };
+      }
+      yield { kind: "done", usedFallback: true, timeRemainingMinutes: ctx.timeRemainingMinutes };
+      return;
+    }
+
+    yield { kind: "done", usedFallback: false, timeRemainingMinutes: ctx.timeRemainingMinutes };
+  }
+
+  private buildContext(
+    topicId: string,
+    opts: { sessionId?: string; nodeId?: string },
+  ): TutorContext {
     const topic = this.getTopic(topicId);
     const currentLevel = this.learnerModel.getCurrentLevel(topicId);
     const targetLevel = topic?.target_level;
@@ -40,37 +120,40 @@ export class AITutorService {
       : undefined;
     const recentAttempts = this.recentAttempts(topicId);
 
-    const prompt = buildTutorPrompt({
-      topic: topic?.name ?? "",
-      goal: topic?.goal ?? "",
-      targetLevel: targetLevel ?? "basic_understanding",
+    return {
+      topic,
       currentLevel,
-      currentNode: currentNode?.label,
-      nodePath: currentNode?.path,
+      targetLevel: targetLevel ?? "basic_understanding",
+      currentNode,
       currentMastery,
       misconceptions,
       recentAttempts,
       timeRemainingMinutes: timeLeft,
+    };
+  }
+
+  private buildPrompt(ctx: TutorContext, message: string): string {
+    return buildTutorPrompt({
+      topic: ctx.topic?.name ?? "",
+      goal: ctx.topic?.goal ?? "",
+      targetLevel: ctx.targetLevel,
+      currentLevel: ctx.currentLevel,
+      currentNode: ctx.currentNode?.label,
+      nodePath: ctx.currentNode?.path,
+      currentMastery: ctx.currentMastery,
+      misconceptions: ctx.misconceptions,
+      recentAttempts: ctx.recentAttempts,
+      timeRemainingMinutes: ctx.timeRemainingMinutes,
       message,
     });
+  }
 
-    try {
-      const res = await getScheduler().execute(
-        "tutor",
-        () => prompt,
-        (raw) => raw,
-      );
-      return { text: res.result, usedFallback: false, timeRemainingMinutes: timeLeft };
-    } catch (err) {
-      return {
-        text:
-          `Не удалось получить ответ от модели. ` +
-          `Тема: ${topic?.name ?? ""}. Ваш вопрос: ${message}. ` +
-          `(Ошибка: ${err instanceof Error ? err.message : String(err)})`,
-        usedFallback: true,
-        timeRemainingMinutes: timeLeft,
-      };
-    }
+  private fallbackText(ctx: TutorContext, message: string, err: unknown): string {
+    return (
+      `Не удалось получить ответ от модели. ` +
+      `Тема: ${ctx.topic?.name ?? ""}. Ваш вопрос: ${message}. ` +
+      `(Ошибка: ${err instanceof Error ? err.message : String(err)})`
+    );
   }
 
   private nodeOfId(nodeId: string): { id: string; label: string; path?: string[] } | undefined {

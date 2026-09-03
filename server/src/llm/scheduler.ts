@@ -1,5 +1,6 @@
 import {
   callLLM,
+  callLLMStream,
   getModelsForTier,
   LLMMockError,
   LLMRateLimitError,
@@ -17,6 +18,8 @@ export interface SchedulerConfig {
   maxRetries?: number;
   batchSize?: number;
   windowMs?: number;
+  /** Общий дедлайн одной операции (мс); 0/undefined — без лимита. */
+  opDeadlineMs?: number;
 }
 
 interface RateTracker {
@@ -24,7 +27,7 @@ interface RateTracker {
   windowMs: number;
 }
 
-type RequiredCoreConfig = Required<Omit<SchedulerConfig, "windowMs">>;
+type RequiredCoreConfig = Required<Omit<SchedulerConfig, "windowMs" | "opDeadlineMs">>;
 
 const DEFAULT_CONFIG: RequiredCoreConfig = {
   maxRPM: 10,
@@ -33,6 +36,21 @@ const DEFAULT_CONFIG: RequiredCoreConfig = {
   maxRetries: 3,
   batchSize: 3,
 };
+
+/**
+ * Общий дедлайн на одну LLM-операцию (мс). По умолчанию 120 с, чтобы ни одна
+ * операция (в т.ч. ожидание слота) не висла бесконечно. Переопределяется env
+ * LLM_OP_TIMEOUT_MS; значение "0"/"off" отключает лимит.
+ */
+function readOpDeadlineMs(): number {
+  const raw = process.env.LLM_OP_TIMEOUT_MS;
+  if (raw === undefined || raw === "") return 120_000;
+  const trimmed = raw.trim().toLowerCase();
+  if (trimmed === "0" || trimmed === "off") return 0;
+  const num = Number(raw);
+  if (!Number.isFinite(num) || num <= 0) return 120_000;
+  return Math.trunc(num);
+}
 
 function readEnvInt(name: string): number | undefined {
   const raw = process.env[name];
@@ -109,11 +127,13 @@ export class TreeScheduler {
   private rpdTracker: RateTracker;
   private running = 0;
   private cache: LLMCache;
+  private opDeadlineMs: number;
 
   constructor(config?: SchedulerConfig, cache?: LLMCache) {
     this.config = { ...readSchedulerConfigFromEnv(), ...config };
     this.rpmTracker = { timestamps: [], windowMs: this.config.windowMs ?? 60_000 };
     this.rpdTracker = { timestamps: [], windowMs: this.config.windowMs ?? 86_400_000 };
+    this.opDeadlineMs = config?.opDeadlineMs ?? readOpDeadlineMs();
     this.cache = cache ?? new LLMCache();
   }
 
@@ -123,6 +143,16 @@ export class TreeScheduler {
 
   get batchLimit(): number {
     return this.config.batchSize;
+  }
+
+  /** Максимум одновременных LLM-запросов (слоты планировщика). */
+  get maxConcurrency(): number {
+    return this.config.maxConcurrency;
+  }
+
+  /** Текущее число выполняющихся LLM-запросов. */
+  get runningCount(): number {
+    return this.running;
   }
 
   private canExecute(): boolean {
@@ -140,8 +170,11 @@ export class TreeScheduler {
     tracker.timestamps = tracker.timestamps.filter((t) => t > cutoff);
   }
 
-  private async waitForSlot(): Promise<void> {
+  private async waitForSlot(deadline?: number): Promise<void> {
     while (!this.canExecute()) {
+      if (deadline !== undefined && Date.now() >= deadline) {
+        throw new Error("Таймаут ожидания слота LLM-планировщика");
+      }
       await sleep(this.timeToNextSlotMs());
     }
   }
@@ -181,6 +214,8 @@ export class TreeScheduler {
     },
   ): Promise<{ result: T; llmResult: ILLMResult; cached: boolean }> {
     const startTime = Date.now();
+    const deadline =
+      this.opDeadlineMs > 0 ? startTime + this.opDeadlineMs : undefined;
     let lastError: Error | null = null;
     let attemptsMade = 0;
     let lastPromptLength = 0;
@@ -209,7 +244,7 @@ export class TreeScheduler {
 
       let modelFailed = false;
       for (let attempt = 0; attempt <= this.config.maxRetries; attempt++) {
-        await this.waitForSlot();
+        await this.waitForSlot(deadline);
         this.acquire();
 
         try {
@@ -263,6 +298,107 @@ export class TreeScheduler {
     throw new LLMRetriesExhaustedError(
       lastError ?? new Error("Не удалось выполнить LLM-запрос"),
       attemptsMade,
+    );
+  }
+
+  /**
+   * Потоковая версия execute: отдаёт токены по мере генерации (SSE-тьютор).
+   * Уважает те же ограничения (concurrency/RPM/RPD), перебирает кандидатов
+   * моделей и ретраи, но ответ отдаётся построчно, а не целиком.
+   * Внешний `signal` позволяет прервать запрос при закрытии соединения.
+   */
+  async *executeStream(
+    operation: string,
+    promptFn: () => string,
+    options?: { model?: string; signal?: AbortSignal },
+  ): AsyncIterableIterator<string> {
+    const startTime = Date.now();
+    const deadline =
+      this.opDeadlineMs > 0 ? startTime + this.opDeadlineMs : null;
+    let lastError: Error | null = null;
+
+    if (deadline !== null && Date.now() >= deadline) {
+      throw new LLMRetriesExhaustedError(
+        new Error("Таймаут LLM-операции"),
+        0,
+      );
+    }
+
+    const allModels = options?.model
+      ? [options.model]
+      : getModelsForTier(tierForOperation(operation));
+
+    for (const model of allModels) {
+      let modelFailed = false;
+      for (let attempt = 0; attempt <= this.config.maxRetries; attempt++) {
+        if (deadline !== null && Date.now() >= deadline) {
+          throw new LLMRetriesExhaustedError(
+            lastError ?? new Error("Таймаут LLM-операции"),
+            attempt,
+          );
+        }
+        await this.waitForSlot(deadline ?? undefined);
+        if (deadline !== null && Date.now() >= deadline) {
+          throw new LLMRetriesExhaustedError(
+            lastError ?? new Error("Таймаут LLM-операции"),
+            attempt,
+          );
+        }
+        this.acquire();
+        let released = false;
+        const release = () => {
+          if (released) return;
+          released = true;
+          this.release();
+        };
+        try {
+          const prompt = promptFn();
+          let any = false;
+          for await (const token of callLLMStream(prompt, { model }, options?.signal)) {
+            any = any || token.length > 0;
+            yield token;
+          }
+          if (!any) {
+            throw new Error("LLM API вернул пустой ответ");
+          }
+          release();
+          trackOperation({
+            operation,
+            node_ids: [],
+            model,
+            input_tokens: Math.ceil(prompt.length / 4),
+            output_tokens: 0,
+            latency_ms: Date.now() - startTime,
+            retry_count: attempt,
+            cache_hit: false,
+            estimated_cost: 0,
+          });
+          return;
+        } catch (err) {
+          lastError = err instanceof Error ? err : new Error("Ошибка LLM");
+          if (err instanceof LLMMockError || lastError instanceof LLMMockError) {
+            throw new LLMRetriesExhaustedError(lastError, attempt);
+          }
+          if (shouldRetry(lastError, attempt, this.config.maxRetries)) {
+            await sleep(retryDelayMs(lastError, attempt));
+            continue;
+          }
+          modelFailed = true;
+          break;
+        } finally {
+          // Гарантированно освобождаем слот, в т.ч. при раннем прекращении
+          // итерации потребителем (возврат/прерывание потока).
+          release();
+        }
+      }
+      if (modelFailed && allModels.indexOf(model) < allModels.length - 1) {
+        continue;
+      }
+    }
+
+    throw new LLMRetriesExhaustedError(
+      lastError ?? new Error("Не удалось выполнить LLM-запрос"),
+      0,
     );
   }
 

@@ -325,6 +325,8 @@ export const tutorApi = {
       "/api/tutor",
       { method: "POST", json: body },
     ),
+  stream: (body: { topic_id: string; session_id?: string; message: string; node_id?: string }) =>
+    postSSE("/api/tutor/stream", body),
 };
 
 // ---------- Milestones ----------

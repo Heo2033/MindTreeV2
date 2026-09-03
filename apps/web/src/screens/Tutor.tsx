@@ -114,6 +114,12 @@ export function TutorScreen() {
   const [contextNodeLabel, setContextNodeLabel] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
+  // Пока идёт потоковая генерация, последним сообщением становится assistant
+  // с накапливающимся текстом — в этом случае спиннер не показываем.
+  const lastMsg = messages[messages.length - 1];
+  const liveContent =
+    sending && lastMsg?.role === "assistant" && lastMsg.content.length > 0;
+
   useEffect(() => {
     reset();
   }, [reset]);
@@ -208,7 +214,7 @@ export function TutorScreen() {
                 )}
               </div>
             ))}
-            {sending && (
+            {sending && !liveContent && (
               <div className="self-start rounded-xl border border-border bg-surface p-3">
                 <Spinner size="sm" />
               </div>

@@ -5,6 +5,7 @@ import type {
 } from "@mindtree/types";
 import { getScheduler } from "../llm/scheduler.js";
 import { parseLLMJson, LLMMockError, LLMRetriesExhaustedError } from "../llm/client.js";
+import { scopeNodeIds } from "./scopedIds.js";
 import {
   buildStructurePrompt,
   type IStructurePromptOptions,
@@ -427,6 +428,10 @@ export class KnowledgeGraphEngine {
     // понятий и коллизии id, чтобы не вносить противоречия.
     const consistent = consistencyCheckAgainstTree(allNodes, added);
 
+    // Уникализация id: LLM может вернуть те же id что и в другой теме.
+    // Суффикс topicId делает id глобально уникальными.
+    const scoped = scopeNodeIds(consistent.nodes, topicId);
+
     const insert = db.prepare(
       `INSERT OR IGNORE INTO knowledge_nodes
          (id, topic_id, parent_id, label, one_liner, concept_type, importance, difficulty,
@@ -435,7 +440,7 @@ export class KnowledgeGraphEngine {
     );
 
     const relationByTo = new Map<string, Relation[]>();
-    for (const c of consistent.nodes) {
+    for (const c of scoped) {
       if (c.relations && c.relations.length > 0) {
         relationByTo.set(c.id, c.relations);
       }
@@ -473,8 +478,8 @@ export class KnowledgeGraphEngine {
       );
     });
 
-    tx(consistent.nodes);
-    return consistent.nodes;
+    tx(scoped);
+    return scoped;
   }
 
   /**

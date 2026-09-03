@@ -1,6 +1,8 @@
 import type { FastifyInstance } from "fastify";
 import { KnowledgeGraphEngine, type NodeDraft } from "../domain/KnowledgeGraphEngine.js";
+import { scopeNodeIds } from "../domain/scopedIds.js";
 import { getDb } from "../db/connection.js";
+import { getScheduler } from "../llm/scheduler.js";
 
 export async function pipelineRoutes(app: FastifyInstance) {
   app.post("/generate", async (request, reply) => {
@@ -85,6 +87,10 @@ function persistNodes(
     | undefined;
   if (!topic) return { count: 0, skippedOrphans: [] };
 
+  // Уникализация id: LLM возвращает статичные id (n1_root, n2_*) одинаковые
+  // для каждой темы. Суффикс topicId обеспечивает глобальную уникальность в БД.
+  const scoped = scopeNodeIds(nodes, topicId);
+
   // Derive root label from query if tree root is empty
   const rootLabel = query.split(/\r?\n/)[0].trim().slice(0, 80) || "Тема";
 
@@ -95,21 +101,25 @@ function persistNodes(
      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   );
 
-  // Защита от «сирот»: до персиста собираем все id партии; узел с parentId,
-  // указывающим на id, которого нет в сохраняемом дереве, НЕ записываем,
-  // чтобы в БД не появлялись дети без родителя (белый граф/повисшие листья).
-  const persistedIds = new Set(nodes.filter((n) => String(n.id ?? "") !== "").map((n) => String(n.id)));
+  // Защита от «сирот»: до персиста собираем все id партии (уже scoped);
+  // узел с parentId, указывающим на id, которого нет в сохраняемом дереве,
+  // НЕ записываем, чтобы в БД не появлялись дети без родителя.
+  const persistedIds = new Set(scoped.map((n) => String(n.id)));
   const skippedOrphans: string[] = [];
-  const validItems = nodes.filter((n) => {
+  const validItems = scoped.filter((n) => {
     const id = String(n.id ?? "");
     if (!id) return false;
     const parentId = n.parentId && n.parentId !== id ? String(n.parentId) : null;
-    if (parentId && !persistedIds.has(parentId) && !nodes.some((x) => String(x.id) === parentId)) {
+    if (parentId && !persistedIds.has(parentId)) {
       skippedOrphans.push(id);
       return false;
     }
     return true;
   });
+
+  // Сортировка по level: корень (level=1) вставляется раньше детей (level=2+),
+  // чтобы satisfy `parent_id` FK (foreign_keys=ON).
+  validItems.sort((a, b) => a.level - b.level);
 
   const tx = db.transaction((items: NodeDraft[]) => {
     let count = 0;
@@ -172,6 +182,7 @@ function scheduleBackgroundFill(topicId: string, engine: KnowledgeGraphEngine): 
   // eslint-disable-next-line @typescript-eslint/no-floating-promises
   void (async () => {
     const db = getDb();
+    const scheduler = getScheduler();
     try {
       const rows = db
         .prepare(
@@ -188,6 +199,16 @@ function scheduleBackgroundFill(topicId: string, engine: KnowledgeGraphEngine): 
           .prepare(`SELECT content_loaded FROM knowledge_nodes WHERE id = ? AND topic_id = ?`)
           .get(id, topicId) as { content_loaded: number } | undefined;
         if (!stillPending || stillPending.content_loaded === 1) continue;
+
+        // Интерактивные запросы (тьютор и пр.) не должны голодать из-за фона:
+        // резервируем минимум один слот планировщика. Если все слоты заняты,
+        // ждём освобождения (с тем же глобальным дедлайном операции).
+        while (
+          scheduler.maxConcurrency > 1 &&
+          scheduler.runningCount >= scheduler.maxConcurrency
+        ) {
+          await new Promise((r) => setTimeout(r, 150));
+        }
 
         try {
           await engine.generateNodeContentFromDb(topicId, id);

@@ -17,7 +17,7 @@ const LEVEL_LABEL: Record<string, string> = {
 };
 
 export function DiagnosticScreen() {
-  const { topicId, topicName, loadTopic } = useGraphStore();
+  const { topicId, topicName } = useGraphStore();
   const navigate = useNavigate();
 
   const [phase, setPhase] = useState<Phase>("idle");
@@ -68,7 +68,6 @@ export function DiagnosticScreen() {
       const res = await diagnosticApi.evaluate(topicId, payload);
       setResult(res);
       setPhase("result");
-      await loadTopic(topicId).catch(() => {});
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось оценить диагностику");
     } finally {

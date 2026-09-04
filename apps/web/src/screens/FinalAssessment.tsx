@@ -6,7 +6,7 @@ import type { AssessmentDto, AssessmentSubmitResult } from "../api";
 import type { MasteryLevel } from "@mindtree/types";
 import { Button, Spinner, ErrorBanner, Badge } from "@mindtree/ui";
 
-type Phase = "loading" | "playing" | "result";
+type Phase = "idle" | "loading" | "playing" | "result" | "expanding";
 
 const LEVEL_LABEL: Record<MasteryLevel, string> = {
   awareness: "Ознакомление",
@@ -30,13 +30,13 @@ const TYPE_LABEL: Record<string, string> = {
 };
 
 export function FinalAssessmentScreen() {
-  const { topicId } = useGraphStore();
+  const { topicId, visibleLevel, nodes, autoExpandVisible } = useGraphStore();
   const { session } = useSessionStore();
   const navigate = useNavigate();
   const location = useLocation();
   const passedId = (location.state as { assessmentId?: string } | null)?.assessmentId;
 
-  const [phase, setPhase] = useState<Phase>("loading");
+  const [phase, setPhase] = useState<Phase>("idle");
   const [assessment, setAssessment] = useState<AssessmentDto | null>(null);
   const [current, setCurrent] = useState(0);
   const [mcqAnswers, setMcqAnswers] = useState<(number | null)[]>([]);
@@ -44,6 +44,8 @@ export function FinalAssessmentScreen() {
   const [result, setResult] = useState<AssessmentSubmitResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [canExpand, setCanExpand] = useState(false);
+  const [expanded, setExpanded] = useState(false);
 
   async function setup() {
     if (!session) {
@@ -58,16 +60,8 @@ export function FinalAssessmentScreen() {
       if (passedId) {
         a = await assessmentsApi.get(passedId);
       } else {
-        try {
-          const prepared = await sessionsApi.finalize(session.id);
-          a = await assessmentsApi.get(prepared.assessmentId);
-        } catch {
-          a = await assessmentsApi.create({
-            session_id: session.id,
-            type: "final",
-            question_count: 6,
-          });
-        }
+        const prepared = await sessionsApi.finalize(session.id);
+        a = await assessmentsApi.get(prepared.assessmentId);
       }
       setAssessment(a);
       setMcqAnswers(new Array(a.questions.length).fill(null));
@@ -76,14 +70,14 @@ export function FinalAssessmentScreen() {
       setPhase(a.questions.length ? "playing" : "result");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось сформировать итоговый тест");
-      setPhase("result");
+      setPhase("idle");
     }
   }
 
   useEffect(() => {
-    void setup();
+    if (passedId) void setup();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session?.id]);
+  }, [passedId]);
 
   const select = (i: number) => {
     if (mcqAnswers[current] !== null) return;
@@ -132,6 +126,9 @@ export function FinalAssessmentScreen() {
     try {
       const res = await assessmentsApi.submit(assessment.id, attempts);
       setResult(res);
+      const masteryScore = res.mastery?.newLevel.score ?? 0;
+      const hasDeeperNodes = nodes.some((n) => n.level > visibleLevel) || nodes.some((n) => n.level === visibleLevel && !nodes.some((c) => c.parentId === n.id));
+      setCanExpand(masteryScore >= 0.6 && visibleLevel < 5 && hasDeeperNodes);
       setPhase("result");
       // Сессия завершается на сервере при сабмите финального assessment.
     } catch (err) {
@@ -139,6 +136,43 @@ export function FinalAssessmentScreen() {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function handleExpand() {
+    setPhase("expanding");
+    try {
+      await autoExpandVisible();
+      setExpanded(true);
+    } catch {
+      // ошибка уже в graphStore
+    }
+    setPhase("result");
+  }
+
+  if (phase === "idle") {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-4 p-8 text-center">
+        <h2 className="text-xl font-bold text-ink">Итоговый тест</h2>
+        <p className="max-w-md text-sm text-ink-4">
+          Проверка знаний по всему пройденному материалу. Тест включает вопросы разных форматов.
+        </p>
+        <ErrorBanner message={error} />
+        {!session ? (
+          <p className="text-sm text-ink-4">Сначала начните сессию на вкладке «Сессия».</p>
+        ) : (
+          <Button onClick={() => void setup()}>Начать итоговый тест</Button>
+        )}
+      </div>
+    );
+  }
+
+  if (phase === "expanding") {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-4">
+        <Spinner />
+        <p className="text-sm text-ink-4">Расширяем дерево знаний…</p>
+      </div>
+    );
   }
 
   if (phase === "loading") {
@@ -185,13 +219,38 @@ export function FinalAssessmentScreen() {
                 </div>
               )}
 
+              {canExpand && !expanded && (
+                <div className="rounded-xl border border-accent bg-surface p-4 text-center">
+                  <p className="text-sm font-medium text-ink">Ваши знания достаточны для изучения более глубоких понятий</p>
+                  <p className="mt-1 text-xs text-ink-4">Расширить дерево и начать следующую сессию?</p>
+                  <div className="mt-3">
+                    <Button onClick={() => void handleExpand()}>Расширить дерево</Button>
+                  </div>
+                </div>
+              )}
+
+              {expanded && (
+                <div className="rounded-xl border border-ok bg-ok-soft p-4 text-center">
+                  <p className="text-sm font-medium text-ink">Дерево расширено</p>
+                  <p className="mt-1 text-xs text-ink-4">Новые понятия доступны для изучения</p>
+                </div>
+              )}
+
               <div className="flex gap-3">
-                <Button variant="secondary" className="flex-1" onClick={() => navigate("../learner")}>
-                  Модель ученика
-                </Button>
-                <Button className="flex-1" onClick={() => navigate("../session")}>
-                  К сессии
-                </Button>
+                {expanded ? (
+                  <Button className="flex-1" onClick={() => navigate("../session")}>
+                    Начать следующую сессию
+                  </Button>
+                ) : (
+                  <>
+                    <Button variant="secondary" className="flex-1" onClick={() => navigate("../learner")}>
+                      Модель ученика
+                    </Button>
+                    <Button className="flex-1" onClick={() => navigate("../session")}>
+                      К сессии
+                    </Button>
+                  </>
+                )}
               </div>
             </div>
           ) : (

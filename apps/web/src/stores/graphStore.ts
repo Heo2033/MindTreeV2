@@ -29,6 +29,8 @@ interface GraphState {
   revealNode: (nodeId: string) => Promise<boolean>;
   expandNode: (nodeId: string) => Promise<boolean>;
   generateContent: (nodeId: string) => Promise<void>;
+  /** Автоматически расширить visibleLevel на 1 и сгенерировать детей для новых листьев. */
+  autoExpandVisible: () => Promise<boolean>;
   setGoal: (goal: string) => void;
   resetVisibility: () => void;
   clear: () => void;
@@ -243,6 +245,39 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     } catch (err) {
       set({ pipeline: idlePipeline(), error: err instanceof Error ? err.message : "Ошибка генерации контента" });
     }
+  },
+
+  async autoExpandVisible() {
+    const { topicId, nodes, visibleLevel } = get();
+    if (!topicId) return false;
+    const MAX_DEPTH = 5;
+    if (visibleLevel >= MAX_DEPTH) return false;
+
+    const newLevel = visibleLevel + 1;
+    set({
+      visibleLevel: newLevel,
+      pipeline: { phase: "expand", message: "Расширяем дерево…", stats: null, status: "running" },
+      error: null,
+    });
+
+    // Находим листья на новом уровне (без детей в БД)
+    const leavesAtNewLevel = nodes.filter(
+      (n) => n.level === newLevel && !nodes.some((c) => c.parentId === n.id),
+    );
+
+    let expanded = false;
+    for (const leaf of leavesAtNewLevel.slice(0, 6)) {
+      try {
+        const res = await treeApi.expand(topicId, leaf.id);
+        if (typeof res.count === "number" && res.count > 0) expanded = true;
+      } catch {
+        // пропускаем неудачные расширения
+      }
+    }
+
+    await get().loadTopic(topicId);
+    set({ pipeline: idlePipeline() });
+    return expanded;
   },
 
   clear() {

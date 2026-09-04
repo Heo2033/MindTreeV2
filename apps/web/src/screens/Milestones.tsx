@@ -46,19 +46,17 @@ export function MilestonesScreen() {
     setLoading(true);
     setError(null);
     try {
-      let jid = journeyId;
-      if (!jid) {
-        const created = await createSession(topicId).catch(() => null);
-        jid = created?.journeyId ?? null;
+      if (!journeyId) {
+        setLoading(false);
+        return;
       }
-      if (!jid) throw new Error("Не удалось получить путешествие темы");
 
       let ms: MilestoneDto[] = [];
-      const existing = await milestonesApi.journey(jid).catch(() => null);
+      const existing = await milestonesApi.journey(journeyId).catch(() => null);
       if (existing && existing.milestones.length > 0) {
         ms = existing.milestones;
       } else {
-        const gen = await milestonesApi.generate(jid, topicId);
+        const gen = await milestonesApi.generate(journeyId, topicId);
         ms = gen.milestones;
       }
 
@@ -170,7 +168,15 @@ export function MilestonesScreen() {
           <div className="flex justify-center py-16"><Spinner /></div>
         )}
 
-        {!loading && milestones.length === 0 && (
+        {!loading && !journeyId && (
+          <div className="mx-auto max-w-xl rounded-xl border border-border bg-surface p-8 text-center text-ink-4">
+            <p className="text-sm font-medium text-ink-3">Сессия не начата</p>
+            <p className="mt-2 text-sm">Чтобы увидеть путь обучения, сначала начните сессию на вкладке «Сессия».</p>
+            <div className="mt-4"><Button onClick={() => navigate("../session")}>Перейти к сессии</Button></div>
+          </div>
+        )}
+
+        {!loading && journeyId && milestones.length === 0 && (
           <div className="mx-auto max-w-xl rounded-xl border border-border bg-surface p-8 text-center text-ink-4">
             Пока нет вех для этой темы.
             <div className="mt-4"><Button onClick={() => void load()}>Сгенерировать путь</Button></div>

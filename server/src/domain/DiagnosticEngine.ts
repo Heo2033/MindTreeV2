@@ -33,16 +33,16 @@ export class DiagnosticEngine {
   private learnerModel = new LearnerModelService();
 
   async generate(topicId: string): Promise<DiagnosticResult["questions"]> {
-    const topic = getDb().prepare("SELECT name, target_level FROM topics WHERE id = ?").get(topicId) as
-      | { name: string; target_level: string }
+    const topic = getDb().prepare("SELECT name, goal, target_level FROM topics WHERE id = ?").get(topicId) as
+      | { name: string; goal: string; target_level: string }
       | undefined;
     const nodes = getDb()
-      .prepare("SELECT id, label, one_liner FROM knowledge_nodes WHERE topic_id = ? AND level >= 2 LIMIT 8")
+      .prepare("SELECT id, label, one_liner FROM knowledge_nodes WHERE topic_id = ? AND level >= 1 LIMIT 8")
       .all(topicId) as Array<{ id: string; label: string; one_liner: string }>;
 
     const prompt = buildDiagnosticPrompt({
       topic: topic?.name ?? "",
-      goal: "выяснить текущий уровень понимания",
+      goal: topic?.goal ?? "выяснить текущий уровень понимания",
       targetLevel: topic?.target_level ?? "basic_understanding",
       nodes: nodes.map((n) => ({ id: n.id, label: n.label, one_liner: n.one_liner })),
     });
@@ -60,7 +60,6 @@ export class DiagnosticEngine {
     topicId: string,
     answers: DiagnosticAnswer[],
   ): Promise<DiagnosticResult> {
-    const questions = await this.generate(topicId);
     const correctCount = answers.filter(
       (a) => a.selectedIndex === a.correctIndex,
     ).length;
@@ -92,7 +91,7 @@ export class DiagnosticEngine {
     }
 
     return {
-      questions,
+      questions: [],
       currentLevel,
       knownConcepts,
       unknownConcepts,

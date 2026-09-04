@@ -13,11 +13,54 @@ export const RELATION_COLORS: Record<RelationType, string> = {
   alternative_to: "#ec4899",
 };
 
-const NODE_W = 210;
-const NODE_H = 56;
-const NODE_GAP = 42;
-const RING_STEP = NODE_H + 42;
-const MIN_RING_RADIUS = 130;
+const NODE_W = 200;
+const NODE_H = 80;
+const COMPACT_H = 34;
+const NODE_GAP = 48;
+const COMPACT_GAP = 16;
+
+// Минимальный радиус кольца L2 (растёт с числом L2-веток).
+const L2_RADIUS_MIN = (NODE_W + NODE_H) / 2 + 120;
+// Минимальный локальный радиус раскрытия поддерева у узла (растёт с глубиной).
+const SUB_R_BASE = 80;
+
+// Ширина компактной карточки L3+ — динамически по длине label.
+// Минимум достаточен для короткого названия; label растягивается на всю ширину.
+function compactW(label: string): number {
+  const textW = label ? label.length * 7 : 50;
+  const w = 30 + textW;
+  return Math.max(72, Math.min(300, w));
+}
+
+// Палитра цветов веток L2 (поддеревьев).
+export const BRANCH_COLORS = [
+  "#3b82f6", // blue
+  "#ef4444", // red
+  "#22c55e", // green
+  "#f97316", // orange
+  "#a855f7", // purple
+  "#06b6d4", // cyan
+  "#ec4899", // pink
+  "#eab308", // yellow
+  "#14b8a6", // teal
+  "#8b5cf6", // indigo
+];
+
+// Уровневые размеры карточек: L1/L2 — полные, L3+ — компактные (ширина по label).
+function nodeSize(level: number, label?: string): { w: number; h: number; gap: number } {
+  return level >= 3
+    ? { w: compactW(label ?? ""), h: COMPACT_H, gap: COMPACT_GAP }
+    : { w: NODE_W, h: NODE_H, gap: NODE_GAP };
+}
+
+/** Экспортируемая версия для согласованности рендера (ReactFlow) с layout. */
+export function cardSize(
+  level: number,
+  label?: string,
+): { w: number; h: number } {
+  const s = nodeSize(level, label);
+  return { w: s.w, h: s.h };
+}
 
 export interface GraphPosition {
   x: number;
@@ -28,7 +71,7 @@ export interface GraphFlowNode {
   id: string;
   type?: string;
   position: GraphPosition;
-  data: { node: KnowledgeNode };
+  data: { node: KnowledgeNode; branchColor?: string };
 }
 
 export interface GraphFlowEdge {
@@ -38,7 +81,7 @@ export interface GraphFlowEdge {
   sourceHandle?: string;
   targetHandle?: string;
   data:
-    | { kind: "hierarchy" }
+    | { kind: "hierarchy"; color?: string; sourceSize?: { w: number; h: number } }
     | { kind: "relation"; color: string; label: string };
 }
 
@@ -60,7 +103,10 @@ export function getEdgeHandles(
   const absDx = Math.abs(dx);
   const absDy = Math.abs(dy);
 
-  if (absDy > absDx * 0.5) {
+  // Сторона = ось максимального смещения: вертикаль только если лист дальше
+  // по вертикали, чем по горизонтали (строгая доминанта). Угловой лист (~45°)
+  // уходит в боковую сторону — «право корня в лево листа» для правого-верхнего.
+  if (absDy > absDx) {
     if (dy > 0) {
       return { sourceHandle: "bottom", targetHandle: "top" };
     }
@@ -73,14 +119,15 @@ export function getEdgeHandles(
 }
 
 /**
- * Радиальный (орбитальный) layout:
+ * Вложенный вентиляторный layout:
  *  — корень в центре;
- *  — каждый уровень — кольцо, радиус зависит от числа узлов на уровне
- *    (гарантирует, что по окружности помещаются все карточки без наложений);
- *  — каждый узел занимает угловой сектор, пропорциональный размеру своего
- *    поддерева, с минимальной шириной сектора для карточки;
- *  — ветки упорядочены по порядку детей (без «стягивания» листьев в одну точку).
+ *  — L2-узлы равномерно по окружности, радиус кольца растёт с их числом;
+ *  — каждый узел уровня 3+ — локальный центр своей мини-карты, дети
+ *    раскладываются вокруг него (вложенные радиальные вентиляторы), что
+ *    устраняет «лесенку» от глобального центра;
+ *  — ширина компактных карточек L3+ динамическая (по длине label).
  */
+
 function computeRadialPositions(tree: KnowledgeNode[]): Map<string, GraphPosition> {
   const result = new Map<string, GraphPosition>();
   if (tree.length === 0) return result;
@@ -96,8 +143,7 @@ function computeRadialPositions(tree: KnowledgeNode[]): Map<string, GraphPositio
 
   const roots = tree.filter((n) => !n.parentId).map((n) => n.id);
 
-  // Повреждённое дерево без корней (например, все узлы «сироты» — ссылаются на
-  // отсутствующий parentId): всё равно назначаем позиции, чтобы рендер не падал.
+  // Повреждённое дерево без корней: разбрасываем по уровням вокруг центра.
   if (roots.length === 0) {
     const byLevel = new Map<number, string[]>();
     for (const n of tree) {
@@ -105,7 +151,7 @@ function computeRadialPositions(tree: KnowledgeNode[]): Map<string, GraphPositio
       byLevel.get(n.level)!.push(n.id);
     }
     for (const [lv, ids] of byLevel) {
-      const r = Math.max(MIN_RING_RADIUS, (lv <= 1 ? 0 : MIN_RING_RADIUS) + (lv - 1) * RING_STEP);
+      const r = (lv - 1) * SUB_R_BASE * 1.6 + SUB_R_BASE;
       const total = ids.length || 1;
       ids.forEach((id, i) => {
         const theta = (i / total) * TAU;
@@ -115,102 +161,124 @@ function computeRadialPositions(tree: KnowledgeNode[]): Map<string, GraphPositio
     return result;
   }
 
-  // Уровни и их радиусы: по числу узлов на уровне, с учётом минимального роста колец.
-  const levels = new Map<number, string[]>();
-  for (const n of tree) {
-    if (!levels.has(n.level)) levels.set(n.level, []);
-    levels.get(n.level)!.push(n.id);
-  }
-  const sortedLevels = [...levels.keys()].sort((a, b) => a - b);
-
-  const ringRadius = new Map<number, number>();
-  let prevR = 0;
-  for (const lv of sortedLevels) {
-    if (lv <= 1) {
-      ringRadius.set(lv, 0);
-      prevR = MIN_RING_RADIUS;
-      continue;
+  // Число детей, макс. ширина карточки и число листьев в поддереве каждого узла.
+  const kidsCount = new Map<string, number>();
+  const maxW = new Map<string, number>();
+  const leafCount = new Map<string, number>();
+  const computeSubtree = (id: string): { maxW: number; leaves: number } => {
+    const node = byId.get(id)!;
+    const kids = childrenOf.get(id) ?? [];
+    kidsCount.set(id, kids.length);
+    const own = nodeSize(node.level, node.label).w;
+    if (kids.length === 0) {
+      maxW.set(id, own);
+      leafCount.set(id, 1);
+      return { maxW: own, leaves: 1 };
     }
-    const count = levels.get(lv)!.length;
-    const fit = count <= 1 ? 0 : (count * (NODE_W + NODE_GAP)) / TAU;
-    const r = Math.max(prevR + RING_STEP, fit);
-    ringRadius.set(lv, r);
-    prevR = r;
-  }
+    let mw = own;
+    let leaves = 0;
+    for (const k of kids) {
+      const sub = computeSubtree(k);
+      mw = Math.max(mw, sub.maxW);
+      leaves += sub.leaves;
+    }
+    maxW.set(id, mw);
+    leafCount.set(id, leaves);
+    return { maxW: mw, leaves };
+  };
+  for (const r of roots) computeSubtree(r);
 
-  const minArc = (lv: number): number => {
-    if (lv <= 1) return 0;
-    const r = ringRadius.get(lv) ?? MIN_RING_RADIUS;
-    return (NODE_W + NODE_GAP) / r;
+  // Радиус, на котором сидят ВСЕ дети узла X (общая окружность группы).
+  // Растёт с глубиной X, максимальной шириной карточки в его поддереве и
+  // числом листьев — чтобы равные угловые секторы вмещали самую широкую метку.
+  function groupRadius(lv: number, mw: number, leaves: number): number {
+    // Запас, чтобы ближний край самой длинной карточки-потомка (полуширина mw/2)
+    // не заезжал на родителя (полуширина NODE_W/2).
+    const clearance = COMPACT_GAP + NODE_W / 2 + mw / 2;
+    return Math.max(
+      clearance,
+      SUB_R_BASE + (lv - 2) * 40 + mw * 0.75 + (Math.max(leaves, 1) - 1) * 22,
+    );
+  }
+  const radiusOf = (id: string): number => {
+    const node = byId.get(id)!;
+    return groupRadius(node.level, maxW.get(id) ?? 0, leafCount.get(id) ?? 1);
   };
 
-  // Нижний проход: минимальная угловая ширина сектора каждой ветки (в радианах).
+  // Угловая потребность поддерева (радианы, видимые от родителя):
+  // веер из leafCount карточек шириной до maxW на своей окружности radius(P).
   const needRad = new Map<string, number>();
   const computeNeed = (id: string): number => {
     const node = byId.get(id)!;
-    const kids = childrenOf.get(id) ?? [];
-    const own = minArc(node.level);
-    if (kids.length === 0) {
-      needRad.set(id, own);
-      return own;
-    }
-    let sum = 0;
-    for (const k of kids) sum += computeNeed(k);
-    const need = Math.max(own, sum);
+    const parent = node.parentId ? byId.get(node.parentId) : undefined;
+    const rParent = parent ? radiusOf(parent.id) : radiusOf(id);
+    const lc = leafCount.get(id) ?? 1;
+    const mw = maxW.get(id) ?? 0;
+    const own = nodeSize(node.level, node.label).w;
+    const need = Math.max((own + COMPACT_GAP) / rParent, (lc * mw) / rParent);
     needRad.set(id, need);
     return need;
   };
-  let totalSpan = 0;
-  for (const r of roots) totalSpan += computeNeed(r);
+  // ВАЖНО: заполняем needRad снизу вверх ДО раскладки, иначе секторы пусты
+  // и все дети окажутся в одной точке.
+  for (const r of roots) computeNeed(r);
 
-  // Если суммарная ширина веток превышает полный круг — увеличиваем радиусы колец,
-  // чтобы «сжать» минимальные секторы и уложить всё в один оборот.
-  if (totalSpan > TAU) {
-    const k = totalSpan / TAU;
-    for (const lv of sortedLevels) {
-      const r = ringRadius.get(lv) ?? 0;
-      if (r > 0) ringRadius.set(lv, r * k);
-    }
-    needRad.clear();
-    totalSpan = 0;
-    for (const r of roots) totalSpan += computeNeed(r);
-  }
-
-  // Верхний проход: точные секторы [start, end] для каждого узла.
-  const angle = new Map<string, { start: number; end: number }>();
-
-  const assign = (id: string, start: number, end: number): void => {
-    angle.set(id, { start, end });
+  // Рекурсивная раскладка: ставит узел вокруг своего родителя и раскладывает
+  // его детей равными угловыми шагами (общая окружность группы) в секторе [start, end].
+  const place = (id: string, start: number, end: number): void => {
+    const node = byId.get(id)!;
+    const parent = node.parentId ? byId.get(node.parentId) : undefined;
     const kids = childrenOf.get(id) ?? [];
+    const pp = parent ? result.get(parent.id) : undefined;
+
+    if (pp && parent && node.level >= 3) {
+      const r = radiusOf(parent.id);
+      const theta = (start + end) / 2;
+      // Общая окружность группы: все дети родителя — на одном радиусе.
+      result.set(id, { x: pp.x + r * Math.cos(theta), y: pp.y + r * Math.sin(theta) });
+    }
+
     if (kids.length === 0) return;
-let sum = 0;
-    for (const k of kids) sum += needRad.get(k) ?? 0;
     const span = end - start;
-    const denom = sum || 1;
-    let cursor = start;
-    for (const k of kids) {
-      const w = needRad.get(k) ?? 0;
-      const childEnd = cursor + (span * w) / denom;
-      assign(k, cursor, childEnd);
-      cursor = childEnd;
+    const K = kids.length;
+    for (let i = 0; i < K; i++) {
+      const cs = start + (span * i) / K;
+      const ce = start + (span * (i + 1)) / K;
+      place(kids[i], cs, ce);
     }
   };
 
-  let cursor = 0;
-  for (const r of roots) {
-    const w = needRad.get(r) ?? 0;
-    const total = totalSpan || TAU;
-    const end = cursor + (2 * Math.PI * w) / total;
-    assign(r, cursor, end);
-    cursor = end;
-  }
+  // Корень в центре.
+  for (const r of roots) result.set(r, { x: 0, y: 0 });
 
-  // Позиции из срединных углов секторов.
-  for (const [id, { start, end }] of angle) {
-    const node = byId.get(id)!;
-    const r = ringRadius.get(node.level) ?? 0;
-    const theta = (start + end) / 2;
-    result.set(id, { x: r * Math.cos(theta), y: r * Math.sin(theta) });
+  // L2-узлы равномерно по окружности; радиус кольца растёт с их числом.
+  const l2nodes = tree
+    .filter((n) => n.level === 2)
+    .sort((a, b) => {
+      const pa = a.parentId ?? "";
+      const pb = b.parentId ?? "";
+      if (pa !== pb) return pa.localeCompare(pb);
+      return a.id.localeCompare(b.id);
+    });
+
+  const N = l2nodes.length;
+  if (N > 0) {
+    // Радиус кольца L2: минимум плюс на каждую ветку запас для карточки.
+    const l2Radius = Math.max(L2_RADIUS_MIN, (N * (NODE_W + NODE_GAP)) / TAU);
+    const sector = TAU / N;
+    const baseTheta = (i: number) => (i + 0.5) * sector;
+    // Сохраняем вычисленный L2-радиус для levelRadius(lv=2) при раскладке L3.
+    l2nodes.forEach((n, i) => {
+      const theta = baseTheta(i);
+      const start = theta - sector / 2;
+      const end = theta + sector / 2;
+      // Ставим L2 явно (а не через place), т.к. его родитель — корень, радиус — l2Radius.
+      result.set(n.id, {
+        x: l2Radius * Math.cos(theta),
+        y: l2Radius * Math.sin(theta),
+      });
+      place(n.id, start, end);
+    });
   }
 
   return result;
@@ -219,11 +287,39 @@ let sum = 0;
 export function convertTreeToGraphFlow(tree: KnowledgeNode[]): GraphFlow {
   const positions = computeRadialPositions(tree);
 
+  // Назначаем цвет ветки каждому L2-узлу (по порядку) и наследуем его потомкам.
+  const branchColor = new Map<string, string>();
+  const byId = new Map(tree.map((n) => [n.id, n]));
+  const childrenOf = new Map<string, string[]>();
+  for (const n of tree) {
+    if (n.parentId) {
+      if (!childrenOf.has(n.parentId)) childrenOf.set(n.parentId, []);
+      childrenOf.get(n.parentId)!.push(n.id);
+    }
+  }
+  const l2nodes = tree
+    .filter((n) => n.level === 2)
+    .sort((a, b) => {
+      const pa = a.parentId ?? "";
+      const pb = b.parentId ?? "";
+      if (pa !== pb) return pa.localeCompare(pb);
+      return a.id.localeCompare(b.id);
+    });
+  l2nodes.forEach((n, i) => {
+    const color = BRANCH_COLORS[i % BRANCH_COLORS.length];
+    const stack = [n.id];
+    while (stack.length) {
+      const id = stack.pop()!;
+      branchColor.set(id, color);
+      for (const k of childrenOf.get(id) ?? []) stack.push(k);
+    }
+  });
+
   const flowNodes: GraphFlowNode[] = tree.map((node) => ({
     id: node.id,
     type: "mindNode",
     position: positions.get(node.id) ?? { x: 0, y: 0 },
-    data: { node },
+    data: { node, branchColor: branchColor.get(node.id) },
   }));
 
   const flowEdges: GraphFlowEdge[] = [];
@@ -236,6 +332,8 @@ export function convertTreeToGraphFlow(tree: KnowledgeNode[]): GraphFlow {
     const tp = positions.get(n.id);
     // Родитель/узел без позиции (битый parentId или сирота) — ребро пропускаем.
     if (!sp || !tp) continue;
+    const parent = byId.get(n.parentId);
+    const ps = parent ? nodeSize(parent.level, parent.label) : nodeSize(1);
     const handles = getEdgeHandles(sp.x, sp.y, tp.x, tp.y);
     flowEdges.push({
       id: `${n.parentId}-${n.id}`,
@@ -243,7 +341,11 @@ export function convertTreeToGraphFlow(tree: KnowledgeNode[]): GraphFlow {
       target: n.id,
       sourceHandle: handles.sourceHandle,
       targetHandle: handles.targetHandle,
-      data: { kind: "hierarchy" },
+      data: {
+        kind: "hierarchy",
+        color: branchColor.get(n.id),
+        sourceSize: { w: ps.w, h: ps.h },
+      },
     });
     existingIds.add(`${n.parentId}-${n.id}`);
   }

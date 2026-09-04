@@ -10,7 +10,7 @@ import {
   MarkerType,
   BaseEdge,
   EdgeLabelRenderer,
-  getSmoothStepPath,
+  getBezierPath,
   useReactFlow,
   useViewport,
   type Node,
@@ -19,7 +19,12 @@ import {
   type EdgeProps,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { convertTreeToGraphFlow, type GraphFlowNode, type GraphFlowEdge } from "@mindtree/graph";
+import {
+  convertTreeToGraphFlow,
+  cardSize,
+  type GraphFlowNode,
+  type GraphFlowEdge,
+} from "@mindtree/graph";
 import { useGraphStore } from "../stores";
 import { Spinner, ErrorBanner, ProgressBar } from "@mindtree/ui";
 
@@ -67,12 +72,16 @@ type FlowEdge = Edge;
 
 function MindNode({ data }: NodeProps) {
   const node = (data as { node: KnowledgeNodeLike }).node;
+  const branchColor = (data as { branchColor?: string }).branchColor;
   const expandNode = useGraphStore((s) => s.expandNode);
   const navigate = useNavigate();
   const [busy, setBusy] = useState(false);
+  const [hovered, setHovered] = useState(false);
 
   const isTerminal = node.level >= 5 || (node.leaf && node.state === "expanded");
   const isExpandable = !isTerminal;
+  // Компактные карточки для L3+ (только label; one-liner/кнопки при наведении).
+  const isCompact = node.level >= 3;
 
   const handleStyle: React.CSSProperties = {
     opacity: 0,
@@ -90,13 +99,31 @@ function MindNode({ data }: NodeProps) {
     { id: "left", pos: Position.Left },
   ];
 
+  const dotColor = node.contentLoaded
+    ? "bg-ok"
+    : node.oneLiner
+      ? "bg-ink-4"
+      : "bg-warn";
+
+  // Динамическая ширина компактной карточки L3+ (синхронизирована с layout).
+  const compactWidth = cardSize(node.level, node.label).w;
+
   return (
     <div
-      className={`w-[200px] rounded-xl border bg-surface p-2.5 shadow-lg ${
+      className={`rounded-xl border bg-surface shadow-lg ${
+        isCompact ? "group p-1.5" : "p-2.5 w-[200px]"
+      } ${
         isExpandable
           ? "border-accent ring-2 ring-accent/30"
-          : "border-dashed border-border-strong opacity-90"
+          : "border-dashed border-border-strong"
       }`}
+      style={
+        isCompact
+          ? { borderColor: branchColor ?? undefined, width: compactWidth }
+          : undefined
+      }
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
     >
       {HANDLE_SIDES.map((side) => (
         <Handle
@@ -119,48 +146,56 @@ function MindNode({ data }: NodeProps) {
       <div className="flex items-center gap-2">
         <span
           className={`h-2 w-2 shrink-0 rounded-full ${
-            node.contentLoaded ? "bg-ok" : node.oneLiner ? "bg-ink-4" : "bg-warn"
+            branchColor ? "" : dotColor
           }`}
+          style={branchColor ? { background: branchColor } : undefined}
         />
-        <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-ink">
+        <span
+          className={`min-w-0 flex-1 truncate font-semibold text-ink ${
+            isCompact ? "text-[12px]" : "text-[13px]"
+          }`}
+        >
           {node.label || "Без названия"}
         </span>
       </div>
-      {node.oneLiner && (
+      {!(isCompact && !hovered) && node.oneLiner && (
         <p className="mt-1 line-clamp-2 text-[11px] leading-snug text-ink-4">
           {node.oneLiner}
         </p>
       )}
-      {isExpandable ? (
-        <span className="mt-1 inline-block rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-accent-ink">
-          + можно расширить
-        </span>
-      ) : (
-        <span className="mt-1 inline-block rounded bg-surface-2 px-1.5 py-0.5 text-[10px] font-semibold text-ink-4">
-          конечный лист
-        </span>
-      )}
-      <div className="mt-2 flex items-center gap-2">
-        <button
-          onClick={() => navigate("../focus", { state: { nodeId: node.id } })}
-          className="rounded-md bg-surface-2 px-2 py-0.5 text-xs text-ink-3 hover:bg-surface-3"
-        >
-          Изучить
-        </button>
-        {isExpandable && (
+      {!(isCompact && !hovered) &&
+        (isExpandable ? (
+          <span className="mt-1 inline-block rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-accent-ink">
+            + можно расширить
+          </span>
+        ) : (
+          <span className="mt-1 inline-block rounded bg-surface-2 px-1.5 py-0.5 text-[10px] font-semibold text-ink-4">
+            конечный лист
+          </span>
+        ))}
+      {!(isCompact && !hovered) && (
+        <div className="mt-2 flex items-center gap-2">
           <button
-            onClick={async () => {
-              setBusy(true);
-              await expandNode(node.id);
-              setBusy(false);
-            }}
-            disabled={busy}
-            className="rounded-md border border-accent px-2 py-0.5 text-xs text-accent-ink hover:bg-accent disabled:opacity-40"
+            onClick={() => navigate("../focus", { state: { nodeId: node.id } })}
+            className="rounded-md bg-surface-2 px-2 py-0.5 text-xs text-ink-3 hover:bg-surface-3"
           >
-            {busy ? "…" : "Углубить"}
+            Изучить
           </button>
-        )}
-      </div>
+          {isExpandable && (
+            <button
+              onClick={async () => {
+                setBusy(true);
+                await expandNode(node.id);
+                setBusy(false);
+              }}
+              disabled={busy}
+              className="rounded-md border border-accent px-2 py-0.5 text-xs text-accent-ink hover:bg-accent disabled:opacity-40"
+            >
+              {busy ? "…" : "Углубить"}
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -193,7 +228,7 @@ function RelationEdge(props: EdgeProps) {
     data,
   } = props;
   const { zoom } = useViewport();
-  const [path, labelX, labelY] = getSmoothStepPath({
+  const [path, labelX, labelY] = getBezierPath({
     sourceX,
     sourceY,
     sourcePosition,
@@ -236,7 +271,41 @@ function RelationEdge(props: EdgeProps) {
   );
 }
 
-const edgeTypes = { relationEdge: RelationEdge };
+const edgeTypes = {
+  relationEdge: RelationEdge,
+  branchEdge: BranchEdge,
+};
+
+function BranchEdge(props: EdgeProps) {
+  const {
+    sourceX,
+    sourceY,
+    targetX,
+    targetY,
+    sourcePosition,
+    targetPosition,
+    style,
+  } = props;
+
+  const path = useMemo<string>(() => {
+    // Сторону выхода выбирает getEdgeHandles (sourceHandle/targetHandle), а
+    // ReactFlow передаёт sourceX/Y в позиции этого хэндла — центр грани.
+    // getBezierPath строит кривую из управляющих точек строго наружу от
+    // сторон карточек (не коллинеарных), поэтому рёбра выходят из центра
+    // стороны, касаются карточки и остаются кривыми.
+    const [bezPath] = getBezierPath({
+      sourceX,
+      sourceY,
+      sourcePosition,
+      targetX,
+      targetY,
+      targetPosition,
+    });
+    return bezPath;
+  }, [sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition]);
+
+  return <BaseEdge path={path} style={style} />;
+}
 
 function AutoFit({ nodeCount }: { nodeCount: number }) {
   const { fitView } = useReactFlow();
@@ -288,14 +357,19 @@ export function GraphScreen() {
         const cursor = new Map<string, number>();
         return flow.edges.map((e) => {
           if (e.data.kind !== "relation") {
+            const color = (e.data as { color?: string }).color;
+            const sourceSize = (e.data as { sourceSize?: { w: number; h: number } })
+              .sourceSize;
+            const stroke = color ?? "#d4d4d8";
             return {
               id: e.id,
               source: e.source,
               target: e.target,
               sourceHandle: e.sourceHandle,
               targetHandle: e.targetHandle,
-              type: "smoothstep",
-              style: { stroke: "#d4d4d8", strokeWidth: 1 },
+              type: "branchEdge",
+              style: { stroke, strokeWidth: 2, opacity: 0.85 },
+              data: { sourceSize },
             };
           }
           const key = [e.source, e.target].sort().join("|");
@@ -308,7 +382,12 @@ export function GraphScreen() {
             sourceHandle: e.sourceHandle,
             targetHandle: e.targetHandle,
             type: "relationEdge",
-            style: { stroke: e.data.color, strokeWidth: 1.5 },
+            style: {
+              stroke: e.data.color,
+              strokeWidth: 1.25,
+              strokeDasharray: "5 4",
+              opacity: 0.55,
+            },
             markerEnd: { type: MarkerType.ArrowClosed, color: e.data.color },
             label: e.data.label,
             interactionWidth: 24,

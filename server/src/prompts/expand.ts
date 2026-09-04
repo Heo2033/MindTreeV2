@@ -1,4 +1,5 @@
 import { ALPHABET_RULE, NO_META_RULE } from "./rules.js";
+import { buildAudienceBlock, type IStructurePromptOptions } from "./structure.js";
 
 export const PROMPT_EXPAND = `# Роль
 Ты — педагог, расширяешь дерево знаний. Для каждого указанного узла построй следующий уровень иерархии.
@@ -8,10 +9,19 @@ export const PROMPT_EXPAND = `# Роль
 Полный путь от корня до целевых узлов:
 {{context_paths}}
 
+# Уже существующее дерево (НЕ дублируй эти понятия)
+{{existing_tree}}
+
 # Задача
 Для КАЖДОГО узла из списка «Узлы для расширения» сгенерируй 2–4 дочерних узла.
 Каждый дочерний узел — это конкретное понятие/термин внутри родителя.
 Новых тем не вводи. Не дублируй понятия, которые уже есть в дереве.
+
+# Критическое правило о размещении
+ВНИМАТЕЛЬНО изучи «Уже существующее дерево» выше.
+- Если генерируемое понятие логически является подтемой УЖЕ СУЩЕСТВУЮЩЕГО узла (а не целевого родителя), НЕ создавай его как нового ребёнка. Отметь это в поле "reparent_to" с id существующего узла.
+- Если понятие имеет смысл только как подраздел другого существующего раздела — используй reparent_to.
+- Никогда не создавай новый узел на том же уровне, где он логически был бы подразделом другого узла того же дерева.
 
 # Правила
 - id — уникальный латинский алиас (n4_a, n5_b, и т.д.).
@@ -27,7 +37,7 @@ export const PROMPT_EXPAND = `# Роль
 - Для каждого ребенка укажи метаданные: importance (0..1), difficulty (0..1), estimated_time_minutes (целое), prerequisites (массив id понятий из этого дерева, на которые опирается), relations (массив {to, type} или []).
 ${NO_META_RULE}
 ${ALPHABET_RULE}
-
+{{audience_block}}
 # Язык
 Отвечай СТРОГО на русском языке. Все текстовые поля (title) — только на русском.
 
@@ -61,6 +71,7 @@ ${ALPHABET_RULE}
 - [ ] title — термины, не метафоры
 - [ ] Нет дублей с уже существующими понятиями в дереве
 - [ ] Каждый ребенок — конкретное понятие внутри родителя
+- [ ] Если понятие логически относится к существующему узлу — указан reparent_to
 - [ ] semantic_axis консистентен с conceptType
 - [ ] Формат — строго JSON с ключом "nodes"`;
 
@@ -68,6 +79,8 @@ export interface IExpandPromptContext {
   rootTopic: string;
   contextPaths: string[];
   nodesToExpand: Array<{ id: string; title: string; path: string }>;
+  existingTree?: Array<{ id: string; title: string; parentId: string | null; level: number }>;
+  options?: IStructurePromptOptions;
 }
 
 export function buildExpandPrompt(ctx: IExpandPromptContext): string {
@@ -82,7 +95,18 @@ export function buildExpandPrompt(ctx: IExpandPromptContext): string {
     .map((n) => `- id: ${n.id}, title: "${n.title}", path: ${n.path}`)
     .join("\n");
 
-  return PROMPT_EXPAND.replace("{{root_topic}}", sanitizedTopic)
+  const existingStr = ctx.existingTree && ctx.existingTree.length > 0
+    ? ctx.existingTree
+        .slice(0, 100)
+        .map((n) => `- id: ${n.id}, title: "${n.title}", parentId: ${n.parentId ?? "—"}, level: ${n.level}`)
+        .join("\n")
+    : "- (нет)";
+
+  return PROMPT_EXPAND
+    .replace("{{root_topic}}", sanitizedTopic)
     .replace("{{context_paths}}", pathsStr)
-    .replace("{{nodes_to_expand}}", nodesStr);
+    .replace("{{existing_tree}}", existingStr)
+    .replace("{{nodes_to_expand}}", nodesStr)
+    .replace("{{audience_block}}", buildAudienceBlock(ctx.options));
 }
+

@@ -15,15 +15,22 @@ interface GraphState {
   topicId: string | null;
   topicName: string | null;
   goal: string | null;
+  targetLevel: string | null;
   nodes: KnowledgeNode[];
+  visibleLevel: number;
+  /** id узлов, чьи дети принудительно показаны (поузловое раскрытие). */
+  revealedNodes: Set<string>;
   loading: boolean;
   error: string | null;
   pipeline: PipelineState;
   loadTopic: (id: string) => Promise<void>;
   generateTree: (query: string, goal?: string, level?: string, timeBudgetMinutes?: number) => Promise<boolean>;
-  expandNode: (nodeId: string) => Promise<void>;
+  /** Раскрыть детей (если есть) или сгенерировать следующий уровень (если лист). */
+  revealNode: (nodeId: string) => Promise<boolean>;
+  expandNode: (nodeId: string) => Promise<boolean>;
   generateContent: (nodeId: string) => Promise<void>;
   setGoal: (goal: string) => void;
+  resetVisibility: () => void;
   clear: () => void;
 }
 
@@ -34,11 +41,57 @@ const idlePipeline = (): PipelineState => ({
   status: "idle",
 });
 
+/**
+ * Максимальный видимый уровень узлов в зависимости от target_level.
+ * Структура генерируется целиком, но пользователю показываются только уровни,
+ * уместные для его целевого уровня знаний. Остальные раскрываются по запросу.
+ */
+export function maxVisibleLevelForTarget(targetLevel?: string | null): number {
+  switch (targetLevel) {
+    case "awareness":
+    case "basic_understanding":
+      return 2;
+    case "solid_understanding":
+    case "practical_application":
+    case "advanced":
+    case "expert":
+      return 3;
+    default:
+      return 3;
+  }
+}
+
+/**
+ * Виден ли узел: его уровень ниже базовой границы ИЛИ у него есть предок,
+ * который пользователь раскрыл вручную (revealedNodes).
+ */
+export function isNodeVisible(
+  node: KnowledgeNode,
+  nodes: KnowledgeNode[],
+  visibleLevel: number,
+  revealedNodes: Set<string>,
+): boolean {
+  if (node.level <= visibleLevel) return true;
+  // Поднимаемся по предкам: если хоть один из них раскрыт — узел виден.
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  let cur: KnowledgeNode | undefined = node;
+  let guard = 0;
+  while (cur && guard < 50) {
+    if (revealedNodes.has(cur.id)) return true;
+    cur = cur.parentId ? byId.get(cur.parentId) : undefined;
+    guard++;
+  }
+  return false;
+}
+
 export const useGraphStore = create<GraphState>((set, get) => ({
   topicId: null,
   topicName: null,
   goal: null,
+  targetLevel: null,
   nodes: [],
+  visibleLevel: 3,
+  revealedNodes: new Set<string>(),
   loading: false,
   error: null,
   pipeline: idlePipeline(),
@@ -47,10 +100,13 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     set({ loading: true, error: null });
     try {
       const { topic, nodes: rows } = await topicsApi.get(id);
+      const visibleLevel = maxVisibleLevelForTarget(topic.target_level);
       set({
         topicId: id,
         topicName: topic.name,
         goal: topic.goal,
+        targetLevel: topic.target_level,
+        visibleLevel,
         nodes: rowsToKnowledgeNodes(rows as KnowledgeNodeRow[]),
         loading: false,
       });
@@ -81,6 +137,9 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       for await (const ev of stream.events) {
         if (ev.event === "progress") {
           const p = ev.data as TreeGenProgress;
+          // Перезагружаем частичное (уже сохранённое) дерево, чтобы видеть
+          // прогресс генерации по уровням.
+          await get().loadTopic(topicId);
           set({
             pipeline: {
               phase: p.phase,
@@ -115,25 +174,53 @@ export const useGraphStore = create<GraphState>((set, get) => ({
     }
   },
 
+  /**
+   * «Углубить»:
+   * - если у узла уже есть дети (в т.ч. скрытые) — раскрываем их мгновенно;
+   * - если узел — настоящий лист без детей — генерируем следующий уровень через LLM.
+   * Возвращает true, если что-то добавилось/раскрылось, false — если больше нечего.
+   */
+  async revealNode(nodeId) {
+    const { nodes, revealedNodes } = get();
+    const node = nodes.find((n) => n.id === nodeId);
+    if (!node) return false;
+
+    const hasChildren = nodes.some((n) => n.parentId === nodeId);
+
+    if (hasChildren) {
+      // Мгновенное раскрытие уже существующих детей.
+      const next = new Set(revealedNodes);
+      next.add(nodeId);
+      set({ revealedNodes: next });
+      return true;
+    }
+
+    // Настоящий лист — генерируем реальный следующий уровень.
+    return get().expandNode(nodeId);
+  },
+
   async expandNode(nodeId) {
     const { topicId, topicName } = get();
-    if (!topicId) return;
+    if (!topicId) return false;
     set({ error: null });
     try {
       set({
         pipeline: {
           phase: "expand",
-          message: "Углубляю узел — строю поддерево…",
+          message: "Генерирую следующий уровень…",
           stats: null,
           status: "running",
         },
       });
-      await treeApi.expand(topicId, nodeId);
+      const res = await treeApi.expand(topicId, nodeId);
       await get().loadTopic(topicId);
       set({ pipeline: idlePipeline() });
       void topicName;
+      const count = typeof res.count === "number" ? res.count : 0;
+      return count > 0;
     } catch (err) {
       set({ pipeline: idlePipeline(), error: err instanceof Error ? err.message : "Ошибка расширения узла" });
+      return false;
     }
   },
 
@@ -163,7 +250,10 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       topicId: null,
       topicName: null,
       goal: null,
+      targetLevel: null,
       nodes: [],
+      visibleLevel: 3,
+      revealedNodes: new Set<string>(),
       error: null,
       pipeline: idlePipeline(),
     });
@@ -171,5 +261,10 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
   setGoal(goal: string) {
     set({ goal });
+  },
+
+  resetVisibility() {
+    const { targetLevel } = get();
+    set({ visibleLevel: maxVisibleLevelForTarget(targetLevel), revealedNodes: new Set<string>() });
   },
 }));

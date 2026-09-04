@@ -1,88 +1,79 @@
 import { ALPHABET_RULE, NO_META_RULE } from "./rules.js";
 
-export const PROMPT_STRUCTURE = `# Роль
-Ты — педагог-структуролог. Твоя задача — построить онтологию (скелет) дерева знаний о теме.
+export const PROMPT_L1 = `# Роль
+Ты — педагог-структуролог. Твоя задача — определить корень (тему) онтологии дерева знаний.
 
 # Задача
-Построй БАЗОВЫЙ СКЕЛЕТ дерева знаний о теме: корень и его главные разделы (ветки уровня 2).
-Не углубляйся глубже уровня 2 — остальные уровни пользователь будет расширять выборочно позже.
-Генерируй ТОЛЬКО заголовки (titles) + канонические определения + метаданные. НЕ генерируй one_liner, details, analogy.
+Определи КОРНЕВОЙ узел дерева знаний о теме пользователя. Генерируй ТОЛЬКО корень — 1 узел уровня 1. Не создавай разделов, веток и дочерних узлов — они будут сгенерированы отдельными шагами позже.
 
 # Правила
-- Уровень 1: 1 корень — краткое название темы (1–4 слова).
-- Уровень 2: 3–5 узлов — главные части/категории темы. Покрывай ВСЕ ключевые направления, не пропуская важные.
-- Порядок веток уровня 2 в ответе — рекомендуемый порядок изучения: сначала базовые и вводные, затем продвинутые и прикладные.
-- НЕ создавай уровень 3 — это задача выборочного расширения.
-- {{depth_hint}}
-- {{time_hint}}
-- Форма — раскидистая крона, НЕ столб.
-- Одно понятие — одно место. Нет дублей.
-- На каждом уровне — единый уровень абстракции (не смешивать общее и частное).
+- Уровень 1: ровно 1 корень — краткое название темы (1–4 слова).
 - label — техническое название понятия (термин), 1–4 слова. Не метафоры.
-- Если тема содержит конкретный перечень элементов (масти, виды, типы, этапы) — перечисляй ВСЕ, не сокращай до 2–4 примеров.
-- Каждый узел уровня 2 — независимая подтема с единой внутренней логикой. Узлы L2 не должны описывать один и тот же аспект с разной детализацией.
-- Если тема содержит несколько конкурирующих подходов или архитектур (например, U-Net vs DiT vs Transformer), выдели их как отдельные узлы на одном уровне.
-- Все id начинаются с "n" + цифра (n1_, n2_, n3_...). Запрещены nc_*, random_* и другие форматы. Каждый узел (кроме корня) обязан иметь parentId.
+- {{depth_hint}}
+- Форма — раскидистая крона, НЕ столб.
+- id корня начинается с "n" + цифра (n1_root и т.п.).
 ${NO_META_RULE}
 ${ALPHABET_RULE}
 {{audience_block}}
 # Язык
 Отвечай СТРОГО на русском языке. Все текстовые поля (title, canonical_definition) — только на русском.
 
-# Онтологический контракт
-Для КАЖДОГО узла (включая корень) сгенерируй:
-- **canonical_definition** — строгое определение (1–2 предложения). Это источник истины. Content-модель будет основываться на нём.
-- **semantic_axis** — ось классификации. Один из: architecture, process, sampling, representation, loss, encoding, conditioning, application, theory, evaluation.
+# Онтологический контракт (для корня)
+- **canonical_definition** — строгое определение темы (1–2 предложения). Это источник истины. Content-модель и генерация веток будут основываться на нём.
+- **semantic_axis** — "theory".
+- **conceptType** — "topic".
 - **forbidden_interpretations** — массив из 1–3 запрещённых интерпретаций. Это то, что content-модель НЕ должна утверждать.
-- **importance** — число от 0 до 1: насколько это понятие важно для достижения цели.
-- **difficulty** — число от 0 до 1: сложность понятия.
-- **estimated_time_minutes** — целое число: реалистичная оценка времени изучения узла.
-- **prerequisites** — массив id понятий в этом скелете, на которые опирается узел (может быть []).
-- **relations** — массив связей с другими узлами скелета: {"to": "id", "type": "requires"|"related"|"enables"|"used_for"|"example_of"|"similar_to"|"contrasts_with"|"causes"|"depends_on"|"alternative_to"} (может быть []).
-
-Примеры осей:
-- architecture: U-Net, DiT, VAE, CLIP — это архитектуры/модули
-- process: прямой процесс, обратный процесс, обучение — это процессы
-- sampling: DDPM, DDIM, DPM-Solver — это методы сэмплинга
-- loss: MSE, ELBO, cross-entropy — это функции потерь
-- conditioning: текстовое условие, классовая условность — это методы условия
-
-Запрет смешивания осей: нельзя делать DiT child для latent_diffusion (это оси architecture и representation).
-
-# Формат ответа
-Только валидный JSON-объект:
-{"nodes":[{"id":"n1_root","title":"Тема","canonical_definition":"...","semantic_axis":"theory","forbidden_interpretations":["..."]},{"id":"n2_a","title":"Категория A","parentId":"n1_root","conceptType":"concept","canonical_definition":"...","semantic_axis":"architecture"},{"id":"n3_a1","title":"Понятие A1","parentId":"n2_a","conceptType":"mechanism","canonical_definition":"...","semantic_axis":"process","forbidden_interpretations":["..."]}]}
-
-Допустимые значения conceptType: "topic", "concept", "component", "mechanism", "process", "property", "rule", "method", "example".
-- topic — корень дерева или крупная область
-- concept — абстрактное понятие, теория
-- component — часть системы, модуль, блок
-- mechanism — внутреннее устройство, как что-то работает
-- process — последовательность шагов, алгоритм, pipeline
-- property — характеристика, параметр, качество
-- rule — закон, принцип, ограничение
-- method — подход, техника, способ решения
-- example — конкретный пример, кейс
-
-Допустимые значения semantic_axis: "architecture", "process", "sampling", "representation", "loss", "encoding", "conditioning", "application", "theory", "evaluation".
-
-Узлы L2 должны иметь conceptType и semantic_axis. У корня (L1) — conceptType="topic", semantic_axis="theory".
+- **importance** — число от 0 до 1.
+- **difficulty** — число от 0 до 1.
+- **estimated_time_minutes** — целое число: реалистичная общая оценка времени изучения темы.
 
 Никакого текста вне JSON. Без \`\`\`json и без пояснений.
 
+# Формат ответа
+Только валидный JSON-объект:
+{"nodes":[{"id":"n1_root","title":"Тема","parentId":null,"level":1,"conceptType":"topic","semantic_axis":"theory","canonical_definition":"...","forbidden_interpretations":["..."],"importance":0.5,"difficulty":0.5,"estimated_time_minutes":60,"prerequisites":[],"relations":[]}]}
+
 # Проверь перед ответом
-- [ ] 4–6 узлов всего: 1 корень + 3–5 веток уровня 2 (БЕЗ уровня 3)
-- [ ] title — термины, не метафоры
+- [ ] ровно 1 узел (корень)
+- [ ] title — термин, не метафора
 - [ ] корень = точное название темы
-- [ ] нет дублей: одно понятие — одно место
-- [ ] на каждом уровне единый уровень абстракции
-- [ ] ветки уровня 2 идут в порядке изучения: от базовых к продвинутым
+- [ ] semantic_axis = "theory", conceptType = "topic"
 - [ ] формат — строго JSON с ключом "nodes"
-- [ ] все title и canonical_definition — на русском (кроме устоявшихся аббревиатур)
-- [ ] конкурирующие архитектуры/подходы представлены на одном уровне
-- [ ] semantic_axis консистентен с conceptType
-- [ ] forbidden_interpretations реалистичны и предотвращают галлюцинации
-- [ ] у узлов заданы importance (0..1), difficulty (0..1), estimated_time_minutes, prerequisites, relations
+
+Тема пользователя: "{{user_query}}"`;
+
+export const PROMPT_L1_EDIT = `# Роль
+Ты — педагог-структуролог. Твоя задача — уточнить корень (тему) онтологии дерева знаний.
+
+# Задача
+Имеется уже созданный корень темы. Уточни его: проверь, что название и canonical_definition точно соответствуют теме пользователя. Исправь, если есть неточности. Верни ОДИН исправленный (или неизменённый) корневой узел.
+
+# Текущий корень
+{{current_root}}
+
+# Правила
+- label — техническое название понятия (термин), 1–4 слова. Не метафоры.
+- {depth_hint}
+- id корня сохрани прежним.
+- Не меняй parentId (должен быть null).
+${NO_META_RULE}
+${ALPHABET_RULE}
+{{audience_block}}
+
+# Язык
+Отвечай СТРОГО на русском языке. Все текстовые поля (title, canonical_definition) — только на русском.
+
+# Онтологический контракт
+- **canonical_definition** — строгое определение темы (1–2 предложения).
+- **semantic_axis** — "theory".
+- **conceptType** — "topic".
+- **forbidden_interpretations** — массив из 1–3 запрещённых интерпретаций.
+
+Никакого текста вне JSON. Без \`\`\`json и без пояснений.
+
+# Формат ответа
+Только валидный JSON-объект:
+{"nodes":[{"id":"n1_root","title":"Тема","parentId":null,"level":1,"conceptType":"topic","semantic_axis":"theory","canonical_definition":"...","forbidden_interpretations":["..."],"importance":0.5,"difficulty":0.5,"estimated_time_minutes":60,"prerequisites":[],"relations":[]}]}
 
 Тема пользователя: "{{user_query}}"`;
 
@@ -148,16 +139,7 @@ function timeHintFor(timeBudgetMinutes?: number): string {
   return "Временной бюджет — 1,5 часа и больше. База полная (5 веток), можно шире покрывать поднаправления.";
 }
 
-export function buildStructurePrompt(
-  userQuery: string,
-  options?: IStructurePromptOptions,
-): string {
-  const sanitized = userQuery
-    .replace(/\r/g, "")
-    .replace(/^#+\s/gm, "")
-    .replace(/^[-*]\s/gm, "")
-    .trim();
-
+function buildAudienceBlock(options?: IStructurePromptOptions): string {
   const hints: string[] = [];
   if (options?.goal && GOAL_HINTS[options.goal]) {
     hints.push(`- ${GOAL_HINTS[options.goal]}`);
@@ -166,13 +148,38 @@ export function buildStructurePrompt(
   if (mappedLevel && LEVEL_HINTS[mappedLevel]) {
     hints.push(`- ${LEVEL_HINTS[mappedLevel]}`);
   }
-  const audienceBlock = hints.length > 0
+  return hints.length > 0
     ? `\n# Аудитория\n${hints.join("\n")}\n`
     : "";
-
-  return PROMPT_STRUCTURE
-    .replace("{{audience_block}}", audienceBlock)
-    .replace("{{depth_hint}}", depthHintFor(options?.level))
-    .replace("{{time_hint}}", timeHintFor(options?.timeBudgetMinutes))
-    .replace("{{user_query}}", sanitized);
 }
+
+function sanitizeUserQuery(userQuery: string): string {
+  return userQuery
+    .replace(/\r/g, "")
+    .replace(/^#+\s/gm, "")
+    .replace(/^[-*]\s/gm, "")
+    .trim();
+}
+
+/** Промпт для генерации корневого узла (L1). */
+export function buildL1Prompt(userQuery: string, options?: IStructurePromptOptions): string {
+  return PROMPT_L1
+    .replace("{{audience_block}}", buildAudienceBlock(options))
+    .replace("{{depth_hint}}", depthHintFor(options?.level))
+    .replace("{{user_query}}", sanitizeUserQuery(userQuery));
+}
+
+/** Промпт для уточнения уже созданного корневого узла (L1-edit). */
+export function buildL1EditPrompt(
+  userQuery: string,
+  currentRoot: Record<string, unknown>,
+  options?: IStructurePromptOptions,
+): string {
+  return PROMPT_L1_EDIT
+    .replace("{{current_root}}", JSON.stringify(currentRoot, null, 2))
+    .replace("{{audience_block}}", buildAudienceBlock(options))
+    .replace("{{depth_hint}}", depthHintFor(options?.level))
+    .replace("{{user_query}}", sanitizeUserQuery(userQuery));
+}
+
+export { GOAL_HINTS, buildAudienceBlock, depthHintFor, timeHintFor, sanitizeUserQuery };

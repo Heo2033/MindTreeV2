@@ -70,7 +70,7 @@ export function readSchedulerConfigFromEnv(): RequiredCoreConfig {
   };
 }
 
-const STRONG_OPERATIONS = new Set(["structure", "validate", "repair", "quiz", "curriculum", "diagnostic", "assessment", "mastery", "tutor", "milestone"]);
+const STRONG_OPERATIONS = new Set(["structure", "structure-l2", "structure-l3", "validate", "repair", "quiz", "curriculum", "diagnostic", "assessment", "mastery", "tutor", "milestone"]);
 
 export function tierForOperation(operation: string): ModelTier {
   return STRONG_OPERATIONS.has(operation) ? "strong" : "fast";

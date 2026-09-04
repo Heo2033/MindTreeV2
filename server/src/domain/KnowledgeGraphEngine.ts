@@ -7,9 +7,11 @@ import { getScheduler } from "../llm/scheduler.js";
 import { parseLLMJson, LLMMockError, LLMRetriesExhaustedError } from "../llm/client.js";
 import { scopeNodeIds } from "./scopedIds.js";
 import {
-  buildStructurePrompt,
+  buildL1Prompt,
   type IStructurePromptOptions,
 } from "../prompts/structure.js";
+import { buildL2Prompt } from "../prompts/generateL2.js";
+import { buildL3Prompt } from "../prompts/generateL3.js";
 import { buildExpandPrompt } from "../prompts/expand.js";
 import {
   buildValidatePrompt,
@@ -59,31 +61,27 @@ export class KnowledgeGraphEngine {
     query: string,
     options: { goal?: string; level?: string; timeBudgetMinutes?: number } = {},
     onProgress?: ProgressCallback,
+    onBatch?: (added: NodeDraft[]) => Promise<void>,
   ): Promise<TreeBuildResult> {
-    const scheduler = getScheduler();
     const warnings: string[] = [];
+    const opts: IStructurePromptOptions = {
+      goal: options.goal as IStructurePromptOptions["goal"],
+      level: options.level as IStructurePromptOptions["level"],
+      timeBudgetMinutes: options.timeBudgetMinutes,
+    };
 
-    onProgress?.("structure", "Генерация базового скелета дерева знаний...");
+    // Пошаговый конвейер: L1 (корень) → L2 (разделы) → L3 (подразделы).
+    // Каждый шаг — отдельный LLM-запрос с полным семантическим контекстом,
+    // что гарантирует логическую согласованность (нет «Виды раскладов» как
+    // L2 рядом с L2 «Расклады»). Валидация и ремонт выполняются на каждом этапе.
     let nodes: NodeDraft[] = [];
+
+    // Шаг 1: корень (L1)
+    onProgress?.("structure", "Определение корня темы...");
     try {
-      const structurePrompt = buildStructurePrompt(query, {
-        goal: options.goal as IStructurePromptOptions["goal"],
-        level: options.level as IStructurePromptOptions["level"],
-        timeBudgetMinutes: options.timeBudgetMinutes,
-      });
-      const { result } = await scheduler.execute(
-        "structure",
-        () => structurePrompt,
-        (raw) => {
-          const data = parseLLMJson<{ nodes?: unknown[] }>(raw);
-          return Array.isArray(data?.nodes) ? data.nodes : [];
-        },
-      );
-      nodes = normalizeDrafts(result);
+      const root = await this.generateRoot(query, opts);
+      nodes = root;
     } catch (err) {
-      // Офлайн-режим (LLM_MOCK=1): строим детерминированный скелет с уникальными id.
-      // Планировщик оборачивает LLMMockError в LLMRetriesExhaustedError, поэтому
-      // проверяем оба.
       const isOffline = err instanceof LLMMockError
         || (err instanceof LLMRetriesExhaustedError && err.lastError instanceof LLMMockError);
       if (isOffline) {
@@ -91,29 +89,93 @@ export class KnowledgeGraphEngine {
         warnings.push("Офлайн-режим: построено демо-дерево знаний вместо LLM.");
       } else {
         throw new Error(
-          `Не удалось построить дерево: ${err instanceof Error ? err.message : String(err)}`,
+          `Не удалось определить корень темы: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     }
 
-    // Базовая генерация даёт shallow-скелет (L1–L2).
-    // Углубление выполняется выборочно по запросу пользователя (expandNode),
-    // поэтому автоматическое расширение до MAX_DEPTH здесь не выполняется.
+    if (!nodes.some((n) => n.level === 1 && !n.parentId)) {
+      // Корня нет — без него дерево не построить.
+      nodes = fallbackStructure(query);
+      warnings.push("Корень темы не был определён; построено демо-дерево.");
+    }
 
-    // validate
-    onProgress?.("validate", "Проверка дерева на дубли и структуру...");
-    try {
-      const validation = await this.validate(nodes);
-      if (!validation.valid) {
-        onProgress?.("repair", "Исправление проблем дерева...");
-        const repaired = await this.repair(validation.issues, nodes);
-        if (repaired.repairedNodes.length > 0) {
-          nodes = mergeRepairs(nodes, repaired.repairedNodes);
-        }
-        if (repaired.warnings.length > 0) warnings.push(...repaired.warnings);
+    // Инкрементальный персист: корень виден пользователю сразу, пока генерируются
+    // следующие уровни. При сбое (закрытие вкладки и т.п.) в БД остаётся
+    // сохранённая часть дерева, а не пустота.
+    // Важно: dedupeNodeIds вызывается ДО onBatch, чтобы ID были стабильны
+    // и reconcileTree в pipeline.ts не удалял инкрементально сохранённые узлы.
+    if (onBatch) {
+      nodes = dedupeNodeIds(nodes);
+      const batch = nodes.filter((n) => n.level === 1 && !n.parentId);
+      console.log(`[engine] onBatch L1: ${batch.length} узлов`);
+      try {
+        await onBatch(batch);
+      } catch {
+        // Не критично для генерации: финальный persist в route восстановит дерево.
       }
+    }
+
+    // Шаг 2: разделы (L2) — один запрос, полный контекст корня.
+    onProgress?.("structure", "Генерация главных разделов (уровень 2)...");
+    let l2: NodeDraft[] = [];
+    try {
+      l2 = await this.generateL2FromRoot(query, nodes, opts);
+      nodes = nodes.concat(l2);
     } catch (err) {
-      warnings.push(`Валидация не завершена: ${err instanceof Error ? err.message : String(err)}`);
+      warnings.push(`Генерация разделов не завершена: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    if (onBatch && l2.length > 0) {
+      nodes = dedupeNodeIds(nodes);
+      const l2Ids = new Set(nodes.filter((n) => n.level === 2).map((n) => n.id));
+      const batch = nodes.filter((n) => l2Ids.has(n.id));
+      console.log(`[engine] onBatch L2: ${batch.length} узлов`);
+      try {
+        await onBatch(batch);
+      } catch {
+        // финальный persist в route восстановит дерево
+      }
+    }
+
+    // Валидация L1+L2 (и ремонт при необходимости).
+    nodes = await this.validateAndRepair(nodes, opts, onProgress, warnings, "validate");
+
+    // Шаг 3: подразделы (L3) — отдельный запрос на каждый L2-раздел,
+    // чтобы LLM видел контекст конкретной ветви и не создавал противоречий.
+    onProgress?.("structure", "Генерация подразделов (уровень 3)...");
+    const l2Nodes = nodes.filter((n) => n.level === 2);
+    for (const l2 of l2Nodes) {
+      try {
+        const l3 = await this.generateL3ForNode(query, l2, nodes, opts);
+        if (l3.length > 0) {
+          nodes = nodes.concat(l3);
+          // Валидация только что созданных L3-детей этой ветви.
+          const focusIds = l3.map((n) => n.id);
+          nodes = await this.validateAndRepair(
+            nodes,
+            opts,
+            onProgress,
+            warnings,
+            `validate-l3-${l2.id}`,
+            focusIds,
+          );
+          // Инкрементальный персист L3-ветви: ветка появляется у пользователя
+          // по мере завершения, а не только в конце всей генерации.
+          if (onBatch) {
+            nodes = dedupeNodeIds(nodes);
+            const kept = nodes.filter((n) => n.parentId === l2.id && n.level === 3);
+            if (kept.length > 0) {
+              console.log(`[engine] onBatch L3 (ветка «${l2.title}»): ${kept.length} узлов`);
+              await onBatch(kept);
+            }
+          }
+        }
+      } catch (err) {
+        warnings.push(
+          `Подразделы для «${l2.title}» не завершены: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
 
     onProgress?.("content", "Заполнение контента узлов...");
@@ -124,10 +186,8 @@ export class KnowledgeGraphEngine {
       warnings.push(`Контент заполнен не полностью: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    // Гарантируем глобальную уникальность id узлов: реальный LLM (и заглушки)
-    // могут возвращать повторяющиеся id, что вызывало UNIQUE violation при
-    // персистентности (persistNodes). Дубликаты схлопываются, оставшиеся
-    // коллизии получают новые id, а ссылки parentId обновляются.
+    // Финальная дедупликация (на случай, если предыдущие вызовы dedupeNodeIds
+    // не покрыли все коллизии — например, между L3-ветками разных L2).
     nodes = dedupeNodeIds(nodes);
 
     const stats = {
@@ -140,11 +200,124 @@ export class KnowledgeGraphEngine {
     return { nodes, warnings };
   }
 
+  /** Генерирует корневой узел (L1) отдельным запросом. */
+  private async generateRoot(
+    query: string,
+    opts: IStructurePromptOptions,
+  ): Promise<NodeDraft[]> {
+    const scheduler = getScheduler();
+    const prompt = buildL1Prompt(query, opts);
+    const { result } = await scheduler.execute(
+      "structure",
+      () => prompt,
+      (raw) => {
+        const data = parseLLMJson<{ nodes?: unknown[] }>(raw);
+        return Array.isArray(data?.nodes) ? data.nodes : [];
+      },
+    );
+    return normalizeDrafts(result).filter((n) => n.level === 1 && !n.parentId);
+  }
+
+  /** Генерирует разделы (L2) с контекстом корня. */
+  private async generateL2FromRoot(
+    query: string,
+    current: NodeDraft[],
+    opts: IStructurePromptOptions,
+  ): Promise<NodeDraft[]> {
+    const root = current.find((n) => n.level === 1 && !n.parentId);
+    if (!root) return [];
+    const scheduler = getScheduler();
+    const prompt = buildL2Prompt({
+      userQuery: query,
+      root: {
+        id: root.id,
+        title: root.title,
+        canonical_definition: root.canonical_definition,
+      },
+      options: opts,
+    });
+    const { result } = await scheduler.execute(
+      "structure-l2",
+      () => prompt,
+      (raw) => {
+        const data = parseLLMJson<{ nodes?: unknown[] }>(raw);
+        return Array.isArray(data?.nodes) ? data.nodes : [];
+      },
+    );
+    return normalizeDrafts(result).filter((n) => n.level === 2 && n.parentId);
+  }
+
+  /** Генерирует подразделы (L3) для одного L2-узла отдельным запросом. */
+  private async generateL3ForNode(
+    query: string,
+    parent: NodeDraft,
+    current: NodeDraft[],
+    opts: IStructurePromptOptions,
+  ): Promise<NodeDraft[]> {
+    const root = current.find((n) => n.level === 1 && !n.parentId);
+    const siblings = current
+      .filter((n) => n.level === 2 && n.parentId === root?.id && n.id !== parent.id);
+    const scheduler = getScheduler();
+    const prompt = buildL3Prompt({
+      userQuery: query,
+      rootTitle: root?.title ?? parent.title,
+      parent: {
+        id: parent.id,
+        title: parent.title,
+        canonical_definition: parent.canonical_definition,
+        semantic_axis: parent.semantic_axis,
+      },
+      siblings: siblings.map((s) => ({
+        id: s.id,
+        title: s.title,
+        canonical_definition: s.canonical_definition,
+      })),
+      options: opts,
+    });
+    const { result } = await scheduler.execute(
+      "structure-l3",
+      () => prompt,
+      (raw) => {
+        const data = parseLLMJson<{ nodes?: unknown[] }>(raw);
+        return Array.isArray(data?.nodes) ? data.nodes : [];
+      },
+    );
+    return normalizeDrafts(result).filter((n) => n.level === 3 && n.parentId === parent.id);
+  }
+
+  /** Валидирует (и ремонтирует) дерево, фокусно — на указанных узлах. */
+  private async validateAndRepair(
+    nodes: NodeDraft[],
+    opts: IStructurePromptOptions,
+    onProgress: ProgressCallback | undefined,
+    warnings: string[],
+    phase: string,
+    focusIds?: string[],
+  ): Promise<NodeDraft[]> {
+    if (nodes.length === 0) return nodes;
+    onProgress?.(phase, "Проверка структуры на дубли и логические ошибки...");
+    try {
+      const validation = await this.validate(nodes, focusIds);
+      if (!validation.valid) {
+        onProgress?.("repair", "Исправление проблем дерева...");
+        const repaired = await this.repair(validation.issues, nodes, opts);
+        if (repaired.repairedNodes.length > 0) {
+          nodes = mergeRepairs(nodes, repaired.repairedNodes);
+        }
+        if (repaired.warnings.length > 0) warnings.push(...repaired.warnings);
+      }
+    } catch (err) {
+      warnings.push(`Валидация не завершена: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return nodes;
+  }
+
   private async expandNodes(
     query: string,
     allNodes: NodeDraft[],
     nodesToExpand: NodeDraft[],
     onProgress?: ProgressCallback,
+    options?: IStructurePromptOptions,
   ): Promise<NodeDraft[]> {
     const scheduler = getScheduler();
     const paths = new Map<string, string[]>();
@@ -164,6 +337,13 @@ export class KnowledgeGraphEngine {
         title: n.title,
         path: (paths.get(n.id) ?? []).join(" → "),
       })),
+      existingTree: allNodes.map((n) => ({
+        id: n.id,
+        title: n.title,
+        parentId: n.parentId,
+        level: n.level,
+      })),
+      options,
     });
 
     const { result } = await scheduler.execute(
@@ -206,7 +386,10 @@ export class KnowledgeGraphEngine {
     return added;
   }
 
-  private async validate(nodes: NodeDraft[]): Promise<{
+  private async validate(
+    nodes: NodeDraft[],
+    focusIds?: string[],
+  ): Promise<{
     valid: boolean;
     issues: Array<{ type: ValidationIssueType; node_id: string; reason: string }>;
   }> {
@@ -223,7 +406,7 @@ export class KnowledgeGraphEngine {
       forbidden_interpretations: n.forbidden_interpretations,
     }));
 
-    const prompt = buildValidatePrompt(validationNodes);
+    const prompt = buildValidatePrompt(validationNodes, focusIds ? { focusIds } : undefined);
     const { result } = await scheduler.execute(
       "validate",
       () => prompt,
@@ -243,6 +426,7 @@ export class KnowledgeGraphEngine {
   private async repair(
     issues: Array<{ type: ValidationIssueType; node_id: string; reason: string }>,
     nodes: NodeDraft[],
+    opts?: IStructurePromptOptions,
   ): Promise<{ repairedNodes: NodeDraft[]; warnings: string[] }> {
     const scheduler = getScheduler();
     const warnings: string[] = [];
@@ -282,6 +466,7 @@ export class KnowledgeGraphEngine {
         node_id: i.node_id,
         reason: i.reason,
       })),
+      level: opts?.level,
     });
 
     try {
@@ -396,10 +581,14 @@ export class KnowledgeGraphEngine {
       throw new Error(`Достигнута максимальная глубина (${MAX_DEPTH})`);
     }
 
-    const topicRow = db.prepare(`SELECT name FROM topics WHERE id = ?`).get(topicId) as
-      | { name: string }
+    const topicRow = db.prepare(`SELECT name, goal, target_level FROM topics WHERE id = ?`).get(topicId) as
+      | { name: string; goal?: string | null; target_level?: string | null }
       | undefined;
     const rootTopic = topicRow?.name ?? "Тема";
+    const expandOptions: IStructurePromptOptions = {
+      goal: typeof topicRow?.goal === "string" ? topicRow.goal : undefined,
+      level: typeof topicRow?.target_level === "string" ? topicRow.target_level : undefined,
+    };
 
     const allRows = db
       .prepare(`SELECT * FROM knowledge_nodes WHERE topic_id = ?`)
@@ -418,10 +607,19 @@ export class KnowledgeGraphEngine {
     const target = allNodes.find((n) => n.id === nodeId);
     if (!target) throw new Error("Узел не найден");
 
+    // У узла уже есть дети (в т.ч. скрытые) — не запускаем повторную генерацию.
+    // «Углубить» в этом случае раскрывает существующих детей, а не зовёт LLM.
+    const hasChildren = allNodes.some((n) => n.parentId === nodeId);
+    if (hasChildren) {
+      return [];
+    }
+
     const added = await this.expandNodes(
       rootTopic,
       allNodes,
       [target],
+      undefined,
+      expandOptions,
     );
 
     // Согласование с полным деревом (§63): отбрасываем дубли уже существующих
@@ -610,6 +808,14 @@ function normalizeDrafts(raw: unknown[]): NodeDraft[] {
   };
 
   for (const root of roots) visit(root, 1);
+
+  // Сироты: узлы, чей parentId указывает на узел не из этой партии
+  // (например, L2-узлы в ответе, где корень генерировался отдельным запросом).
+  for (const d of drafts) {
+    if (!visited.has(d.id)) {
+      result.push({ ...d, level: d.level || guessLevel(d as unknown as Record<string, unknown>) });
+    }
+  }
 
   return result;
 }

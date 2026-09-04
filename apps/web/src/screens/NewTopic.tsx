@@ -6,6 +6,8 @@ import type { TreeGenProgress } from "../api";
 
 const PHASE_LABELS: Record<string, string> = {
   structure: "Структурирование",
+  "structure-l2": "Генерация разделов (L2)",
+  "structure-l3": "Генерация подразделов (L3)",
   expand: "Построение дерева",
   validate: "Проверка",
   repair: "Исправление",

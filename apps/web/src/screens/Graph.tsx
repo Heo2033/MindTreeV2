@@ -25,11 +25,13 @@ import {
   type GraphFlowNode,
   type GraphFlowEdge,
 } from "@mindtree/graph";
-import { useGraphStore } from "../stores";
+import { useGraphStore, isNodeVisible } from "../stores";
 import { Spinner, ErrorBanner, ProgressBar } from "@mindtree/ui";
 
 const PHASE_LABELS: Record<string, string> = {
   structure: "Структурирование",
+  "structure-l2": "Генерация разделов (L2)",
+  "structure-l3": "Генерация подразделов (L3)",
   expand: "Построение дерева",
   validate: "Проверка",
   repair: "Исправление",
@@ -73,13 +75,22 @@ type FlowEdge = Edge;
 function MindNode({ data }: NodeProps) {
   const node = (data as { node: KnowledgeNodeLike }).node;
   const branchColor = (data as { branchColor?: string }).branchColor;
-  const expandNode = useGraphStore((s) => s.expandNode);
+  const revealNode = useGraphStore((s) => s.revealNode);
+  const allNodes = useGraphStore((s) => s.nodes);
   const navigate = useNavigate();
   const [busy, setBusy] = useState(false);
   const [hovered, setHovered] = useState(false);
 
-  const isTerminal = node.level >= 5 || (node.leaf && node.state === "expanded");
+  // У узла есть дети в дереве (на любом уровне, включая скрытые) → «Углубить»
+  // просто их раскроет. Если детей нет — это настоящий лист, генерируем уровень.
+  const hasChildren = allNodes.some(
+    (n) => (n as KnowledgeNodeLike).parentId === node.id,
+  );
+  const isMaxLevel = node.level >= 5;
+  const isTerminal = isMaxLevel || (node.leaf && node.state === "expanded");
   const isExpandable = !isTerminal;
+  const canDeepen = isExpandable && !hasChildren;
+  const canReveal = isExpandable && hasChildren;
   // Компактные карточки для L3+ (только label; one-liner/кнопки при наведении).
   const isCompact = node.level >= 3;
 
@@ -164,13 +175,17 @@ function MindNode({ data }: NodeProps) {
         </p>
       )}
       {!(isCompact && !hovered) &&
-        (isExpandable ? (
+        (canReveal ? (
+          <span className="mt-1 inline-block rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-accent-ink">
+            есть подразделы
+          </span>
+        ) : canDeepen ? (
           <span className="mt-1 inline-block rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-accent-ink">
             + можно расширить
           </span>
         ) : (
           <span className="mt-1 inline-block rounded bg-surface-2 px-1.5 py-0.5 text-[10px] font-semibold text-ink-4">
-            конечный лист
+            {isMaxLevel ? "максимальная глубина" : "конечный лист"}
           </span>
         ))}
       {!(isCompact && !hovered) && (
@@ -181,19 +196,33 @@ function MindNode({ data }: NodeProps) {
           >
             Изучить
           </button>
-          {isExpandable && (
+          {isExpandable ? (
             <button
               onClick={async () => {
                 setBusy(true);
-                await expandNode(node.id);
+                await revealNode(node.id);
                 setBusy(false);
               }}
               disabled={busy}
               className="rounded-md border border-accent px-2 py-0.5 text-xs text-accent-ink hover:bg-accent disabled:opacity-40"
+              title={
+                canReveal
+                  ? "Раскрыть уже сгенерированные подразделы"
+                  : "Сгенерировать подразделы следующего уровня"
+              }
             >
-              {busy ? "…" : "Углубить"}
+              {busy ? (
+                <span className="flex items-center gap-1">
+                  <Spinner size="sm" />
+                  Генерирую…
+                </span>
+              ) : canReveal ? (
+                "Раскрыть"
+              ) : (
+                "Углубить"
+              )}
             </button>
-          )}
+          ) : null}
         </div>
       )}
     </div>
@@ -206,6 +235,7 @@ interface KnowledgeNodeLike {
   oneLiner: string;
   leaf: boolean;
   level: number;
+  parentId?: string | null;
   contentLoaded: boolean;
   state?: string;
 }
@@ -320,22 +350,35 @@ function AutoFit({ nodeCount }: { nodeCount: number }) {
 }
 
 export function GraphScreen() {
-  const { nodes, loading, error } = useGraphStore();
-  const expandNode = useGraphStore((s) => s.expandNode);
+  const { nodes, loading, error, visibleLevel, revealedNodes } = useGraphStore();
+  const revealNode = useGraphStore((s) => s.revealNode);
+  const pipeline = useGraphStore((s) => s.pipeline);
   const [listOpen, setListOpen] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [hoveredEdgeId, setHoveredEdgeId] = useState<string | null>(null);
 
-  const expandable = useMemo(
+  // Показываем только узлы, видимые при базовом уровне ИЛИ раскрытые вручную.
+  const visibleNodes = useMemo(
+    () => nodes.filter((n) => isNodeVisible(n, nodes, visibleLevel, revealedNodes)),
+    [nodes, visibleLevel, revealedNodes],
+  );
+
+  const hiddenCount = nodes.length - visibleNodes.length;
+
+  // Узлы, у которых есть дети, которых ещё не видно (для заголовка сайдбара).
+  const canDeepen = useMemo(
     () =>
-      (nodes as KnowledgeNodeLike[]).filter(
-        (n) => !(n.level >= 5 || (n.leaf && n.state === "expanded")),
+      nodes.filter(
+        (n) =>
+          isNodeVisible(n, nodes, visibleLevel, revealedNodes) &&
+          !(n.level >= 5 || (n.leaf && n.state === "expanded")) &&
+          nodes.some((c) => c.parentId === n.id),
       ),
-    [nodes],
+    [nodes, visibleLevel, revealedNodes],
   );
 
   const graph = useMemo<{ nodes: FlowNode[]; edges: FlowEdge[] }>(() => {
-    const flow = convertTreeToGraphFlow(nodes as never) as unknown as {
+    const flow = convertTreeToGraphFlow(visibleNodes as never) as unknown as {
       nodes: GraphFlowNode[];
       edges: GraphFlowEdge[];
     };
@@ -400,9 +443,13 @@ export function GraphScreen() {
         });
       })(),
     };
-  }, [nodes, hoveredEdgeId]);
+  }, [visibleNodes, hoveredEdgeId]);
 
-  if (loading) {
+  // Во время активной генерации не прячем дерево за полным спиннером:
+  // показываем уже сгенерированную (частичную) часть, а поверх — оверлей
+  // «генерируется следующий уровень», чтобы уровни росли прогрессивно.
+  const running = pipeline.status === "running" || pipeline.status === "error";
+  if (loading && !running) {
     return (
       <div className="relative h-full">
         <div className="flex h-full items-center justify-center">
@@ -412,8 +459,8 @@ export function GraphScreen() {
       </div>
     );
   }
-  if (error) return <ErrorBanner message={error} />;
-  if (nodes.length === 0) {
+  if (error && !running) return <ErrorBanner message={error} />;
+  if (visibleNodes.length === 0) {
     return (
       <div className="relative flex h-full flex-col items-center justify-center gap-4 p-8 text-center">
         <p className="text-ink-4">Дерево ещё не построено.</p>
@@ -450,18 +497,25 @@ export function GraphScreen() {
         />
       </ReactFlow>
 
-      {expandable.length > 0 && (
+      {canDeepen.length > 0 && (
         <div className="absolute right-3 top-3 z-10 w-60 rounded-xl border border-border-strong bg-surface-2/95 p-3 shadow-xl backdrop-blur">
           <button
             onClick={() => setListOpen((v) => !v)}
             className="flex w-full items-center justify-between text-left text-sm font-semibold text-ink"
           >
-            <span>Можно расширить ({expandable.length})</span>
+            <span>Есть подразделы ({canDeepen.length})</span>
             <span className="text-ink-4">{listOpen ? "▾" : "▸"}</span>
           </button>
+          {hiddenCount > 0 && visibleLevel < 5 && (
+            <div className="mt-2 flex items-center gap-2 rounded-md border border-dashed border-border-strong bg-surface-3/50 px-2 py-1.5">
+              <span className="flex-1 text-[11px] text-ink-3">
+                Скрыто {hiddenCount} узл.
+              </span>
+            </div>
+          )}
           {listOpen && (
             <ul className="mt-2 max-h-72 space-y-1 overflow-y-auto pr-1">
-              {expandable.map((n) => (
+              {canDeepen.map((n) => (
                 <li
                   key={n.id}
                   className="flex items-center justify-between gap-2 rounded-md px-1.5 py-1 text-xs hover:bg-surface-3"
@@ -470,13 +524,14 @@ export function GraphScreen() {
                   <button
                     onClick={async () => {
                       setBusyId(n.id);
-                      await expandNode(n.id);
+                      await revealNode(n.id);
                       setBusyId(null);
                     }}
                     disabled={busyId === n.id}
                     className="shrink-0 rounded border border-accent px-1.5 py-0.5 text-[11px] font-semibold text-accent-ink hover:bg-accent disabled:opacity-40"
+                    title="Раскрыть подразделы или сгенерировать следующий уровень"
                   >
-                    {busyId === n.id ? "…" : "Углубить"}
+                    {busyId === n.id ? "…" : n.state === "expanded" ? "Раскрыть" : "Углубить"}
                   </button>
                 </li>
               ))}

@@ -195,9 +195,12 @@ function computeRadialPositions(tree: KnowledgeNode[]): Map<string, GraphPositio
     // Запас, чтобы ближний край самой длинной карточки-потомка (полуширина mw/2)
     // не заезжал на родителя (полуширина NODE_W/2).
     const clearance = COMPACT_GAP + NODE_W / 2 + mw / 2;
+    // Пер-листовой отступ: ширина самой широкой compact-карточки + зазор,
+    // чтобы веер детей не перекрывался на окружности.
+    const perLeaf = mw * 1.0 + COMPACT_GAP;
     return Math.max(
       clearance,
-      SUB_R_BASE + (lv - 2) * 40 + mw * 0.75 + (Math.max(leaves, 1) - 1) * 22,
+      SUB_R_BASE + (lv - 2) * 40 + mw * 0.75 + (Math.max(leaves, 1) - 1) * perLeaf,
     );
   }
   const radiusOf = (id: string): number => {
@@ -240,11 +243,14 @@ function computeRadialPositions(tree: KnowledgeNode[]): Map<string, GraphPositio
 
     if (kids.length === 0) return;
     const span = end - start;
-    const K = kids.length;
-    for (let i = 0; i < K; i++) {
-      const cs = start + (span * i) / K;
-      const ce = start + (span * (i + 1)) / K;
-      place(kids[i], cs, ce);
+    // Пропорциональное распределение: каждому ребёнку — доля сектора
+    // пропорциональная угловому пространству его поддерева (needRad).
+    const totalNeed = kids.reduce((s, id) => s + (needRad.get(id) ?? 0.1), 0);
+    let cur = start;
+    for (const id of kids) {
+      const share = ((needRad.get(id) ?? 0.1) / totalNeed) * span;
+      place(id, cur, cur + share);
+      cur += share;
     }
   };
 
@@ -263,21 +269,47 @@ function computeRadialPositions(tree: KnowledgeNode[]): Map<string, GraphPositio
 
   const N = l2nodes.length;
   if (N > 0) {
-    // Радиус кольца L2: минимум плюс на каждую ветку запас для карточки.
-    const l2Radius = Math.max(L2_RADIUS_MIN, (N * (NODE_W + NODE_GAP)) / TAU);
+    // Радиус кольца L2: минимум, иначе — по суммарной дуге L3-поддеревьев,
+    // чтобы вееры детей соседних L2 не перекрывались.
+    const maxSubtreeArc = l2nodes.reduce((max, n) => {
+      const lc = leafCount.get(n.id) ?? 1;
+      const mw = maxW.get(n.id) ?? NODE_W;
+      return Math.max(max, lc * (mw + COMPACT_GAP));
+    }, 0);
+    const l2Radius = Math.max(L2_RADIUS_MIN * Math.sqrt(N), maxSubtreeArc / TAU * 2.0);
     const sector = TAU / N;
     const baseTheta = (i: number) => (i + 0.5) * sector;
+
+    // Предвычисляем угловые границы секторов L2 с компенсацией полюсного сжатия.
+    // L2-узлы у полюсов (θ≈90°/270°) получают шире сектор — cos(θ)≈0
+    // сжимает L3-детей по горизонтали, нужно больше углового пространства.
+    const l2Sectors = new Map<string, { start: number; end: number }>();
+    {
+      let totalSpan = 0;
+      const rawSpans: { id: string; span: number }[] = [];
+      for (let i = 0; i < N; i++) {
+        const theta = baseTheta(i);
+        const polarFactor = 1 + 0.5 * Math.abs(Math.sin(theta));
+        rawSpans.push({ id: l2nodes[i].id, span: sector * polarFactor });
+        totalSpan += sector * polarFactor;
+      }
+      let cur = 0;
+      for (const { id, span } of rawSpans) {
+        l2Sectors.set(id, { start: cur, end: cur + (span / totalSpan) * TAU });
+        cur += (span / totalSpan) * TAU;
+      }
+    }
+
     // Сохраняем вычисленный L2-радиус для levelRadius(lv=2) при раскладке L3.
-    l2nodes.forEach((n, i) => {
-      const theta = baseTheta(i);
-      const start = theta - sector / 2;
-      const end = theta + sector / 2;
+    l2nodes.forEach((n) => {
+      const theta = baseTheta(l2nodes.indexOf(n));
+      const s = l2Sectors.get(n.id)!;
       // Ставим L2 явно (а не через place), т.к. его родитель — корень, радиус — l2Radius.
       result.set(n.id, {
         x: l2Radius * Math.cos(theta),
         y: l2Radius * Math.sin(theta),
       });
-      place(n.id, start, end);
+      place(n.id, s.start, s.end);
     });
   }
 
@@ -334,7 +366,13 @@ export function convertTreeToGraphFlow(tree: KnowledgeNode[]): GraphFlow {
     if (!sp || !tp) continue;
     const parent = byId.get(n.parentId);
     const ps = parent ? nodeSize(parent.level, parent.label) : nodeSize(1);
-    const handles = getEdgeHandles(sp.x, sp.y, tp.x, tp.y);
+    const cs = nodeSize(n.level, n.label);
+    // Передаём центры карточек, а не top-left углы — иначе getEdgeHandles
+    // выбирает неверную сторону handle, и getBezierPath строит прямую.
+    const handles = getEdgeHandles(
+      sp.x + ps.w / 2, sp.y + ps.h / 2,
+      tp.x + cs.w / 2, tp.y + cs.h / 2,
+    );
     flowEdges.push({
       id: `${n.parentId}-${n.id}`,
       source: n.parentId,
@@ -360,7 +398,14 @@ export function convertTreeToGraphFlow(tree: KnowledgeNode[]): GraphFlow {
       const tp = positions.get(rel.to);
       if (!sp || !tp) continue;
       existingIds.add(eid);
-      const handles = getEdgeHandles(sp.x, sp.y, tp.x, tp.y);
+      const fromNode = byId.get(rel.from);
+      const toNode = byId.get(rel.to);
+      const fs = fromNode ? nodeSize(fromNode.level, fromNode.label) : nodeSize(1);
+      const ts = toNode ? nodeSize(toNode.level, toNode.label) : nodeSize(1);
+      const handles = getEdgeHandles(
+        sp.x + fs.w / 2, sp.y + fs.h / 2,
+        tp.x + ts.w / 2, tp.y + ts.h / 2,
+      );
       const color = RELATION_COLORS[rel.type] ?? "#64748b";
       flowEdges.push({
         id: eid,

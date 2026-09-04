@@ -1951,6 +1951,7 @@ version = "0.1.0"
 dependencies = [
  "keyring",
  "serde",
+ "serde_json",
  "tauri",
 ]
 
@@ -1959,12 +1960,19 @@ name = "mindtree-studio"
 version = "0.1.0"
 dependencies = [
  "mindtree-native",
- "serde",
- "serde_json",
+ "mindtree-tauri-common",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-http",
+]
+
+[[package]]
+name = "mindtree-tauri-common"
+version = "0.1.0"
+dependencies = [
+ "mindtree-native",
+ "tauri",
 ]
 
 [[package]]

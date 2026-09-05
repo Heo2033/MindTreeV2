@@ -41,7 +41,7 @@ const PHASE_LABELS: Record<string, string> = {
 
 function BuildOverlay() {
   const pipeline = useGraphStore((s) => s.pipeline);
-  if (pipeline.status !== "running" && pipeline.status !== "error") return null;
+  if (pipeline.status !== "running") return null;
   const pct =
     pipeline.stats && pipeline.stats.total > 0
       ? Math.min(100, (pipeline.stats.depth / 5) * 100)
@@ -448,7 +448,7 @@ export function GraphScreen() {
   // Во время активной генерации не прячем дерево за полным спиннером:
   // показываем уже сгенерированную (частичную) часть, а поверх — оверлей
   // «генерируется следующий уровень», чтобы уровни росли прогрессивно.
-  const running = pipeline.status === "running" || pipeline.status === "error";
+  const running = pipeline.status === "running";
   if (loading && !running) {
     return (
       <div className="relative h-full">

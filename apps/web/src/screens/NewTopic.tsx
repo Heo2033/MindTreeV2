@@ -2,7 +2,6 @@ import { useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { useTopicStore, useGraphStore } from "../stores";
 import { Button, Input, Select, Textarea, ProgressBar, ErrorBanner, Spinner } from "@mindtree/ui";
-import type { TreeGenProgress } from "../api";
 
 const PHASE_LABELS: Record<string, string> = {
   structure: "Структурирование",
@@ -31,7 +30,6 @@ export function NewTopicScreen() {
   const [query, setQuery] = useState("");
   const [notes, setNotes] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [phase, setPhase] = useState<TreeGenProgress | null>(null);
   const [running, setRunning] = useState(false);
 
   const canStart = name.trim() !== "" && query.trim() !== "" && !running;
@@ -63,7 +61,7 @@ export function NewTopicScreen() {
     }
   }
 
-  // Live progress from pipeline store (same phase info mirrored into local state)
+  // Live progress from pipeline store.
   const progressLive = pipeline.status === "running" ? pipeline : null;
 
   return (
@@ -133,22 +131,22 @@ export function NewTopicScreen() {
               <div className="flex items-center gap-3">
                 <Spinner size="sm" />
                 <span className="text-sm text-ink-3">
-                  {PHASE_LABELS[phase?.phase ?? progressLive?.phase ?? ""] ?? "Построение дерева…"}
+                  {PHASE_LABELS[progressLive?.phase ?? ""] ?? "Построение дерева…"}
                 </span>
               </div>
               <p className="mt-2 text-xs text-ink-4">
-                {phase?.message || progressLive?.message || ""}
+                {progressLive?.message || ""}
               </p>
-              {phase?.stats && (
+              {progressLive?.stats && (
                 <div className="mt-3">
                   <ProgressBar
                     value={Math.min(
                       100,
-                      ((phase.stats.total ?? 0) > 0
-                        ? (phase.stats.depth ?? 0) / 5
+                      ((progressLive.stats.total ?? 0) > 0
+                        ? (progressLive.stats.depth ?? 0) / 5
                         : 0) * 100,
                     )}
-                    label={`Уровней: ${phase.stats.depth ?? 0} · Листьев: ${phase.stats.leaves ?? 0}`}
+                    label={`Уровней: ${progressLive.stats.depth ?? 0} · Листьев: ${progressLive.stats.leaves ?? 0}`}
                   />
                 </div>
               )}

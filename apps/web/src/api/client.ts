@@ -1,5 +1,8 @@
 const API_BASE = import.meta.env.VITE_API_URL || "";
 
+/** Лимит ожидания ответа сервера (SSE-руки). 0 — без лимита. */
+const CONNECT_TIMEOUT_MS = 15_000;
+
 export interface RequestOptions extends RequestInit {
   json?: unknown;
 }
@@ -45,6 +48,7 @@ export interface SSEStream {
  */
 export function postSSE(path: string, body: unknown): SSEStream {
   const controller = new AbortController();
+  let connectTimedOut = false;
 
   const events: SSEEvent[] = [];
   const listeners = new Set<(e: SSEEvent) => void>();
@@ -62,8 +66,8 @@ export function postSSE(path: string, body: unknown): SSEStream {
       while (cursor < events.length) {
         yield events[cursor++];
       }
-      if (done) return;
       if (streamError) throw streamError;
+      if (done) return;
       await new Promise<void>((res) => {
         const wake = () => res();
         const check = () => {
@@ -79,6 +83,11 @@ export function postSSE(path: string, body: unknown): SSEStream {
   })();
 
   (async () => {
+    const connectTimer = setTimeout(() => {
+      connectTimedOut = true;
+      controller.abort();
+    }, CONNECT_TIMEOUT_MS);
+
     try {
       const res = await fetch(`${API_BASE}${path}`, {
         method: "POST",
@@ -86,6 +95,7 @@ export function postSSE(path: string, body: unknown): SSEStream {
         body: JSON.stringify(body),
         signal: controller.signal,
       });
+      clearTimeout(connectTimer);
 
       if (!res.ok || !res.body) {
         streamError = new Error(`SSE HTTP ${res.status}`);
@@ -148,8 +158,15 @@ export function postSSE(path: string, body: unknown): SSEStream {
       done = true;
       for (const fn of listeners) fn({ event: "done", data: null });
     } catch (err) {
+      clearTimeout(connectTimer);
       if (controller.signal.aborted) {
-        done = true;
+        if (connectTimedOut) {
+          streamError = new Error("Таймаут соединения с сервером");
+          done = true;
+          for (const fn of listeners) fn({ event: "__error__", data: streamError });
+        } else {
+          done = true;
+        }
         return;
       }
       streamError = err instanceof Error ? err : new Error(String(err));

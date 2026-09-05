@@ -156,7 +156,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           });
           await get().loadTopic(topicId);
           return true;
-        } else if (ev.event === "error") {
+        } else if (ev.event === "error" || ev.event === "__error__") {
           const msg =
             typeof ev.data === "object" && ev.data && "message" in (ev.data as object)
               ? String((ev.data as { message: unknown }).message)
@@ -168,6 +168,20 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           return false;
         }
       }
+      // Поток завершился без явного done-фрейма (EOF/обрыв соединения).
+      // Состояние pipeline ОБЯЗАНО уйти из "running", иначе экран «зависнет»
+      // на оверлее построения. Если в БД уже есть узлы — считаем дерево
+      // построенным (инкрементальный персист уже сохранил их), иначе — ошибка.
+      const eofCheck = await topicsApi.get(topicId);
+      if ((eofCheck.nodes ?? []).length === 0) {
+        const msg = "Соединение прервано: дерево не было построено";
+        set({
+          pipeline: { ...idlePipeline(), status: "error", message: msg },
+          error: msg,
+        });
+        return false;
+      }
+      set({ pipeline: { ...idlePipeline(), status: "done", message: "Дерево построено" } });
       return true;
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Ошибка генерации";

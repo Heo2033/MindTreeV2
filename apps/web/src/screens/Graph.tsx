@@ -25,7 +25,7 @@ import {
   type GraphFlowNode,
   type GraphFlowEdge,
 } from "@mindtree/graph";
-import { useGraphStore, isNodeVisible } from "../stores";
+import { useGraphStore, isNodeVisible, nodeHasHiddenChildren } from "../stores";
 import { Spinner, ErrorBanner, ProgressBar } from "@mindtree/ui";
 
 const PHASE_LABELS: Record<string, string> = {
@@ -79,6 +79,8 @@ function MindNode({ data }: NodeProps) {
   const branchColor = (data as { branchColor?: string }).branchColor;
   const revealNode = useGraphStore((s) => s.revealNode);
   const allNodes = useGraphStore((s) => s.nodes);
+  const visibleLevel = useGraphStore((s) => s.visibleLevel);
+  const revealedNodes = useGraphStore((s) => s.revealedNodes);
   const navigate = useNavigate();
   const [busy, setBusy] = useState(false);
   const [hovered, setHovered] = useState(false);
@@ -91,8 +93,11 @@ function MindNode({ data }: NodeProps) {
   const isMaxLevel = node.level >= 5;
   const isTerminal = isMaxLevel || (node.leaf && node.state === "expanded");
   const isExpandable = !isTerminal;
+  // «Раскрыть» показываем только если есть реально скрытые потомки — иначе
+  // клик был бы пустым (например на корне, чьё поддерево уже всё видно).
+  const canReveal =
+    isExpandable && hasChildren && nodeHasHiddenChildren(node, allNodes, visibleLevel, revealedNodes);
   const canDeepen = isExpandable && !hasChildren;
-  const canReveal = isExpandable && hasChildren;
   // Компактные карточки для L3+ (только label; one-liner/кнопки при наведении).
   const isCompact = node.level >= 3;
 
@@ -185,11 +190,11 @@ function MindNode({ data }: NodeProps) {
           <span className="mt-1 inline-block rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-semibold text-accent-ink">
             + можно расширить
           </span>
-        ) : (
+        ) : !isExpandable ? (
           <span className="mt-1 inline-block rounded bg-surface-2 px-1.5 py-0.5 text-[10px] font-semibold text-ink-4">
             {isMaxLevel ? "максимальная глубина" : "конечный лист"}
           </span>
-        ))}
+        ) : null)}
       {!(isCompact && !hovered) && (
         <div className="mt-2 flex items-center gap-2">
           <button
@@ -198,7 +203,7 @@ function MindNode({ data }: NodeProps) {
           >
             Изучить
           </button>
-          {isExpandable ? (
+          {canReveal || canDeepen ? (
             <button
               onClick={async () => {
                 setBusy(true);
@@ -374,7 +379,8 @@ export function GraphScreen() {
         (n) =>
           isNodeVisible(n, nodes, visibleLevel, revealedNodes) &&
           !(n.level >= 5 || (n.leaf && n.state === "expanded")) &&
-          nodes.some((c) => c.parentId === n.id),
+          nodes.some((c) => c.parentId === n.id) &&
+          nodeHasHiddenChildren(n, nodes, visibleLevel, revealedNodes),
       ),
     [nodes, visibleLevel, revealedNodes],
   );
@@ -544,7 +550,7 @@ export function GraphScreen() {
                     className="shrink-0 rounded border border-accent px-1.5 py-0.5 text-[11px] font-semibold text-accent-ink hover:bg-accent disabled:opacity-40"
                     title="Раскрыть подразделы или сгенерировать следующий уровень"
                   >
-                    {busyId === n.id ? "…" : n.state === "expanded" ? "Раскрыть" : "Углубить"}
+                    {busyId === n.id ? "…" : "Раскрыть"}
                   </button>
                 </li>
               ))}

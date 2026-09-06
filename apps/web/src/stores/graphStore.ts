@@ -86,6 +86,29 @@ export function isNodeVisible(
   return false;
 }
 
+/**
+ * Есть ли у узла реально скрытые потомки (т.е. осталось что раскрывать).
+ * true, если хотя бы один из потомков не виден на текущем visibleLevel/revealedNodes.
+ */
+export function nodeHasHiddenChildren(
+  node: { id: string },
+  nodes: KnowledgeNode[],
+  visibleLevel: number,
+  revealedNodes: Set<string>,
+): boolean {
+  const childrenIds = nodes.filter((n) => n.parentId === node.id).map((n) => n.id);
+  while (childrenIds.length > 0) {
+    const id = childrenIds.pop()!;
+    const child = nodes.find((n) => n.id === id);
+    if (!child) continue;
+    if (!isNodeVisible(child, nodes, visibleLevel, revealedNodes)) return true;
+    nodes
+      .filter((n) => n.parentId === id)
+      .forEach((n) => childrenIds.push(n.id));
+  }
+  return false;
+}
+
 export const useGraphStore = create<GraphState>((set, get) => ({
   topicId: null,
   topicName: null,

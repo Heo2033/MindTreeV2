@@ -6,8 +6,12 @@ pub fn load_settings(app: AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn save_settings(app: AppHandle, settings: String) -> Result<(), String> {
-    mindtree_native::save_settings(app, settings)
+pub fn save_settings(
+    app: AppHandle,
+    settings: String,
+    expected: Option<String>,
+) -> Result<(), String> {
+    mindtree_native::save_settings(app, settings, expected)
 }
 
 #[tauri::command]

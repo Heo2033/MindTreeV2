@@ -10,6 +10,10 @@ pub fn run() {
             mindtree_tauri_common::commands::get_secret,
             mindtree_tauri_common::commands::delete_secret,
         ])
+        .setup(|app| {
+            mindtree_native::cleanup_stale_tmp(app.handle());
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

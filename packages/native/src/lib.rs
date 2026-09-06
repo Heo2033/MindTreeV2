@@ -3,8 +3,24 @@
 //! настройки — в JSON-файле в app_data_dir.
 
 use std::fs;
+use std::io::Write;
+use std::path::Path;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+
 use tauri::{AppHandle, Manager};
+
+/// Монотонный счётчик для уникальных tmp-имён: таймстампы у двух потоков могут
+/// совпасть (гранулярность системных часов), монотонный счётчик — нет.
+static TMP_NONCE: AtomicU64 = AtomicU64::new(0);
+
+/// Процесс-локальный мьютекс: сериализует read-check-write настроек в рамках
+/// одного процесса (desktop и studio — однопроцессные приложения).
+fn settings_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
@@ -30,33 +46,97 @@ pub fn load_settings(app: AppHandle) -> Result<String, String> {
     }
 }
 
-pub fn save_settings(app: AppHandle, settings: String) -> Result<(), String> {
+/// Сохранение настроек с оптимистичной блокировкой (CAS):
+/// если `expected` задан и не совпадает с текущим содержимым файла,
+/// возвращается ошибка конфликта — вызывающая сторона перечитывает и повторяет.
+/// `expected = None` сохраняет обратную совместимость (безусловная запись).
+pub fn save_settings(
+    app: AppHandle,
+    settings: String,
+    expected: Option<String>,
+) -> Result<(), String> {
     let path = settings_path(&app)?;
+
+    validate_settings_object(&settings)?;
+
+    let _guard = settings_lock()
+        .lock()
+        .map_err(|_| "settings lock poisoned".to_string())?;
+
+    if let Some(exp) = &expected {
+        let current = match fs::read_to_string(&path) {
+            Ok(s) => s,
+            // Первого сохранения ещё не было — эквивалент "{}".
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => "{}".to_string(),
+            Err(e) => return Err(e.to_string()),
+        };
+        if current != *exp {
+            return Err("settings changed concurrently, reload and retry".to_string());
+        }
+    }
+
     write_settings_atomic(&path, &settings)
+}
+
+/// Настройки должны быть валидным JSON-объектом, а не null/массивом/скаляром.
+fn validate_settings_object(settings: &str) -> Result<(), String> {
+    match serde_json::from_str::<serde_json::Value>(settings) {
+        Ok(v) if v.is_object() => Ok(()),
+        Ok(_) => Err("settings must be a JSON object".to_string()),
+        Err(e) => Err(format!("invalid JSON: {e}")),
+    }
+}
+
+/// Уборка битых tmp-файлов (json.tmp.* старше часа), оставшихся после сбоя
+/// между write и rename. Живые записи не трогаем: rename занимает миллисекунды,
+/// а конкурентные записи дополнительно замкованы мьютексом в `save_settings`.
+pub fn cleanup_stale_tmp(app: &AppHandle) {
+    let Ok(dir) = app.path().app_data_dir() else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return;
+    };
+    let Some(cutoff) =
+        std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(3600))
+    else {
+        return;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.starts_with("settings.json.tmp.") {
+            let modified = e.metadata().and_then(|m| m.modified());
+            if modified.map(|t| t < cutoff).unwrap_or(false) {
+                let _ = fs::remove_file(e.path());
+            }
+        }
+    }
 }
 
 /// Атомарная запись JSON-настроек: валидирует вход, пишет в уникальный
 /// tmp-файл, fsync и затем rename (атомарная операция на всех целевых ФС).
-fn write_settings_atomic(path: &std::path::Path, settings: &str) -> Result<(), String> {
-    serde_json::from_str::<serde_json::Value>(settings)
-        .map_err(|e| format!("invalid JSON: {e}"))?;
+fn write_settings_atomic(path: &Path, settings: &str) -> Result<(), String> {
+    validate_settings_object(settings)?;
 
-    // Уникальный tmp-файл на вызов: исключает lost-update между
-    // конкурентными записями, которые пишут в один и тот же путь.
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?
-        .as_nanos();
-    let tmp = path.with_extension(format!("json.tmp.{nonce}"));
+    // Уникальность: монотонный счётчик процесса + pid. Таймстампы не подходят:
+    // два потока могут снять одинаковое значение системных часов и получить один
+    // и тот же tmp-путь, что приведёт к гонке на файл.
+    let nonce = TMP_NONCE.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("json.tmp.{}.{}", std::process::id(), nonce));
 
-    fs::write(&tmp, settings).map_err(|e| format!("write tmp: {e}"))?;
-
+    // Пишем и синхронизируем один и тот же дескриптор (без второго open).
     // fsync гарантирует запись данных на диск до атомарного rename,
     // защищая от потери при системном сбое между write и rename.
-    // На Windows sync_all требует descriptor с правом записи.
-    if let Err(e) = fs::OpenOptions::new().write(true).open(&tmp).and_then(|f| f.sync_all()) {
+    let write_and_sync = || -> Result<(), String> {
+        let mut f = fs::File::create(&tmp).map_err(|e| format!("create tmp: {e}"))?;
+        f.write_all(settings.as_bytes())
+            .map_err(|e| format!("write tmp: {e}"))?;
+        f.sync_all().map_err(|e| format!("fsync tmp: {e}"))
+    };
+
+    if let Err(e) = write_and_sync() {
         let _ = fs::remove_file(&tmp);
-        return Err(format!("fsync tmp: {e}"));
+        return Err(e);
     }
 
     fs::rename(&tmp, path).map_err(|e| {
@@ -67,13 +147,19 @@ fn write_settings_atomic(path: &std::path::Path, settings: &str) -> Result<(), S
 
 pub fn store_secret(app: AppHandle, key: String, value: String) -> Result<(), String> {
     let entry = keyring::Entry::new(&service(&app), &key).map_err(|e| e.to_string())?;
-    entry.set_secret(value.as_bytes()).map_err(|e| e.to_string())
+    entry
+        .set_secret(value.as_bytes())
+        .map_err(|e| e.to_string())
 }
 
 pub fn get_secret(app: AppHandle, key: String) -> Result<Option<String>, String> {
     let entry = keyring::Entry::new(&service(&app), &key).map_err(|e| e.to_string())?;
     match entry.get_secret() {
-        Ok(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).into_owned())),
+        // Строгое преобразование: lossy-подмена байт молча портила бы секрет.
+        Ok(bytes) => {
+            let s = String::from_utf8(bytes).map_err(|e| format!("secret is not UTF-8: {e}"))?;
+            Ok(Some(s))
+        }
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(e) => Err(e.to_string()),
     }
@@ -118,7 +204,24 @@ mod tests {
 
         let err = write_settings_atomic(&path, "{not valid json}").unwrap_err();
         assert!(err.contains("invalid JSON"), "unexpected error: {err}");
-        assert!(!path.exists(), "target must not be created on invalid input");
+        assert!(
+            !path.exists(),
+            "target must not be created on invalid input"
+        );
+    }
+
+    #[test]
+    fn rejects_non_object_json() {
+        let (_dir, path) = temp_path();
+
+        for bad in [r#"[1,2,3]"#, r#"null"#, r#""str""#, r#"42"#] {
+            let err = write_settings_atomic(&path, bad).unwrap_err();
+            assert!(
+                err.contains("must be a JSON object"),
+                "unexpected error for {bad}: {err}"
+            );
+            assert!(!path.exists(), "target must not be created for {bad}");
+        }
     }
 
     #[test]

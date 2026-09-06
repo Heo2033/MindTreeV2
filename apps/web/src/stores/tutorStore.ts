@@ -62,9 +62,9 @@ export const useTutorStore = create<TutorState>((set, get) => ({
 
       for await (const ev of stream.events) {
         const { event, data } = ev;
-        if (event === "token" && data && typeof (data as any).text === "string") {
+        if (event === "token" && data && typeof (data as { text?: unknown }).text === "string") {
           receivedFirstToken = true;
-          assistantContent += (data as any).text;
+          assistantContent += (data as { text: string }).text;
           const id = assistantId;
           set({
             messages: get().messages.map((m) =>
@@ -72,13 +72,17 @@ export const useTutorStore = create<TutorState>((set, get) => ({
             ),
           });
         } else if (event === "done" && data) {
-          usedFallback = Boolean((data as any).usedFallback);
-          if ((data as any).timeRemainingMinutes != null) {
-            timeRemainingMinutes = Number((data as any).timeRemainingMinutes);
+          const done = data as { usedFallback?: unknown; timeRemainingMinutes?: unknown };
+          usedFallback = Boolean(done.usedFallback);
+          if (done.timeRemainingMinutes != null) {
+            timeRemainingMinutes = Number(done.timeRemainingMinutes);
           }
         } else if (event === "error" || event === "__error__") {
+          const errData = data as { message?: unknown } | Error | undefined;
           const msg =
-            (data as any)?.message ?? (data as Error)?.message ?? "Ошибка чата";
+            typeof errData?.message === "string" && errData.message.trim()
+              ? errData.message
+              : "Ошибка чата";
           finalError = msg;
           throw new Error(msg);
         }

@@ -30,7 +30,7 @@ const TYPE_LABEL: Record<string, string> = {
 };
 
 export function FinalAssessmentScreen() {
-  const { topicId, visibleLevel, nodes, autoExpandVisible } = useGraphStore();
+  const { visibleLevel, nodes, autoExpandVisible } = useGraphStore();
   const { session } = useSessionStore();
   const navigate = useNavigate();
   const location = useLocation();
@@ -76,7 +76,7 @@ export function FinalAssessmentScreen() {
 
   useEffect(() => {
     if (passedId) void setup();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- setup() пересоздаётся каждый рендер; эффект должен срабатывать только при passedId.
   }, [passedId]);
 
   const select = (i: number) => {

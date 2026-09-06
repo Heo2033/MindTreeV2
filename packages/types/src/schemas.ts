@@ -1,7 +1,6 @@
 import { z } from "zod";
 import type {
   KnowledgeNode,
-  RelationType,
   ConceptType,
   NodeState,
 } from "./topic.js";

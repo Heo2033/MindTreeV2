@@ -6,7 +6,14 @@ import { getScheduler } from "../llm/scheduler.js";
 
 export async function pipelineRoutes(app: FastifyInstance) {
   app.post("/generate", async (request, reply) => {
-    const { topic_id, query, goal, level, time_budget_minutes } = request.body as any;
+    const body = (request.body ?? {}) as {
+      topic_id?: string;
+      query?: string;
+      goal?: string;
+      level?: string;
+      time_budget_minutes?: number;
+    };
+    const { topic_id, query, goal, level, time_budget_minutes } = body;
 
     if (!query) {
       return reply.status(400).send({ error: "query is required" });
@@ -19,7 +26,7 @@ export async function pipelineRoutes(app: FastifyInstance) {
       Connection: "keep-alive",
     });
 
-    const sendEvent = (event: string, data: any) => {
+    const sendEvent = (event: string, data: unknown) => {
       reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     };
 
@@ -320,7 +327,6 @@ function scheduleBackgroundFill(topicId: string, engine: KnowledgeGraphEngine): 
   if (backgroundFillInFlight.has(topicId)) return;
   backgroundFillInFlight.add(topicId);
 
-  // eslint-disable-next-line @typescript-eslint/no-floating-promises
   void (async () => {
     const db = getDb();
     const scheduler = getScheduler();

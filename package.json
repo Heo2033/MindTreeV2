@@ -22,12 +22,14 @@
     "typecheck": "npm run typecheck -w @mindtree/types && npm run typecheck -w @mindtree/ui && npm run typecheck -w @mindtree/graph && npm run typecheck -w @mindtree/tauri-common && npm run typecheck -w mindtree-server && npm run typecheck -w @mindtree/web && npm run typecheck -w @mindtree/desktop && npm run typecheck -w @mindtree/studio",
     "lint": "eslint packages/ apps/ server/src/",
     "test": "vitest run -c server/vitest.config.ts",
+    "test:web": "vitest run -c apps/web/vitest.config.ts",
     "test:watch": "vitest -c server/vitest.config.ts"
   },
   "devDependencies": {
-    "typescript": "^5.8.3",
-    "vitest": "^3.1.0",
     "eslint": "^9.28.0",
-    "typescript-eslint": "^8.33.0"
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.33.0",
+    "vitest": "^3.1.0"
   }
 }

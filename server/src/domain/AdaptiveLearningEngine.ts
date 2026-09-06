@@ -1,4 +1,4 @@
-import type { Curriculum, CurriculumItem, KnowledgeNode } from "@mindtree/types";
+import type { CurriculumItem } from "@mindtree/types";
 import { LearnerModelService } from "./LearnerModelService.js";
 import { ReviewScheduler } from "./ReviewScheduler.js";
 import { LearningSessionEngine } from "./LearningSessionEngine.js";

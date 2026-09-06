@@ -13,7 +13,7 @@ const LEVEL_LABEL: Record<MasteryLevel, string> = {
   expert: "Эксперт",
 };
 
-function pct(v: number | null | undefined, digits = 0): string {
+function pct(v: number | null | undefined): string {
   if (v === null || v === undefined || !isFinite(v)) return "—";
   return `${Math.round(v * 100)}%`;
 }
@@ -63,6 +63,7 @@ export function AnalyticsScreen() {
 
   useEffect(() => {
     void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- load() создаётся заново каждый рендер; добавление в deps вызовет шторм запросов.
   }, [topicId]);
 
   return (

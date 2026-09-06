@@ -1,5 +1,4 @@
 import { knowledgeNodeSchema, type KnowledgeNode } from "@mindtree/types";
-import { z } from "zod";
 
 export function sanitizeNodes(nodes: unknown[]): KnowledgeNode[] {
   const valid: KnowledgeNode[] = [];

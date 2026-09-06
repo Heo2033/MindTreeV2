@@ -34,7 +34,10 @@ export async function milestoneRoutes(app: FastifyInstance) {
   const engine = new MilestoneEngine();
 
   app.post("/generate", async (request, reply) => {
-    const { journey_id, topic_id } = request.body as any;
+    const { journey_id, topic_id } = (request.body ?? {}) as {
+      journey_id?: string;
+      topic_id?: string;
+    };
     if (!journey_id || !topic_id) {
       return reply.status(400).send({ error: "journey_id and topic_id are required" });
     }
@@ -54,7 +57,7 @@ export async function milestoneRoutes(app: FastifyInstance) {
 
   app.patch("/:id", async (request, reply) => {
     const { id } = request.params as { id: string };
-    const { status } = request.body as any;
+    const { status } = (request.body ?? {}) as { status?: string };
     if (status) {
       getDb().prepare("UPDATE learning_milestones SET status = ? WHERE id = ?").run(status, id);
     }
@@ -75,7 +78,7 @@ export async function milestoneRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: "journey_id and title are required" });
     }
     const id = `ms_${crypto.randomUUID().slice(0, 8)}`;
-    const level = body.level && MASTERY_LEVELS.includes(body.level as any)
+    const level = body.level && MASTERY_LEVELS.includes(body.level as Milestone["level"])
       ? (body.level as Milestone["level"])
       : "awareness";
     const capabilities = Array.isArray(body.capabilities)

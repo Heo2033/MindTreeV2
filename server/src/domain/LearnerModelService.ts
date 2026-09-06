@@ -1,4 +1,4 @@
-import type { ConceptMastery, LearnerModel, Misconception, MisconceptionType, MasteryLevel } from "@mindtree/types";
+import type { ConceptMastery, LearnerModel, MisconceptionType, MasteryLevel } from "@mindtree/types";
 import { getDb } from "../db/connection.js";
 
 export interface ConceptProfile extends ConceptMastery {

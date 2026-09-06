@@ -28,7 +28,11 @@ export async function quizRoutes(app: FastifyInstance) {
 
   // Generate a quiz for a topic (or subset of node ids)
   app.post("/", async (request, reply) => {
-    const { topic_id, node_ids, count } = request.body as any;
+    const { topic_id, node_ids, count } = (request.body ?? {}) as {
+      topic_id?: string;
+      node_ids?: unknown[];
+      count?: number;
+    };
     if (!topic_id) return reply.status(400).send({ error: "topic_id is required" });
 
     const topic = getDb().prepare("SELECT id, name FROM topics WHERE id = ?").get(topic_id) as
@@ -103,7 +107,10 @@ export async function quizRoutes(app: FastifyInstance) {
 
   // Apply quiz results back to learner model (SRS update per node)
   app.post("/:id/apply", async (request, reply) => {
-    const { topic_id, results } = request.body as any;
+    const { topic_id, results } = (request.body ?? {}) as {
+      topic_id?: string;
+      results?: Array<{ nodeId?: string; correct?: boolean }>;
+    };
     if (!topic_id || !Array.isArray(results)) {
       return reply.status(400).send({ error: "topic_id and results array are required" });
     }

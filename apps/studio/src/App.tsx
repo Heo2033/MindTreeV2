@@ -37,7 +37,7 @@ export default function App() {
   const {
     provider, baseUrl, apiKey, model, modelStrong, modelFast, temperature, numCtx,
     apiKeyStored, persistedLocal, server, savingLocal, applying, testing,
-    loadError, serverError, testResult,
+    loadError, testResult,
     adminStatus, adminLogs, adminLoading, adminError,
     setField, loadLocal, saveLocal, applyToServer, fetchServerState, clearServer, testConnection, clearApiKey, fetchAdmin,
   } = useConfigStore();
@@ -46,11 +46,11 @@ export default function App() {
   useEffect(() => {
     void loadLocal();
     void fetchServerState();
-  }, []);
+  }, [loadLocal, fetchServerState]);
 
   useEffect(() => {
     if (tab === "status" || tab === "logs") void fetchAdmin();
-  }, [tab]);
+  }, [tab, fetchAdmin]);
 
   const effective = useMemo(() => adminStatus?.config.effective ?? server?.effective, [adminStatus, server]);
   const uptime = useMemo(

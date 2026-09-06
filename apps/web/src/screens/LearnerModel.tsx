@@ -53,6 +53,7 @@ export function LearnerModelScreen() {
 
   useEffect(() => {
     void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- load() пересоздаётся каждый рендер; нужен только при смене topicId.
   }, [topicId]);
 
   const labelOf = (id: string) => nodes.find((n) => n.id === id)?.label ?? id.slice(0, 12);

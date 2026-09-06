@@ -1,5 +1,4 @@
 import type {
-  KnowledgeNode,
   Relation,
   RelationType,
 } from "@mindtree/types";
@@ -180,7 +179,7 @@ export class KnowledgeGraphEngine {
 
     onProgress?.("content", "Заполнение контента узлов...");
     try {
-      const withContent = await this.fillTopLevelContent(query, nodes, options.level, onProgress);
+      const withContent = await this.fillTopLevelContent(query, nodes);
       nodes = withContent;
     } catch (err) {
       warnings.push(`Контент заполнен не полностью: ${err instanceof Error ? err.message : String(err)}`);
@@ -356,7 +355,6 @@ export class KnowledgeGraphEngine {
     );
 
     const added: NodeDraft[] = [];
-    const targets = new Set(nodesToExpand.map((n) => n.id));
     for (const item of result as unknown[]) {
       const rec = item as Record<string, unknown>;
       if (!rec || typeof rec.id !== "string") continue;
@@ -502,8 +500,6 @@ export class KnowledgeGraphEngine {
   private async fillTopLevelContent(
     query: string,
     nodes: NodeDraft[],
-    level?: string,
-    onProgress?: ProgressCallback,
   ): Promise<NodeDraft[]> {
     // For MVP, top-level nodes get one_liner content; deep content is lazy/just-in-time.
     // Content generation is handled by generateNodeContent on demand.
@@ -684,7 +680,7 @@ export class KnowledgeGraphEngine {
    * Ленивая генерация контента для узла в БД: генерирует one_liner/details/analogy
    * и персистит их, помечая content_loaded.
    */
-  async generateNodeContentFromDb(topicId: string, nodeId: string, level?: string): Promise<{
+  async generateNodeContentFromDb(topicId: string, nodeId: string): Promise<{
     one_liner: string;
     details: string;
     analogy?: string;
@@ -791,7 +787,6 @@ function normalizeDrafts(raw: unknown[]): NodeDraft[] {
   });
 
   // fix levels via DFS from root
-  const byId = new Map(drafts.map((d) => [d.id, d]));
   const roots = drafts.filter((d) => !d.parentId);
   const result: NodeDraft[] = [];
   const visited = new Set<string>();

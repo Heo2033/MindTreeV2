@@ -65,6 +65,7 @@ export function SessionScreen() {
     if (session && !activity && !loading && !error && !advancing) {
       void ensureActivity();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- ensureActivity стабилен из стора, session отслеживается по id; явное добавление объекта зациклит вызов.
   }, [session?.id, activity, loading, error, advancing]);
 
   // Восстановление сессии после перезагрузки/персиста: session есть, а currentItem ещё нет.
@@ -72,7 +73,7 @@ export function SessionScreen() {
     if (session && !currentItem && !loading && !error) {
       void resume();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- resume() стабилен; восстановление нужно только при смене сессии.
   }, [session?.id]);
 
   async function onStart() {

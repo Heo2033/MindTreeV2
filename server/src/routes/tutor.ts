@@ -4,7 +4,13 @@ import { AITutorService } from "../domain/AITutorService.js";
 export async function tutorRoutes(app: FastifyInstance) {
   // Потоковый чат (SSE): токены приходят по мере генерации, как в ChatGPT.
   app.post("/stream", async (request, reply) => {
-    const { topic_id, session_id, message, node_id } = request.body as any;
+    const body = (request.body ?? {}) as {
+      topic_id?: string;
+      session_id?: string;
+      message?: string;
+      node_id?: string;
+    };
+    const { topic_id, session_id, message, node_id } = body;
 
     if (!topic_id || !message) {
       return reply.status(400).send({ error: "topic_id and message are required" });
@@ -17,7 +23,7 @@ export async function tutorRoutes(app: FastifyInstance) {
       "X-Accel-Buffering": "no",
     });
 
-    const sendEvent = (event: string, data: any) => {
+    const sendEvent = (event: string, data: unknown) => {
       reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     };
 
@@ -66,7 +72,12 @@ export async function tutorRoutes(app: FastifyInstance) {
 
   // Обратная совместимость: не-стриминговый вариант (весь текст в конце).
   app.post("/", async (request, reply) => {
-    const { topic_id, session_id, message, node_id } = request.body as any;
+    const { topic_id, session_id, message, node_id } = (request.body ?? {}) as {
+      topic_id?: string;
+      session_id?: string;
+      message?: string;
+      node_id?: string;
+    };
 
     if (!topic_id || !message) {
       return reply.status(400).send({ error: "topic_id and message are required" });

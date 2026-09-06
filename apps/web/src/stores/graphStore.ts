@@ -157,32 +157,27 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           await get().loadTopic(topicId);
           return true;
         } else if (ev.event === "error" || ev.event === "__error__") {
+          // Протокольная ошибка сервера (error) и транспортная (__error__:
+          // обрыв соединения, таймаут подключения) — терминальное состояние.
+          // Уже сохранённые узлы (частичное дерево) НЕ очищаем: Graph покажет
+          // их вместе с сообщением об ошибке.
+          const data = ev.data as { message?: unknown };
           const msg =
-            typeof ev.data === "object" && ev.data && "message" in (ev.data as object)
-              ? String((ev.data as { message: unknown }).message)
-              : "Ошибка генерации";
-          set({
-            pipeline: { ...idlePipeline(), status: "error", message: msg },
-            error: msg,
-          });
+            data && typeof data.message === "string" && data.message.trim()
+              ? data.message
+              : ev.event === "__error__"
+                ? "Соединение прервано: дерево не было завершено"
+                : "Ошибка генерации";
+          set({ pipeline: { ...idlePipeline(), status: "error", message: msg }, error: msg });
           return false;
         }
       }
-      // Поток завершился без явного done-фрейма (EOF/обрыв соединения).
-      // Состояние pipeline ОБЯЗАНО уйти из "running", иначе экран «зависнет»
-      // на оверлее построения. Если в БД уже есть узлы — считаем дерево
-      // построенным (инкрементальный персист уже сохранил их), иначе — ошибка.
-      const eofCheck = await topicsApi.get(topicId);
-      if ((eofCheck.nodes ?? []).length === 0) {
-        const msg = "Соединение прервано: дерево не было построено";
-        set({
-          pipeline: { ...idlePipeline(), status: "error", message: msg },
-          error: msg,
-        });
-        return false;
-      }
-      set({ pipeline: { ...idlePipeline(), status: "done", message: "Дерево построено" } });
-      return true;
+      // Защитный фоллбэк: поток завершился без терминального done/error-фрейма.
+      // Транспорт не должен такого допускать, но если случилось — уводим
+      // pipeline из "running", чтобы оверлей построения не завис навсегда.
+      const msg = "Соединение прервано: дерево не было завершено";
+      set({ pipeline: { ...idlePipeline(), status: "error", message: msg }, error: msg });
+      return false;
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Ошибка генерации";
       set({ pipeline: { ...idlePipeline(), status: "error", message: msg }, error: msg });

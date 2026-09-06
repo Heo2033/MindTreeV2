@@ -50,7 +50,7 @@ export function ReviewScreen() {
 
   useEffect(() => {
     void load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- load() пересоздаётся каждый рендер; нужен только при смене topicId.
   }, [topicId]);
 
   function mark(correct: boolean) {

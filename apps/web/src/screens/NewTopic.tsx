@@ -26,7 +26,7 @@ export function NewTopicScreen() {
   const [name, setName] = useState("");
   const [goal, setGoal] = useState("overview");
   const [level, setLevel] = useState("solid_understanding");
-  const [timeBudget, setTimeBudget] = useState("60");
+  const [timeBudget] = useState("60");
   const [query, setQuery] = useState("");
   const [notes, setNotes] = useState("");
   const [error, setError] = useState<string | null>(null);

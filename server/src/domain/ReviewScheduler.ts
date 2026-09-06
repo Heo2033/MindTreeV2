@@ -1,5 +1,5 @@
 import { scheduleReview, isDue } from "../lib/srs.js";
-import { LearnerModelService, type ConceptProfile } from "./LearnerModelService.js";
+import { LearnerModelService } from "./LearnerModelService.js";
 import { getDb } from "../db/connection.js";
 
 export class ReviewScheduler {

@@ -7,7 +7,10 @@ export async function treeRoutes(app: FastifyInstance) {
 
   // Deepen / expand a branch of the tree
   app.post("/expand", async (request, reply) => {
-    const { topic_id, node_id } = request.body as any;
+    const { topic_id, node_id } = (request.body ?? {}) as {
+      topic_id?: string;
+      node_id?: string;
+    };
     if (!topic_id || !node_id) {
       return reply.status(400).send({ error: "topic_id and node_id are required" });
     }
@@ -23,12 +26,15 @@ export async function treeRoutes(app: FastifyInstance) {
 
   // Lazy content generation for a node
   app.post("/content", async (request, reply) => {
-    const { topic_id, node_id, level } = request.body as any;
+    const { topic_id, node_id } = (request.body ?? {}) as {
+      topic_id?: string;
+      node_id?: string;
+    };
     if (!topic_id || !node_id) {
       return reply.status(400).send({ error: "topic_id and node_id are required" });
     }
     try {
-      const content = await engine.generateNodeContentFromDb(topic_id, node_id, level);
+      const content = await engine.generateNodeContentFromDb(topic_id, node_id);
       return reply.send({ node_id, ...content });
     } catch (err) {
       return reply.status(err instanceof Error && /не найд/i.test(err.message) ? 404 : 500)
@@ -38,7 +44,12 @@ export async function treeRoutes(app: FastifyInstance) {
 
   // Fill content for all nodes without content yet (optionally constrained to a level)
   app.post("/fill-content", async (request, reply) => {
-    const { topic_id, level, limit, force } = request.body as any;
+    const { topic_id, level, limit, force } = (request.body ?? {}) as {
+      topic_id?: string;
+      level?: string;
+      limit?: number;
+      force?: boolean;
+    };
     if (!topic_id) return reply.status(400).send({ error: "topic_id is required" });
 
     const lim = typeof limit === "number" ? limit : 50;
@@ -82,7 +93,7 @@ export async function treeRoutes(app: FastifyInstance) {
 
     for (const nodeId of ids) {
       try {
-        await engine.generateNodeContentFromDb(topic_id, nodeId, level);
+        await engine.generateNodeContentFromDb(topic_id, nodeId);
         results.push({ node_id: nodeId, ok: true });
         completed++;
       } catch (err) {
@@ -99,7 +110,11 @@ export async function treeRoutes(app: FastifyInstance) {
 
   // Explain a term in context of the topic
   app.post("/explain-term", async (request, reply) => {
-    const { topic_id, term, context } = request.body as any;
+    const { topic_id, term, context } = (request.body ?? {}) as {
+      topic_id?: string;
+      term?: string;
+      context?: string;
+    };
     if (!topic_id || !term) {
       return reply.status(400).send({ error: "topic_id and term are required" });
     }

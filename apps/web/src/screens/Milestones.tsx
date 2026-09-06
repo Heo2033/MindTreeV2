@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useGraphStore, useSessionStore } from "../stores";
 import { milestonesApi, learnerModelApi } from "../api";
-import type { MilestoneDto, MilestonePathDto, MasteryEvaluationDto } from "../api";
+import type { MilestoneDto } from "../api";
 import type { MasteryLevel } from "@mindtree/types";
 import { Button, Spinner, ErrorBanner, Badge, Input, Textarea, Select } from "@mindtree/ui";
 
@@ -72,7 +72,7 @@ export function MilestonesScreen() {
 
   useEffect(() => {
     void load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- load() пересоздаётся каждый рендер; изменения аккаунтируются через topicId/journeyId.
   }, [topicId, journeyId]);
 
   async function startMilestone(m: MilestoneDto) {

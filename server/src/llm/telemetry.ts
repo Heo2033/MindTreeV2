@@ -1,5 +1,3 @@
-import type { ILLMResult } from "./client.js";
-
 export interface OperationTelemetry {
   ts: string;
   operation: string;

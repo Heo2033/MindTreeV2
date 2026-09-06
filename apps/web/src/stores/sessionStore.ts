@@ -26,7 +26,7 @@ interface SessionState {
   answerStep: (stepIndex: number, answer: string) => Promise<void>;
   clearAnsweredView: () => void;
   completeConcept: (itemId: string, nodeId?: string, quality?: string) => Promise<void>;
-  finalize: () => Promise<FinalizeResultDto | {}>;
+  finalize: () => Promise<FinalizeResultDto | null>;
   reset: () => void;
 }
 
@@ -178,14 +178,14 @@ export const useSessionStore = create<SessionState>()(
 
   async finalize() {
     const { session } = get();
-    if (!session) return {};
+    if (!session) return null;
     try {
       const result = await sessionsApi.finalize(session.id);
       await get().loadCurrent();
       return result;
     } catch (err) {
       set({ error: err instanceof Error ? err.message : "Ошибка финализации" });
-      return {};
+      return null;
     }
   },
 

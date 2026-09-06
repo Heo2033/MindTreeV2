@@ -1,6 +1,10 @@
 const API_BASE = import.meta.env.VITE_API_URL || "";
 
-/** Лимит ожидания ответа сервера (SSE-руки). 0 — без лимита. */
+/**
+ * Лимит ожидания HTTP-заголовков SSE-рукопожатия. 0 — без лимита.
+ * Это НЕ лимит на весь стриминг: после установки соединения фазы LLM могут
+ * легитимно идти десятки секунд, поэтому обрывать читающий поток нельзя.
+ */
 const CONNECT_TIMEOUT_MS = 15_000;
 
 export interface RequestOptions extends RequestInit {
@@ -60,6 +64,20 @@ export function postSSE(path: string, body: unknown): SSEStream {
     for (const fn of listeners) fn(e);
   }
 
+  // Разбудить ожидающие итераторы/потребителей НЕ добавляя событие в буфер
+  // (используется для закрывающего сигнала после уже доставленного терминала).
+  function notify(e: SSEEvent) {
+    for (const fn of listeners) fn(e);
+  }
+
+  // Единая точка закрытия потока с ошибкой: ставим streamError (итератор бросит)
+  // и доставляем событие __error__ потребителю, чтобы цикл событий увидел его.
+  function fail(error: Error, message: string) {
+    streamError = error;
+    done = true;
+    emit({ event: "__error__", data: { message } });
+  }
+
   const iteratorPromise = (async function* () {
     let cursor = 0;
     while (true) {
@@ -98,15 +116,26 @@ export function postSSE(path: string, body: unknown): SSEStream {
       clearTimeout(connectTimer);
 
       if (!res.ok || !res.body) {
-        streamError = new Error(`SSE HTTP ${res.status}`);
+        let detail = `HTTP ${res.status}`;
+        try {
+          const text = await res.text();
+          const parsed = JSON.parse(text);
+          const msg = (parsed as { error?: unknown; message?: unknown })?.error
+            ?? (parsed as { message?: unknown })?.message;
+          if (typeof msg === "string" && msg.trim()) detail = msg;
+        } catch {
+          // не JSON — оставляем HTTP-статус
+        }
+        emit({ event: "error", data: { message: detail } });
         done = true;
-        for (const fn of listeners) fn({ event: "error", data: { message: `HTTP ${res.status}` } });
         return;
       }
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      // Сервер по контракту всегда шлёт терминальный done/error-фрейм.
+      let sawTerminal = false;
 
       while (true) {
         const { done: readerDone, value } = await reader.read();
@@ -128,6 +157,7 @@ export function postSSE(path: string, body: unknown): SSEStream {
               dataLines.push(line.slice(5).trim());
             }
           }
+          if (event === "done" || event === "error") sawTerminal = true;
           const raw = dataLines.join("\n");
           let parsed: unknown = raw;
           try {
@@ -140,10 +170,8 @@ export function postSSE(path: string, body: unknown): SSEStream {
       }
 
       if (buffer.trim() !== "") {
-        const trimmed = buffer.trim().startsWith("event:") || buffer.trim().startsWith("data:")
-          ? buffer
-          : buffer;
-        const raw = trimmed.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("\n");
+        // Хвост без завершающего \n\n — извлекаем data:-строки (event не указан).
+        const raw = buffer.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("\n");
         if (raw.trim() !== "") {
           let parsed: unknown = raw;
           try {
@@ -155,23 +183,34 @@ export function postSSE(path: string, body: unknown): SSEStream {
         }
       }
 
+      // Сервер закрыл поток без явного терминального done/error-фрейма.
+      // Это обрыв соединения/пропажа сети — сигнализируем как ошибку, а не
+      // фальсифицируем успешное «done» (иначе оверлей зависнет или скроет неполноту).
+      if (!sawTerminal) {
+        fail(new Error("Соединение закрыто без завершения генерации"), "Соединение прервано: дерево не было завершено");
+        return;
+      }
+
+      // Закрывающий сигнал для ожидающих итераторов без дублирования события:
+      // терминальный протокольный фрейм (done/error) уже доставлен выше.
       done = true;
-      for (const fn of listeners) fn({ event: "done", data: null });
+      notify({ event: "done", data: null });
     } catch (err) {
       clearTimeout(connectTimer);
       if (controller.signal.aborted) {
         if (connectTimedOut) {
-          streamError = new Error("Таймаут соединения с сервером");
-          done = true;
-          for (const fn of listeners) fn({ event: "__error__", data: streamError });
+          fail(new Error("Таймаут соединения с сервером"), "Таймаут соединения с сервером");
         } else {
+          // Сознательная отмена: завершаем поток, чтобы ожидающий итератор
+          // не завис навечно, и не выдаём ошибку.
           done = true;
+          notify({ event: "done", data: null });
         }
         return;
       }
-      streamError = err instanceof Error ? err : new Error(String(err));
-      done = true;
-      for (const fn of listeners) fn({ event: "__error__", data: streamError });
+      // Транспортная ошибка во время чтения (сеть) — поверх уже открытого потока.
+      const error = err instanceof Error ? err : new Error(String(err));
+      fail(error, error.message);
     } finally {
       for (const fn of listeners) listeners.delete(fn);
     }

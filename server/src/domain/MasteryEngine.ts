@@ -1,4 +1,4 @@
-import type { ConceptMastery, MasteryLevel } from "@mindtree/types";
+import type { MasteryLevel } from "@mindtree/types";
 import { getScheduler } from "../llm/scheduler.js";
 import { parseLLMJson } from "../llm/client.js";
 import { buildMasteryPrompt, parseMasteryResult, type MasteryResult } from "../prompts/mastery.js";

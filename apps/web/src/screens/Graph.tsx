@@ -41,6 +41,8 @@ const PHASE_LABELS: Record<string, string> = {
 
 function BuildOverlay() {
   const pipeline = useGraphStore((s) => s.pipeline);
+  // Оверлей прогресса — только пока идёт активная генерация. В состоянии error
+  // спиннер не показываем: поверх дерева рендерится сообщение об ошибке.
   if (pipeline.status !== "running") return null;
   const pct =
     pipeline.stats && pipeline.stats.total > 0
@@ -459,7 +461,10 @@ export function GraphScreen() {
       </div>
     );
   }
-  if (error && !running) return <ErrorBanner message={error} />;
+  // Ошибка без какого-либо сохранённого дерева — полноэкранный баннер.
+  if (error && !running && visibleNodes.length === 0) {
+    return <ErrorBanner message={error} />;
+  }
   if (visibleNodes.length === 0) {
     return (
       <div className="relative flex h-full flex-col items-center justify-center gap-4 p-8 text-center">
@@ -474,6 +479,14 @@ export function GraphScreen() {
 
   return (
     <div className="relative h-full">
+      {error && !running && (
+        <div className="absolute left-1/2 top-3 z-20 w-full max-w-md -translate-x-1/2">
+          <ErrorBanner
+            message={error}
+            onDismiss={() => useGraphStore.setState({ error: null })}
+          />
+        </div>
+      )}
       <ReactFlow
         nodes={graph.nodes}
         edges={graph.edges}

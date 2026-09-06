@@ -7,7 +7,6 @@ import { seedTopic, seedJourney } from "../../test/helpers.js";
 describe("AnalyticsService", () => {
   const topicId = "top_test_an";
   const journeyId = "jr_test_an";
-  const nodeId = "nd_test_an";
   const sessionId = "ss_test_an";
 
   beforeEach(() => {

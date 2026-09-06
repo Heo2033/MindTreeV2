@@ -18,7 +18,12 @@ export async function topicRoutes(app: FastifyInstance) {
   });
 
   app.post("/", async (request, reply) => {
-    const { name, goal, target_level, time_budget_minutes } = request.body as any;
+    const { name, goal, target_level, time_budget_minutes } = (request.body ?? {}) as {
+      name?: string;
+      goal?: string;
+      target_level?: string;
+      time_budget_minutes?: number;
+    };
     const id = `topic_${crypto.randomUUID().slice(0, 8)}`;
 
     app.db.prepare(

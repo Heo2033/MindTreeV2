@@ -23,11 +23,6 @@ export interface RecallStepInput {
   correctIndex?: number;
 }
 
-const MISC_BY_SCORE: Record<number, MisconceptionType> = {
-  0: "application_failure",
-  0.5: "incomplete",
-};
-
 export class FeedbackEngine {
   constructor(
     private learnerModel = new LearnerModelService(),

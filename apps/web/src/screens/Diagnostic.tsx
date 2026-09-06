@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useGraphStore } from "../stores";
 import { diagnosticApi } from "../api";
 import type { DiagnosticQuestionDto, DiagnosticResultDto } from "../api";
-import { Button, Spinner, ErrorBanner, Badge } from "@mindtree/ui";
+import { Button, Spinner, ErrorBanner } from "@mindtree/ui";
 
 type Phase = "idle" | "loading" | "playing" | "result";
 

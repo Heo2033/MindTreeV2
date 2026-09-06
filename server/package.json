@@ -7,6 +7,7 @@
     "dev": "tsx watch src/index.ts",
     "dev:server:mock": "tsx watch --env-file=.env.mock src/index.ts",
     "build": "tsc",
+    "build:sidecar": "node build-sidecar.mjs",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",
@@ -25,6 +26,7 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.15.3",
+    "esbuild": "^0.25.12",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3",
     "vitest": "^3.1.0",

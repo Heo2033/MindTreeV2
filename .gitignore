@@ -2,6 +2,7 @@ node_modules/
 dist/
 target/
 server/data/
+server/sidecar/
 apps/app/data/
 .env
 .env.local

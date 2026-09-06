@@ -13,10 +13,10 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@mindtree/types": "*"
+    "@mindtree/types": "*",
+    "@tauri-apps/api": "^2.3.0"
   },
   "devDependencies": {
-    "typescript": "^5.8.3",
-    "@tauri-apps/api": "^2.3.0"
+    "typescript": "^5.8.3"
   }
 }

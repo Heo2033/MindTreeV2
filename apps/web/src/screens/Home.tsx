@@ -22,7 +22,15 @@ export function HomeScreen() {
             <h1 className="text-3xl font-bold">MindTree</h1>
             <p className="mt-1 text-ink-4">Адаптивный движок обучения</p>
           </div>
-          <Button onClick={() => navigate("/new")}>+ Новая тема</Button>
+          <div className="flex items-center gap-2">
+            <Link
+              to="/settings"
+              className="rounded-lg border border-border bg-surface px-4 py-2 text-sm text-ink-2 transition-colors hover:border-accent hover:text-accent-ink"
+            >
+              Настройки провайдера
+            </Link>
+            <Button onClick={() => navigate("/new")}>+ Новая тема</Button>
+          </div>
         </header>
 
         <div className="mt-8">

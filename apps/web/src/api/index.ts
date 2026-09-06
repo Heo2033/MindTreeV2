@@ -1,4 +1,4 @@
-export { request, postSSE, buildUrl } from "./client";
+export { request, postSSE, buildUrl, setApiBase } from "./client";
 export type { SSEEvent, SSEStream, RequestOptions } from "./client";
 export {
   topicsApi,
@@ -32,6 +32,7 @@ export type {
   DiagnosticQuestionDto,
   DiagnosticResultDto,
   DiagnosticAnswerIn,
+  RuntimeConfigBody,
   TopicMetricsDto,
   AnalyticsSummaryDto,
 } from "./endpoints";export type {

@@ -433,6 +433,11 @@ export const configApi = {
       json: body,
     }),
   clear: () => request<{ ok: boolean; appliedAt: null }>("/api/config", { method: "DELETE" }),
+  test: () =>
+    request<{ ok: boolean; model: string; latencyMs: number; preview?: string; error?: string }>(
+      "/api/config/test",
+      { method: "POST" },
+    ),
 };
 
 // ---------- Learner Model ----------

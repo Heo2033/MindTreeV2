@@ -13,12 +13,16 @@ import { MilestonesScreen } from "./screens/Milestones";
 import { ReviewScreen } from "./screens/Review";
 import { FinalAssessmentScreen } from "./screens/FinalAssessment";
 import { AnalyticsScreen } from "./screens/Analytics";
+import { SettingsScreen } from "./screens/Settings";
+
+export { setApiBase } from "./api/client";
 
 export default function App() {
   return (
     <Routes>
       <Route path="/" element={<HomeScreen />} />
       <Route path="/new" element={<NewTopicScreen />} />
+      <Route path="/settings" element={<SettingsScreen />} />
       <Route path="/topic/:topicId" element={<TopicShell />}>
         <Route index element={<GraphScreen />} />
         <Route path="graph" element={<GraphScreen />} />

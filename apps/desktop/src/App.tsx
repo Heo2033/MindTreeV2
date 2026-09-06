@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import MindTreeApp from "@mindtree/web";
+import MindTreeApp, { setApiBase } from "@mindtree/web";
 
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3000";
+const DEFAULT_API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3000";
 
 function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -15,20 +15,48 @@ const SERVER_STATUS_LABEL: Record<ServerStatus, string> = {
   offline: "сервер недоступен",
 };
 
-function useServerStatus(pollMs = 5000): { status: ServerStatus; checkedAt: string | null } {
+function useApiBase(): { apiBase: string; resolved: boolean } {
+  const [apiBase, setBase] = useState(DEFAULT_API_BASE);
+  const [resolved, setResolved] = useState(!isTauri());
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let mounted = true;
+    import("@tauri-apps/api/core")
+      .then(async ({ invoke }) => {
+        const port = await invoke<number>("get_server_port");
+        const base = `http://127.0.0.1:${port}`;
+        setApiBase(base);
+        if (mounted) {
+          setBase(base);
+          setResolved(true);
+        }
+      })
+      .catch(() => {
+        if (mounted) setResolved(true);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  return { apiBase, resolved };
+}
+
+function useServerStatus(apiBase: string, pollMs = 5000): { status: ServerStatus; checkedAt: string | null } {
   const [status, setStatus] = useState<ServerStatus>("checking");
   const [checkedAt, setCheckedAt] = useState<string | null>(null);
 
   const check = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/health`);
+      const res = await fetch(`${apiBase}/api/health`);
       const body = await res.json().catch(() => null);
       setStatus(res.ok && body?.status === "ok" ? "online" : "offline");
     } catch {
       setStatus("offline");
     }
     setCheckedAt(new Date().toISOString());
-  }, []);
+  }, [apiBase]);
 
   useEffect(() => {
     void check();
@@ -128,7 +156,16 @@ function TitleBarButton({
 }
 
 export default function App() {
-  const { status } = useServerStatus();
+  const { apiBase, resolved } = useApiBase();
+  const { status } = useServerStatus(apiBase);
+
+  if (!resolved) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-canvas text-ink">
+        <span className="text-sm text-ink-4">Запуск встроенного сервера…</span>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-canvas text-ink">

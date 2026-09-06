@@ -17,6 +17,7 @@
     "build:server": "npm run build -w server",
     "build:web": "npm run build -w @mindtree/web",
     "build:desktop": "npm run build -w @mindtree/desktop",
+    "build:desktop:dist": "powershell -ExecutionPolicy Bypass -File scripts/build-desktop.ps1",
     "build:studio": "npm run build -w @mindtree/studio",
     "build:all": "npm run build:types && npm run build:ui && npm run build:server && npm run build:web",
     "typecheck": "npm run typecheck -w @mindtree/types && npm run typecheck -w @mindtree/ui && npm run typecheck -w @mindtree/graph && npm run typecheck -w @mindtree/tauri-common && npm run typecheck -w mindtree-server && npm run typecheck -w @mindtree/web && npm run typecheck -w @mindtree/desktop && npm run typecheck -w @mindtree/studio",

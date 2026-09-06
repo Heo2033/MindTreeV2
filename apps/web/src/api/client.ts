@@ -1,5 +1,22 @@
 const API_BASE = import.meta.env.VITE_API_URL || "";
 
+// Глобальный переключатель точки входа для десктопной обвязки: в Tauri порт
+// встроенного сервера известен только в рантайме, поэтому клиент читает его
+// из window.__MINDTREE_API_BASE__ (задаётся обёрткой) раньше, чем env-префикс.
+function apiBase(): string {
+  return (
+    (typeof window !== "undefined"
+      && (window as { __MINDTREE_API_BASE__?: string }).__MINDTREE_API_BASE__)
+    || API_BASE
+  );
+}
+
+export function setApiBase(base: string): void {
+  if (typeof window !== "undefined") {
+    (window as { __MINDTREE_API_BASE__?: string }).__MINDTREE_API_BASE__ = base;
+  }
+}
+
 /**
  * Лимит ожидания HTTP-заголовков SSE-рукопожатия. 0 — без лимита.
  * Это НЕ лимит на весь стриминг: после установки соединения фазы LLM могут
@@ -22,7 +39,7 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
     fetchOptions.body = JSON.stringify(json);
   }
 
-  const res = await fetch(`${API_BASE}${path}`, { ...fetchOptions, headers });
+  const res = await fetch(`${apiBase()}${path}`, { ...fetchOptions, headers });
 
   if (!res.ok) {
     const error = await res.json().catch(() => ({ error: res.statusText }));
@@ -33,7 +50,7 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
 }
 
 export function buildUrl(path: string): string {
-  return `${API_BASE}${path}`;
+  return `${apiBase()}${path}`;
 }
 
 export interface SSEEvent {
@@ -107,7 +124,7 @@ export function postSSE(path: string, body: unknown): SSEStream {
     }, CONNECT_TIMEOUT_MS);
 
     try {
-      const res = await fetch(`${API_BASE}${path}`, {
+      const res = await fetch(`${apiBase()}${path}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),

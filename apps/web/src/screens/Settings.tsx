@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { configApi, type RuntimeConfigBody } from "../api";
 import {
   loadSettings,
@@ -211,6 +212,9 @@ export function SettingsScreen() {
 
   return (
     <div className="mx-auto max-w-3xl px-6 py-8">
+      <Link to="/" className="mb-4 inline-block text-sm font-semibold text-accent-ink hover:text-accent-hover">
+        ← Назад
+      </Link>
       <header className="mb-6">
         <h1 className="text-2xl font-bold">Настройки провайдера</h1>
         <p className="mt-1 text-sm text-ink-3">

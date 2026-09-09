@@ -95,9 +95,9 @@ export function buildL3Prompt(ctx: IGenerateL3Context): string {
   return PROMPT_L3
     .replace("{{user_query}}", ctx.userQuery)
     .replace("{{root_title}}", ctx.rootTitle)
-    .replace("{{parent_title}}", ctx.parent.title)
+    .replaceAll("{{parent_title}}", ctx.parent.title)
     .replace("{{parent_definition}}", parentDef)
     .replaceAll("{{parent_id}}", ctx.parent.id)
-    .replace("{{sibling_nodes}}", siblingsStr)
+    .replaceAll("{{sibling_nodes}}", siblingsStr)
     .replace("{{audience_block}}", buildAudienceBlock(ctx.options));
 }

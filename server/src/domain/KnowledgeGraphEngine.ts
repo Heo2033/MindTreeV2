@@ -51,6 +51,24 @@ export interface ProgressCallback {
 
 const MAX_DEPTH = 5;
 
+/**
+ * Максимальная глубина генерации дерева для уровня пользователя.
+ * Зеркалит mindtree_flutter/lib/domain/engines/knowledge_graph_engine.dart
+ * (_maxGenerationLevel): beginner → 2, intermediate → 3, advanced/expert → 4.
+ */
+function maxGenerationLevel(level?: string): number {
+  switch (level) {
+    case "beginner":
+      return 2;
+    case "intermediate":
+      return 3;
+    case "expert":
+      return 4;
+    default:
+      return 3; // intermediate по умолчанию
+  }
+}
+
 export class KnowledgeGraphEngine {
   /**
    * Полный конвейер: structure → expand → validate → repair → content.
@@ -68,6 +86,9 @@ export class KnowledgeGraphEngine {
       level: options.level as IStructurePromptOptions["level"],
       timeBudgetMinutes: options.timeBudgetMinutes,
     };
+    // Ограничиваем максимальную глубину генерации по уровню пользователя.
+    // beginner → L2, intermediate → L3, advanced/expert → L4.
+    const maxGenLevel = maxGenerationLevel(options.level);
 
     // Пошаговый конвейер: L1 (корень) → L2 (разделы) → L3 (подразделы).
     // Каждый шаг — отдельный LLM-запрос с полным семантическим контекстом,
@@ -142,39 +163,44 @@ export class KnowledgeGraphEngine {
 
     // Шаг 3: подразделы (L3) — отдельный запрос на каждый L2-раздел,
     // чтобы LLM видел контекст конкретной ветви и не создавал противоречий.
-    onProgress?.("structure", "Генерация подразделов (уровень 3)...");
-    const l2Nodes = nodes.filter((n) => n.level === 2);
-    for (const l2 of l2Nodes) {
-      try {
-        const l3 = await this.generateL3ForNode(query, l2, nodes, opts);
-        if (l3.length > 0) {
-          nodes = nodes.concat(l3);
-          // Валидация только что созданных L3-детей этой ветви.
-          const focusIds = l3.map((n) => n.id);
-          nodes = await this.validateAndRepair(
-            nodes,
-            opts,
-            onProgress,
-            warnings,
-            `validate-l3-${l2.id}`,
-            focusIds,
-          );
-          // Инкрементальный персист L3-ветви: ветка появляется у пользователя
-          // по мере завершения, а не только в конце всей генерации.
-          if (onBatch) {
-            nodes = dedupeNodeIds(nodes);
-            const kept = nodes.filter((n) => n.parentId === l2.id && n.level === 3);
-            if (kept.length > 0) {
-              console.log(`[engine] onBatch L3 (ветка «${l2.title}»): ${kept.length} узлов`);
-              await onBatch(kept);
+    // Раздел генерируем только для intermediate+ уровней (как во flutter).
+    if (maxGenLevel >= 3) {
+      onProgress?.("structure", "Генерация подразделов (уровень 3)...");
+      const l2Nodes = nodes.filter((n) => n.level === 2);
+      for (const l2 of l2Nodes) {
+        try {
+          const l3 = await this.generateL3ForNode(query, l2, nodes, opts);
+          if (l3.length > 0) {
+            nodes = nodes.concat(l3);
+            // Валидация только что созданных L3-детей этой ветви.
+            const focusIds = l3.map((n) => n.id);
+            nodes = await this.validateAndRepair(
+              nodes,
+              opts,
+              onProgress,
+              warnings,
+              `validate-l3-${l2.id}`,
+              focusIds,
+            );
+            // Инкрементальный персист L3-ветви: ветка появляется у пользователя
+            // по мере завершения, а не только в конце всей генерации.
+            if (onBatch) {
+              nodes = dedupeNodeIds(nodes);
+              const kept = nodes.filter((n) => n.parentId === l2.id && n.level === 3);
+              if (kept.length > 0) {
+                console.log(`[engine] onBatch L3 (ветка «${l2.title}»): ${kept.length} узлов`);
+                await onBatch(kept);
+              }
             }
           }
+        } catch (err) {
+          warnings.push(
+            `Подразделы для «${l2.title}» не завершены: ${err instanceof Error ? err.message : String(err)}`,
+          );
         }
-      } catch (err) {
-        warnings.push(
-          `Подразделы для «${l2.title}» не завершены: ${err instanceof Error ? err.message : String(err)}`,
-        );
       }
+    } else {
+      onProgress?.("structure", "Для текущего уровня достаточно 2 разделов — углубление доступно по кнопке.");
     }
 
     onProgress?.("content", "Заполнение контента узлов...");

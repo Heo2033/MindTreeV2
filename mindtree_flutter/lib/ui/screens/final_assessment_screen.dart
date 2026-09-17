@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import 'package:mindtree_flutter/domain/engines/assessment_engine.dart';
+import 'package:mindtree_flutter/domain/lib/grading.dart';
 import 'package:mindtree_flutter/domain/models/models.dart';
 import 'package:mindtree_flutter/providers/app_providers.dart';
 import 'package:mindtree_flutter/providers/ui_stores.dart';
@@ -170,8 +171,7 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
     } else {
       answer = _answerController.text.trim();
       // Rubric-based heuristic grading for open-ended questions.
-      // Mirrors web: check if explanation/rubric keywords are present.
-      correct = _gradeOpenEnded(answer, q);
+      correct = gradeOpenEnded(answer, rubric: q.explanation ?? '');
     }
 
     setState(() {
@@ -192,29 +192,9 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
     );
   }
 
-  /// Heuristic grading for open-ended questions (explanation/diagnosis/application/transfer).
-  /// Checks if the answer contains key concepts from the rubric/explanation field.
-  bool _gradeOpenEnded(String answer, AssessmentQuestion q) {
-    if (answer.isEmpty) return false;
-    final rubric = q.explanation ?? '';
-    if (rubric.isEmpty) return true; // Fallback: no rubric = accept
-
-    // Extract key terms from rubric (words > 3 chars, Cyrillic/Latin)
-    final rubricWords = rubric
-        .toLowerCase()
-        .replaceAll(RegExp(r'[^\p{L}\p{N}\s]', unicode: true), ' ')
-        .split(RegExp(r'\s+'))
-        .where((w) => w.length > 3)
-        .toSet();
-
-    if (rubricWords.isEmpty) return answer.length > 10; // Fallback
-
-    final answerLower = answer.toLowerCase();
-    final matched = rubricWords.where((w) => answerLower.contains(w)).length;
-    final threshold = rubricWords.length * 0.3; // 30% совпадений = верно
-
-    return matched >= threshold;
-  }
+  /// Heuristic grading for open-ended questions moved to
+  /// [gradeOpenEnded] in `domain/lib/grading.dart` (детерминированная,
+  /// покрыта unit-тестами).
 
   void _nextQuestion() {
     setState(() {

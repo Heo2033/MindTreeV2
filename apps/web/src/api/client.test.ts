@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { postSSE, type SSEEvent, type SSEStream } from "./client";
+import { postSSE, request, setAuthToken, type SSEEvent, type SSEStream } from "./client";
+import { configApi } from "./endpoints";
 
 // Должно совпадать с CONNECT_TIMEOUT_MS в client.ts.
 const CONNECT_TIMEOUT_MS = 15_000;
@@ -65,9 +66,58 @@ async function collect(stream: SSEStream): Promise<{ events: SSEEvent[]; error: 
 }
 
 afterEach(() => {
+  setAuthToken(null);
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   vi.useRealTimers();
+});
+
+describe("request auth header", () => {
+  it("без токена запрос не несёт Authorization", async () => {
+    const fetchMock = installFetch(() =>
+      Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ a: 1 }) } as unknown as Response),
+    );
+
+    await request("/p");
+
+    const [, init] = fetchMock.mock.calls[0];
+    expect((init?.headers as Record<string, string>).Authorization).toBeUndefined();
+  });
+
+  it("с токеном заголовок Authorization: Bearer <token> шлётся", async () => {
+    setAuthToken("tok-123");
+    const fetchMock = installFetch(() =>
+      Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ a: 1 }) } as unknown as Response),
+    );
+
+    await request("/p");
+
+    const [, init] = fetchMock.mock.calls[0];
+    expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer tok-123");
+  });
+
+  it("setAuthToken(null) снимает заголовок; SSE тоже получает токен", async () => {
+    setAuthToken("tok-456");
+    const fetchMock = installFetch(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ a: 1 }),
+        body: null,
+      } as unknown as Response),
+    );
+
+    // postSSE вызывает fetch синхронно; потреблять стрим не нужно.
+    const stream = postSSE("/p", { q: 1 });
+    const sseHeaders = (fetchMock.mock.calls[0] as unknown[])[1] as RequestInit;
+    expect((sseHeaders.headers as Record<string, string>).Authorization).toBe("Bearer tok-456");
+    stream.abort();
+
+    setAuthToken(null);
+    await request("/other");
+    const [, init] = fetchMock.mock.calls[1];
+    expect((init?.headers as Record<string, string>).Authorization).toBeUndefined();
+  });
 });
 
 describe("postSSE", () => {
@@ -231,5 +281,48 @@ describe("postSSE", () => {
     const { events, error } = await collection;
     expect(events).toEqual([]);
     expect(error).toBeNull();
+  });
+});
+
+describe("configApi.test", () => {
+  it("без конфига шлёт POST без тела", async () => {
+    const fetchMock = installFetch(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ ok: true, model: "gpt-4o", latencyMs: 10 }),
+      } as unknown as Response),
+    );
+
+    await configApi.test();
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain("/api/config/test");
+    expect(init?.method).toBe("POST");
+    expect(init?.body).toBeUndefined();
+  });
+
+  it("с пробным конфигом шлёт его телом запроса (включая apiKey)", async () => {
+    const fetchMock = installFetch(() =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ ok: true, model: "gpt-4o", latencyMs: 10 }),
+      } as unknown as Response),
+    );
+
+    const res = await configApi.test({
+      provider: "openai",
+      baseUrl: "http://x",
+      apiKey: "sk-123",
+    });
+
+    expect(res.ok).toBe(true);
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(String(init?.body))).toEqual({
+      provider: "openai",
+      baseUrl: "http://x",
+      apiKey: "sk-123",
+    });
   });
 });

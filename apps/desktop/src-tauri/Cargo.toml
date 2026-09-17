@@ -18,6 +18,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-http = "2"
 tauri-plugin-single-instance = "2"
+rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 mindtree-native = { path = "../../../packages/native" }
 mindtree-tauri-common = { path = "../../../packages/tauri-common/src-rust" }

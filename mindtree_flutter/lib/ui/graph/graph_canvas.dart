@@ -8,7 +8,7 @@ import 'package:mindtree_flutter/ui/graph/graph_layout.dart';
 import 'package:mindtree_flutter/ui/theme/app_theme.dart';
 
 const double _minZoom = 0.05;
-const double _maxZoom = 4.0;
+const double _maxZoom = 8.0;
 
 /// Interactive knowledge-tree canvas: pan (drag) + zoom (pinch / mouse wheel),
 /// bezier edges and rounded-rect node cards drawn with a [CustomPainter].
@@ -22,6 +22,9 @@ class GraphCanvas extends StatefulWidget {
   final void Function(String nodeId)? onNodeExpand;
   final void Function(String nodeId)? onNodeDeepen;
   final bool showLegend;
+  final double? zoomLevel;
+  final ValueChanged<double>? onZoomChanged;
+  final bool showMiniMap;
 
   const GraphCanvas({
     super.key,
@@ -34,10 +37,13 @@ class GraphCanvas extends StatefulWidget {
     this.onNodeExpand,
     this.onNodeDeepen,
     this.showLegend = false,
+    this.zoomLevel,
+    this.onZoomChanged,
+    this.showMiniMap = true,
   });
 
   @override
-  State<GraphCanvas> createState() => _GraphCanvasState();
+  State<GraphCanvas> createState() => GraphCanvasState();
 }
 
 /// Screen-space view state: the fixed fit transform (centering) plus the base
@@ -80,7 +86,7 @@ _HoverLayout _hoverLayoutFor(GraphLayoutNode node) {
   return (popover: popover, chips: chips);
 }
 
-class _GraphCanvasState extends State<GraphCanvas> {
+class GraphCanvasState extends State<GraphCanvas> {
   final Matrix4 _gesture = Matrix4.identity();
   _View? _view;
   String? _hoveredId;
@@ -209,6 +215,25 @@ class _GraphCanvasState extends State<GraphCanvas> {
     _gesture[12] = t1.dx;
     _gesture[13] = t1.dy;
     setState(() {});
+    widget.onZoomChanged?.call(s1);
+  }
+
+  /// Zoom in/out from the center of the canvas.
+  void zoomBy(double factor) {
+    final view = _view;
+    if (view == null) return;
+    final center = Offset(
+      _view!.fit.dx / _view!.base + 200, // approximate center
+      _view!.fit.dy / _view!.base + 150,
+    );
+    _zoomAt(center, factor);
+  }
+
+  /// Reset to fit view.
+  void fitView() {
+    _gesture.setIdentity();
+    setState(() {});
+    widget.onZoomChanged?.call(1.0);
   }
 
   void _onPointerSignal(PointerSignalEvent event) {
@@ -387,6 +412,7 @@ class _GraphPainter extends CustomPainter {
         ..style = PaintingStyle.stroke;
       _dashPath(canvas, path, paint, dash: 5, gap: 4);
       _paintArrow(canvas, path, e.color);
+      // Always show label for relation edges (not just on hover)
       if (e.label != null && e.label!.isNotEmpty) {
         _paintEdgeLabel(canvas, path, e.label!, e.color);
       }

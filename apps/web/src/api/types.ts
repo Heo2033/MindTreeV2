@@ -120,6 +120,7 @@ export interface ConfigEffectiveDto {
   modelStrong?: string;
   modelFast?: string;
   runtimeConfigured: boolean;
+  apiKeyConfigured: boolean;
 }
 
 export interface ExplainTermDto {

@@ -1,15 +1,24 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useTopicStore } from "../stores";
-import { Button, Spinner, ErrorBanner } from "@mindtree/ui";
+import { Button, Spinner, ErrorBanner, Modal } from "@mindtree/ui";
+import type { TopicRow } from "../api";
 
 export function HomeScreen() {
   const { topics, loading, error, loadTopics, removeTopic } = useTopicStore();
   const navigate = useNavigate();
+  const [topicToDelete, setTopicToDelete] = useState<TopicRow | null>(null);
 
   useEffect(() => {
     void loadTopics();
   }, [loadTopics]);
+
+  const confirmDelete = () => {
+    if (!topicToDelete) return;
+    const id = topicToDelete.id;
+    setTopicToDelete(null);
+    void removeTopic(id);
+  };
 
   const heightClass =
     typeof window !== "undefined" && "__TAURI_INTERNALS__" in window ? "min-h-full" : "min-h-screen";
@@ -63,11 +72,7 @@ export function HomeScreen() {
                   </p>
                 </Link>
                 <button
-                  onClick={() => {
-                    if (confirm(`Удалить тему «${topic.name}»?`)) {
-                      void removeTopic(topic.id);
-                    }
-                  }}
+                  onClick={() => setTopicToDelete(topic)}
                   className="ml-3 shrink-0 rounded-md px-2 py-1 text-xs text-ink-4 opacity-0 transition-opacity hover:bg-surface-2 hover:text-danger group-hover:opacity-100"
                 >
                   Удалить
@@ -76,6 +81,24 @@ export function HomeScreen() {
             ))}
           </ul>
         </div>
+
+        <Modal open={topicToDelete !== null} onClose={() => setTopicToDelete(null)} title="Удалить тему">
+          {topicToDelete && (
+            <div>
+              <p className="text-sm text-ink-2">
+                Удалить тему «{topicToDelete.name}»? Вся история обучения и узлы будут удалены безвозвратно.
+              </p>
+              <div className="mt-6 flex justify-end gap-3">
+                <Button variant="secondary" onClick={() => setTopicToDelete(null)}>
+                  Отмена
+                </Button>
+                <Button variant="danger" onClick={confirmDelete}>
+                  Удалить
+                </Button>
+              </div>
+            </div>
+          )}
+        </Modal>
       </div>
     </div>
   );

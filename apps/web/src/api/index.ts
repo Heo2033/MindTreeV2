@@ -1,4 +1,4 @@
-export { request, postSSE, buildUrl, setApiBase } from "./client";
+export { request, postSSE, buildUrl, setApiBase, setAuthToken } from "./client";
 export type { SSEEvent, SSEStream, RequestOptions } from "./client";
 export {
   topicsApi,

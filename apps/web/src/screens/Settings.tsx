@@ -2,12 +2,13 @@ import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { configApi, type RuntimeConfigBody } from "../api";
 import {
-  loadSettings,
-  saveSettings,
+  loadMindTreeSettings,
+  saveMindTreeSettings,
   storeKey,
   fetchKey,
   forgetKey,
   isTauriMode,
+  type MindTreeSettings,
 } from "@mindtree/tauri-common";
 import { Button, Input, Select, Field, Badge, Spinner, ErrorBanner } from "@mindtree/ui";
 
@@ -67,6 +68,7 @@ export function SettingsScreen() {
   const [form, setForm] = useState<FormState>(emptyForm);
   const [serverAppliedAt, setServerAppliedAt] = useState<string | null>(null);
   const [apiKeyStored, setApiKeyStored] = useState(false);
+  const [storedApiKey, setStoredApiKey] = useState<string | null>(null);
   const [persistedLocal, setPersistedLocal] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -79,26 +81,25 @@ export function SettingsScreen() {
     setForm((f) => ({ ...f, [key]: value }));
   }, []);
 
-  const loadLocal = useCallback(async () => {
+  const loadLocal = useCallback(async (): Promise<MindTreeSettings | null> => {
     try {
-      const raw = await loadSettings();
-      const s = raw.mindtree as Record<string, string> | undefined;
+      const s = await loadMindTreeSettings();
       const next = emptyForm();
-      if (s) {
-        if (s.provider === "ollama" || s.provider === "openai" || s.provider === "auto") {
-          next.provider = s.provider;
-        }
-        next.baseUrl = s.baseUrl ?? "";
-        next.model = s.model ?? "";
-        next.modelStrong = s.modelStrong ?? "";
-        next.modelFast = s.modelFast ?? "";
-        next.temperature = s.temperature ?? "";
-        next.numCtx = s.numCtx ?? "";
+      if (s.provider) {
+        next.provider = s.provider;
       }
+      next.baseUrl = s.baseUrl ?? "";
+      next.model = s.model ?? "";
+      next.modelStrong = s.modelStrong ?? "";
+      next.modelFast = s.modelFast ?? "";
+      next.temperature = s.temperature !== undefined ? String(s.temperature) : "";
+      next.numCtx = s.numCtx !== undefined ? String(s.numCtx) : "";
       setForm(next);
-      setPersistedLocal(!!s);
+      setPersistedLocal(Object.keys(s).length > 0);
+      return s;
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
+      return null;
     }
   }, []);
 
@@ -106,16 +107,16 @@ export function SettingsScreen() {
     setSaving(true);
     setError(null);
     try {
-      const s: Record<string, string> = {
+      const s: MindTreeSettings = {
         provider: form.provider,
         ...(form.baseUrl.trim() ? { baseUrl: form.baseUrl.trim() } : {}),
         ...(form.model.trim() ? { model: form.model.trim() } : {}),
         ...(form.modelStrong.trim() ? { modelStrong: form.modelStrong.trim() } : {}),
         ...(form.modelFast.trim() ? { modelFast: form.modelFast.trim() } : {}),
-        ...(form.temperature.trim() ? { temperature: form.temperature.trim() } : {}),
-        ...(form.numCtx.trim() ? { numCtx: form.numCtx.trim() } : {}),
+        ...(form.temperature.trim() ? { temperature: num(form.temperature) } : {}),
+        ...(form.numCtx.trim() ? { numCtx: num(form.numCtx) } : {}),
       };
-      await saveSettings({ mindtree: s });
+      await saveMindTreeSettings(s);
       if (form.apiKey) {
         await storeKey(SECRET_KEY_ID, form.apiKey);
         setApiKeyStored(true);
@@ -162,7 +163,10 @@ export function SettingsScreen() {
     setTesting(true);
     setError(null);
     try {
-      const r = await configApi.test();
+      const r = await configApi.test({
+        ...toConfig(form),
+        apiKey: form.apiKey || storedApiKey || undefined,
+      });
       setTestResult(r);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -170,34 +174,51 @@ export function SettingsScreen() {
     } finally {
       setTesting(false);
     }
-  }, []);
+  }, [form, storedApiKey]);
 
   const clearApiKey = useCallback(async () => {
     setError(null);
     try {
       await forgetKey(SECRET_KEY_ID);
       setApiKeyStored(false);
+      setStoredApiKey(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
   }, []);
 
-  const fetchServerState = useCallback(async () => {
+  const fetchServerState = useCallback(async (): Promise<{
+    appliedAt: string | null;
+    apiKeyConfigured: boolean;
+  } | null> => {
     try {
       const s = await configApi.get();
       setServerAppliedAt(s.appliedAt);
+      return { appliedAt: s.appliedAt, apiKeyConfigured: s.effective.apiKeyConfigured };
     } catch {
       // сервер может быть недоступен — это не ошибка настроек
+      return null;
     }
   }, []);
 
   useEffect(() => {
     void (async () => {
       setLoading(true);
-      await loadLocal();
+      const local = await loadLocal();
       const stored = await fetchKey(SECRET_KEY_ID).catch(() => null);
       setApiKeyStored(!!stored);
-      await fetchServerState();
+      setStoredApiKey(stored);
+      const serverState = await fetchServerState();
+      // Ключ из хранилища не переживает рестарт сервера: если в памяти сервера его нет,
+      // возвращаем его сами — иначе «Проверка подключения» падает с «LLM_API_KEY не задан».
+      if (stored && serverState && !serverState.apiKeyConfigured && local?.provider !== "ollama") {
+        try {
+          const res = await configApi.apply({ apiKey: stored });
+          setServerAppliedAt(res.appliedAt);
+        } catch {
+          // оставляем как есть; тест подключения всё равно переиспользует ключ из формы
+        }
+      }
       setLoading(false);
     })();
   }, [loadLocal, fetchServerState]);

@@ -1,7 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
-import MindTreeApp, { setApiBase } from "@mindtree/web";
+import { useCallback, useEffect, useRef, useState } from "react";
+import MindTreeApp, { setApiBase, setAuthToken } from "@mindtree/web";
+import { Button } from "@mindtree/ui";
 
 const DEFAULT_API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3000";
+
+const RECONNECT_MIN_INTERVAL_MS = 15_000;
 
 function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -15,50 +18,105 @@ const SERVER_STATUS_LABEL: Record<ServerStatus, string> = {
   offline: "сервер недоступен",
 };
 
-function useApiBase(): { apiBase: string; resolved: boolean } {
+type BootstrapStatus = "loading" | "ready" | "error";
+
+function useApiBase(): {
+  apiBase: string;
+  status: BootstrapStatus;
+  error: string | null;
+  retry: () => void;
+} {
   const [apiBase, setBase] = useState(DEFAULT_API_BASE);
-  const [resolved, setResolved] = useState(!isTauri());
+  const [status, setStatus] = useState<BootstrapStatus>(isTauri() ? "loading" : "ready");
+  const [error, setApiError] = useState<string | null>(null);
+  const [tick, setTick] = useState(0);
+  const lastRetryAt = useRef(0);
+
+  const run = useCallback(async () => {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const info = await invoke<{ port: number; token: string }>("get_server_info");
+      const base = `http://127.0.0.1:${info.port}`;
+      setApiBase(base);
+      setAuthToken(info.token);
+      setBase(base);
+      setStatus("ready");
+      setApiError(null);
+    } catch (e) {
+      setApiError(e instanceof Error ? e.message : String(e));
+      setStatus("error");
+    }
+  }, []);
 
   useEffect(() => {
     if (!isTauri()) return;
-    let mounted = true;
-    import("@tauri-apps/api/core")
-      .then(async ({ invoke }) => {
-        const port = await invoke<number>("get_server_port");
-        const base = `http://127.0.0.1:${port}`;
-        setApiBase(base);
-        if (mounted) {
-          setBase(base);
-          setResolved(true);
-        }
-      })
-      .catch(() => {
-        if (mounted) setResolved(true);
-      });
-    return () => {
-      mounted = false;
-    };
+    void run();
+  }, [run, tick]);
+
+  // Сервер перезапускается на новом порту/токене после нештатной смерти
+  // (watchdog в Rust шлёт server://status { running: false }). Повторное
+  // обращение к get_server_info поднимает сервер заново и возвращает свежий
+  // адрес — иначе все запросы фронтенда падают с "Failed to fetch".
+  const retry = useCallback(() => {
+    const now = Date.now();
+    if (now - lastRetryAt.current < RECONNECT_MIN_INTERVAL_MS) return;
+    lastRetryAt.current = now;
+    setTick((t) => t + 1);
   }, []);
 
-  return { apiBase, resolved };
+  useEffect(() => {
+    if (!isTauri()) return;
+    let unlisten: (() => void) | undefined;
+    void import("@tauri-apps/api/event").then(async ({ listen }) => {
+      unlisten = await listen<{ running: boolean }>("server://status", (e) => {
+        if (!e.payload.running) retry();
+      });
+    });
+    return () => {
+      void unlisten?.();
+    };
+  }, [retry]);
+
+  return { apiBase, status, error, retry };
 }
 
-function useServerStatus(apiBase: string, pollMs = 5000): { status: ServerStatus; checkedAt: string | null } {
+function useServerStatus(
+  apiBase: string,
+  onRecover?: () => void,
+  pollMs = 5000,
+): { status: ServerStatus; checkedAt: string | null } {
   const [status, setStatus] = useState<ServerStatus>("checking");
   const [checkedAt, setCheckedAt] = useState<string | null>(null);
+  const [, setOfflineStreak] = useState(0);
+  const onRecoverRef = useRef(onRecover);
+  onRecoverRef.current = onRecover;
 
   const check = useCallback(async () => {
+    let ok = false;
     try {
       const res = await fetch(`${apiBase}/api/health`);
       const body = await res.json().catch(() => null);
-      setStatus(res.ok && body?.status === "ok" ? "online" : "offline");
+      ok = res.ok && body?.status === "ok";
     } catch {
-      setStatus("offline");
+      ok = false;
+    }
+    setStatus(ok ? "online" : "offline");
+    if (ok) {
+      setOfflineStreak(0);
+    } else {
+      setOfflineStreak((s) => {
+        if (s >= 3) return s;
+        const next = s + 1;
+        if (next >= 3) onRecoverRef.current?.();
+        return next;
+      });
     }
     setCheckedAt(new Date().toISOString());
   }, [apiBase]);
 
   useEffect(() => {
+    setStatus("checking");
+    setOfflineStreak(0);
     void check();
     const id = setInterval(() => void check(), pollMs);
     return () => clearInterval(id);
@@ -155,21 +213,56 @@ function TitleBarButton({
   );
 }
 
-export default function App() {
-  const { apiBase, resolved } = useApiBase();
-  const { status } = useServerStatus(apiBase);
+function StartupError({ error, onRetry }: { error: string; onRetry: () => void }) {
+  const openLogs = () => {
+    if (!isTauri()) return;
+    void import("@tauri-apps/api/core").then(({ invoke }) => {
+      void invoke("open_app_data_dir");
+    });
+  };
 
-  if (!resolved) {
-    return (
-      <div className="flex h-screen items-center justify-center bg-canvas text-ink">
-        <span className="text-sm text-ink-4">Запуск встроенного сервера…</span>
+  return (
+    <div className="flex h-screen items-center justify-center bg-canvas px-6 text-ink">
+      <div className="w-full max-w-md rounded-xl border border-danger/30 bg-danger-soft p-6 text-sm">
+        <h2 className="mb-2 text-base font-semibold text-danger">Не удалось запустить встроенный сервер</h2>
+        <p className="mb-4 text-ink-2">{error}</p>
+        <p className="mb-4 text-xs text-ink-3">
+          Подробности — в файле <code className="rounded bg-surface-3 px-1 py-0.5">server.log</code> в папке данных приложения.
+        </p>
+        <div className="flex flex-wrap gap-3">
+          <Button onClick={onRetry}>Повторить</Button>
+          <Button variant="secondary" onClick={openLogs}>
+            Открыть папку с логами
+          </Button>
+        </div>
       </div>
-    );
+    </div>
+  );
+}
+
+function LoadingScreen() {
+  return (
+    <div className="flex h-screen items-center justify-center bg-canvas text-ink">
+      <span className="text-sm text-ink-4">Запуск встроенного сервера…</span>
+    </div>
+  );
+}
+
+export default function App() {
+  const { apiBase, status, error, retry } = useApiBase();
+  const { status: serverStatus } = useServerStatus(apiBase, retry);
+
+  if (status === "error") {
+    return <StartupError error={error ?? "Неизвестная ошибка"} onRetry={retry} />;
+  }
+
+  if (status === "loading") {
+    return <LoadingScreen />;
   }
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-canvas text-ink">
-      <TitleBar status={status} />
+      <TitleBar status={serverStatus} />
       <div className="min-h-0 flex-1 overflow-auto">
         <MindTreeApp />
       </div>

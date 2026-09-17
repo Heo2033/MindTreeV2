@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import 'package:mindtree_flutter/config/provider_config_service.dart';
 import 'package:mindtree_flutter/providers/app_providers.dart';
+import 'package:mindtree_flutter/ui/theme/app_theme.dart';
 import 'package:mindtree_flutter/ui/widgets/badge.dart';
 import 'package:mindtree_flutter/ui/widgets/button.dart';
 import 'package:mindtree_flutter/ui/widgets/error_banner.dart';
@@ -34,6 +35,8 @@ class _ProviderConfigScreenState extends ConsumerState<ProviderConfigScreen> {
   final _temperature = TextEditingController();
   final _numCtx = TextEditingController();
   bool _saving = false;
+  String? _error;
+  bool _saved = false;
 
   @override
   void dispose() {
@@ -65,14 +68,10 @@ class _ProviderConfigScreenState extends ConsumerState<ProviderConfigScreen> {
       ref.invalidate(effectiveConfigProvider);
       ref.invalidate(initAppProvider);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Настройки сохранены')),
-      );
+      setState(() { _saved = true; _error = null; });
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Ошибка: $e')),
-      );
+      setState(() => _error = '$e');
     } finally {
       if (mounted) setState(() => _saving = false);
     }
@@ -85,9 +84,7 @@ class _ProviderConfigScreenState extends ConsumerState<ProviderConfigScreen> {
       ref.invalidate(initAppProvider);
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Ошибка: $e')),
-      );
+      setState(() => _error = '$e');
     }
   }
 
@@ -146,6 +143,37 @@ class _ProviderConfigScreenState extends ConsumerState<ProviderConfigScreen> {
                 ],
               ),
               const SizedBox(height: 16),
+              if (_error != null) ...[
+                ErrorBanner(
+                  message: _error!,
+                  onDismiss: () => setState(() => _error = null),
+                ),
+                const SizedBox(height: 16),
+              ],
+              if (_saved) ...[
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: AppColors.ok.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: AppColors.ok.withValues(alpha: 0.3)),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.check_circle, color: AppColors.ok, size: 18),
+                      const SizedBox(width: 8),
+                      Text(
+                        'Настройки сохранены',
+                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                              color: AppColors.ok,
+                              fontWeight: FontWeight.w600,
+                            ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 16),
+              ],
               AppSelect(
                 label: 'Провайдер',
                 value: _provider,

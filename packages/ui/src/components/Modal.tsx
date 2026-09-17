@@ -8,30 +8,38 @@ interface ModalProps {
 }
 
 export function Modal({ open, onClose, title, children }: ModalProps) {
-  const dialogRef = useRef<HTMLDialogElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const dialog = dialogRef.current;
-    if (!dialog) return;
-    if (open && !dialog.open) {
-      dialog.showModal();
-    } else if (!open && dialog.open) {
-      dialog.close();
-    }
-  }, [open]);
+    if (!open) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [open, onClose]);
+
+  if (!open) return null;
 
   return (
-    <dialog
-      ref={dialogRef}
-      onClose={onClose}
-      className="rounded-xl border border-border bg-surface p-0 text-ink shadow-pop backdrop:bg-ink/40"
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
+      className="fixed inset-0 z-50 flex items-center justify-center"
     >
-      <div className="min-w-[400px] max-w-[600px] p-6">
+      <div className="absolute inset-0 bg-ink/40" onClick={onClose} />
+      <div
+        ref={panelRef}
+        role="document"
+        className="relative max-w-[600px] rounded-xl border border-border bg-surface p-6 text-ink shadow-pop"
+      >
         {title && (
           <div className="mb-4 flex items-center justify-between">
             <h2 className="text-lg font-semibold tracking-tight">{title}</h2>
             <button
               onClick={onClose}
+              aria-label="Закрыть"
               className="text-ink-4 hover:text-ink"
             >
               ✕
@@ -40,6 +48,6 @@ export function Modal({ open, onClose, title, children }: ModalProps) {
         )}
         {children}
       </div>
-    </dialog>
+    </div>
   );
 }

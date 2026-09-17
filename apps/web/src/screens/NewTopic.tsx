@@ -52,7 +52,12 @@ export function NewTopicScreen() {
       if (ok) {
         navigate(`/topic/${topic.id}/graph`);
       } else {
-        setError("Не удалось построить дерево. Проверьте конфигурацию LLM и попробуйте снова.");
+        const pipelineMsg = useGraphStore.getState().pipeline.message;
+        setError(
+          (pipelineMsg && pipelineMsg.trim() !== ""
+            ? pipelineMsg
+            : "Не удалось построить дерево. Проверьте конфигурацию LLM и попробуйте снова."),
+        );
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Ошибка");

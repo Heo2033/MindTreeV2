@@ -17,6 +17,18 @@ export function setApiBase(base: string): void {
   }
 }
 
+// Токен доступа к встроенному серверу десктопной обвязки. Задаётся один раз
+// после invoke("get_server_info") и добавляется ко всем запросам и SSE-каналам.
+let authToken: string | null = null;
+
+export function setAuthToken(token: string | null): void {
+  authToken = token ?? null;
+}
+
+function getAuthorizationHeader(): Record<string, string> {
+  return authToken ? { Authorization: `Bearer ${authToken}` } : {};
+}
+
 /**
  * Лимит ожидания HTTP-заголовков SSE-рукопожатия. 0 — без лимита.
  * Это НЕ лимит на весь стриминг: после установки соединения фазы LLM могут
@@ -31,6 +43,7 @@ export interface RequestOptions extends RequestInit {
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const { json, ...fetchOptions } = options;
   const headers: Record<string, string> = {
+    ...getAuthorizationHeader(),
     ...(fetchOptions.headers as Record<string, string>),
   };
 
@@ -126,7 +139,10 @@ export function postSSE(path: string, body: unknown): SSEStream {
     try {
       const res = await fetch(`${apiBase()}${path}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...getAuthorizationHeader(),
+        },
         body: JSON.stringify(body),
         signal: controller.signal,
       });

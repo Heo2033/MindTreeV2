@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -8,6 +9,7 @@ import 'package:mindtree_flutter/ui/theme/app_theme.dart';
 import 'package:mindtree_flutter/ui/widgets/badge.dart';
 import 'package:mindtree_flutter/ui/widgets/button.dart';
 import 'package:mindtree_flutter/ui/widgets/error_banner.dart';
+import 'package:mindtree_flutter/ui/widgets/formatted_text.dart';
 import 'package:mindtree_flutter/ui/widgets/spinner.dart';
 
 const Map<String, String> _conceptTypeLabel = {
@@ -34,6 +36,7 @@ class FocusScreen extends ConsumerStatefulWidget {
 class _FocusScreenState extends ConsumerState<FocusScreen> {
   String? _focusNodeId;
   bool _starting = false;
+  final Set<String> _contentAttempted = {};
 
   @override
   void initState() {
@@ -45,6 +48,18 @@ class _FocusScreenState extends ConsumerState<FocusScreen> {
       }
       ref.read(learnerStoreProvider.notifier).load(widget.topicId);
     });
+  }
+
+  /// Auto-generate content for a node if it hasn't been loaded yet.
+  /// Mirrors web Focus.tsx: generateContent() on node selection.
+  Future<void> _ensureContentLoaded(String nodeId) async {
+    if (_contentAttempted.contains(nodeId)) return;
+    _contentAttempted.add(nodeId);
+    try {
+      await ref.read(graphStoreProvider.notifier).generateContent(nodeId);
+    } catch (_) {
+      // Fallback: content will remain empty, UI shows oneLiner instead.
+    }
   }
 
   List<KnowledgeNode> _readingOrder(List<KnowledgeNode> nodes) {
@@ -113,6 +128,9 @@ class _FocusScreenState extends ConsumerState<FocusScreen> {
 
   void _setFocus(String? id) {
     setState(() => _focusNodeId = id);
+    if (id != null) {
+      _ensureContentLoaded(id);
+    }
   }
 
   Future<void> _startSession({String? nodeId}) async {
@@ -159,18 +177,29 @@ class _FocusScreenState extends ConsumerState<FocusScreen> {
 
     return Scaffold(
       body: SafeArea(
-        child: Column(
-          children: [
-            _Header(
-              topicName: graph.topicName ?? widget.topicId,
-              onBack: () => context.go('/topic/graph'),
-            ),
-            Expanded(
-              child: focus == null
-                  ? _SectionPicker(sections: sections, onPick: _setFocus)
-                  : ListView(
-                      padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
-                      children: [
+        child: KeyboardListener(
+          focusNode: FocusNode(),
+          onKeyEvent: (event) {
+            if (event is KeyDownEvent) {
+              if (event.logicalKey == LogicalKeyboardKey.arrowLeft && focusIndex > 0) {
+                _setFocus(plan[focusIndex - 1].id);
+              } else if (event.logicalKey == LogicalKeyboardKey.arrowRight && focusIndex < plan.length - 1) {
+                _setFocus(plan[focusIndex + 1].id);
+              }
+            }
+          },
+          child: Column(
+            children: [
+              _Header(
+                topicName: graph.topicName ?? widget.topicId,
+                onBack: () => context.go('/topic/graph'),
+              ),
+              Expanded(
+                child: focus == null
+                    ? _SectionPicker(sections: sections, onPick: _setFocus)
+                    : ListView(
+                        padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
+                        children: [
                         _Breadcrumb(path: _pathTo(graph.nodes, focus)),
                         const SizedBox(height: 8),
                         _NavBar(
@@ -193,6 +222,9 @@ class _FocusScreenState extends ConsumerState<FocusScreen> {
                             onStartHere: () =>
                                 _startSession(nodeId: plan[i].id),
                           ),
+                        // Article view: details + analogy выбранного узла (как в web Focus.tsx)
+                        if (focus.details.isNotEmpty || focus.analogy != null)
+                          _ArticleView(node: focus),
                         const SizedBox(height: 16),
                         if (weakInPlan.isNotEmpty) ...[
                           _WeakCard(weakInPlan: weakInPlan),
@@ -214,12 +246,13 @@ class _FocusScreenState extends ConsumerState<FocusScreen> {
                           style: theme.textTheme.bodySmall
                               ?.copyWith(color: scheme.onSurfaceVariant),
                         ),
-                      ],
-                    ),
+                       ],
+                     ),
             ),
           ],
         ),
       ),
+    ),
     );
   }
 
@@ -607,6 +640,95 @@ class _WeakCard extends StatelessWidget {
             style: theme.textTheme.bodySmall
                 ?.copyWith(color: scheme.onSurfaceVariant),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Article view: shows full content (details + analogy + one_liner) of the
+/// selected node. Mirrors web Focus.tsx article panel.
+class _ArticleView extends StatelessWidget {
+  final KnowledgeNode node;
+
+  const _ArticleView({required this.node});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    return Container(
+      margin: const EdgeInsets.only(top: 8, bottom: 16),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: scheme.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: scheme.outlineVariant),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.menu_book, size: 18, color: scheme.primary),
+              const SizedBox(width: 6),
+              Text(
+                'Содержимое',
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: scheme.primary,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const Spacer(),
+              if (!node.contentLoaded)
+                Text(
+                  'Генерация…',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+            ],
+          ),
+          const Divider(height: 24),
+          if (node.oneLiner.isNotEmpty) ...[
+            Text(
+              node.oneLiner,
+              style: theme.textTheme.bodyLarge?.copyWith(
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 12),
+          ],
+          if (node.details.isNotEmpty) ...[
+            FormattedText(node.details),
+            const SizedBox(height: 12),
+          ],
+          if (node.analogy != null && node.analogy!.isNotEmpty) ...[
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: scheme.primaryContainer.withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(Icons.lightbulb_outline, size: 16, color: scheme.primary),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      node.analogy!,
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        fontStyle: FontStyle.italic,
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ],
       ),
     );

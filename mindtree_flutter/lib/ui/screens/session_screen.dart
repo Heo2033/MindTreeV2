@@ -51,10 +51,9 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     Future.microtask(() {
       ref.read(graphStoreProvider.notifier).loadTopic(widget.topicId);
       final ss = ref.read(sessionStoreProvider);
-      if (ss.session == null || ss.session!.status != SessionStatus.active) {
-        ref.read(sessionStoreProvider.notifier).reset();
-      } else {
-        ref.read(sessionStoreProvider.notifier).loadCurrent();
+      if (ss.session != null && ss.session!.status == SessionStatus.active) {
+        // Auto-resume: восстанавливаем сессию при входе
+        ref.read(sessionStoreProvider.notifier).resume();
       }
     });
   }
@@ -163,6 +162,11 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     return Column(
       children: [
         _buildSessionHeader(ss, session, completedCount, items.length, eta),
+        // "Достаточно" баннер — как в web (apps/web/src/screens/Session.tsx)
+        if (ss.adaptive?.recommendedAction == RecommendedAction.finalAssessment || ss.adaptive?.recommendedAction == RecommendedAction.complete)
+          _buildEnoughBanner(ss),
+        if (ss.advancing)
+          _buildAdvancingIndicator(),
         Expanded(
           child: SingleChildScrollView(
             padding: const EdgeInsets.all(16),
@@ -184,6 +188,51 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildEnoughBanner(SessionState ss) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      child: Row(
+        children: [
+          Icon(Icons.check_circle, color: AppColors.ok, size: 20),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Достаточно для твоей цели',
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
+            ),
+          ),
+          AppButton(
+            'Итоговый тест',
+            size: AppButtonSize.sm,
+            onPressed: _finalizeSession,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAdvancingIndicator() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      child: Row(
+        children: [
+          const Loader(size: LoaderSize.sm),
+          const SizedBox(width: 8),
+          Text(
+            'Генерируем следующий концепт…',
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: AppColors.textMuted(context),
+                ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -333,15 +382,53 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                   ),
             ),
             const SizedBox(height: 16),
-            AppButton(
-              'Изучать',
-              fullWidth: true,
-              icon: Icons.play_arrow,
-              busy: ss.loading,
-              onPressed: () => _session.startStudy(item.nodeId),
-            ),
+            if (ss.loading || ss.studying)
+              _buildStudyLoading(ss)
+            else
+              AppButton(
+                'Изучать',
+                fullWidth: true,
+                icon: Icons.play_arrow,
+                busy: ss.loading,
+                onPressed: () => _session.startStudy(item.nodeId),
+              ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildStudyLoading(SessionState ss) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        children: [
+          const SizedBox(height: 8),
+          const Loader(),
+          const SizedBox(height: 12),
+          Text(
+            ss.studying
+                ? 'Подготовка учебного материала…'
+                : 'Генерация объяснения…',
+            textAlign: TextAlign.center,
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: AppColors.textMuted(context),
+                ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Это может занять 10–30 секунд',
+            textAlign: TextAlign.center,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: AppColors.textMuted(context).withValues(alpha: 0.7),
+                ),
+          ),
+          const SizedBox(height: 8),
+        ],
       ),
     );
   }
@@ -401,23 +488,34 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   }
 
   Widget _buildBreadcrumb(LearningActivity activity) {
+    const stepLabels = ['Объяснение', 'Пример', 'Проверка', 'Применение'];
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
         for (var i = 0; i < activity.steps.length; i++) ...[
+          if (i > 0) const SizedBox(width: 6),
           Container(
-            width: 8,
-            height: 8,
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
             decoration: BoxDecoration(
-              shape: BoxShape.circle,
               color: activity.steps[i].isAnswered
-                  ? AppColors.ok
+                  ? AppColors.ok.withValues(alpha: 0.15)
                   : i == activity.currentStep
-                      ? Theme.of(context).colorScheme.primary
-                      : AppColors.textMuted(context).withValues(alpha: 0.3),
+                      ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.15)
+                      : AppColors.textMuted(context).withValues(alpha: 0.1),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Text(
+              i < stepLabels.length ? stepLabels[i] : activity.steps[i].type,
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    color: activity.steps[i].isAnswered
+                        ? AppColors.ok
+                        : i == activity.currentStep
+                            ? Theme.of(context).colorScheme.primary
+                            : AppColors.textMuted(context),
+                    fontWeight: i == activity.currentStep ? FontWeight.w600 : FontWeight.normal,
+                  ),
             ),
           ),
-          if (i < activity.steps.length - 1) const SizedBox(width: 4),
         ],
       ],
     );
@@ -597,6 +695,14 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     if (activity == null) return;
     final nextStep = activity.currentStep + 1;
     if (nextStep < activity.steps.length) {
+      final next = activity.steps[nextStep];
+      // Для recall и apply нельзя отвечать пустой строкой — пользователь
+      // должен сам выбрать вариант или ввести текст. Сбрасываем
+      // answeredStepView, чтобы UI показал следующий pending шаг.
+      if (next.type == 'recall' || next.type == 'apply') {
+        _session.resetAnsweredView();
+        return;
+      }
       _session.answerStep(nextStep, '');
     }
   }
@@ -622,6 +728,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     final updated = ref.read(sessionStoreProvider);
     final allDone = updated.currentItem == null;
     if (allDone) {
+      // Shortcut: если последний концепт — сразу finalize (как в web)
       _finalizeSession();
     }
   }

@@ -38,9 +38,12 @@ export function resolveTimeoutMs(raw: string | undefined): number {
   return Math.trunc(num);
 }
 
-function readLLMConfig(): LLMConfig {
-  const runtime = getRuntimeConfig();
-
+/**
+ * Собирает эффективный LLM-конфиг из runtime-конфига и env.
+ * `runtime` — текущий (применённый) конфиг по умолчанию; для пробной проверки
+ * (POST /api/config/test) можно передать временный конфиг без персиста на диск.
+ */
+function readLLMConfig(runtime: RuntimeLLMConfig | null = getRuntimeConfig()): LLMConfig {
   const envOr = (runtimeKey: keyof RuntimeLLMConfig, envName: string, fallback: string): string => {
     const rt = runtime?.[runtimeKey];
     if (typeof rt === "string" && rt.trim() !== "") return rt.trim();
@@ -152,6 +155,11 @@ export interface CallLLMOptions {
 
 export function getModelName(): string {
   return readLLMConfig().model;
+}
+
+/** Имя модели для конкретного runtime-конфига без применения (для пробной проверки /test). */
+export function getModelNameForConfig(runtime: RuntimeLLMConfig | null | undefined): string {
+  return readLLMConfig(runtime).model;
 }
 
 export function getModelForTier(tier: ModelTier): string {
@@ -425,8 +433,9 @@ async function chatCompletionsOnce(
 export async function callLLM(
   systemPrompt: string,
   options: CallLLMOptions = {},
+  runtime: RuntimeLLMConfig | null | undefined = undefined,
 ): Promise<ILLMResult> {
-  const cfg = readLLMConfig();
+  const cfg = readLLMConfig(runtime);
 
   // Офлайн-режим: вместо сетевых вызовов сообщаем движкам, что LLM недоступен.
   // Движки ловят эту ошибку и используют встроенные детерминированные фолбэки.
@@ -603,8 +612,9 @@ export async function* callLLMStream(
   systemPrompt: string,
   options: CallLLMOptions = {},
   signal?: AbortSignal,
+  runtime: RuntimeLLMConfig | null | undefined = undefined,
 ): AsyncIterableIterator<string> {
-  const cfg = readLLMConfig();
+  const cfg = readLLMConfig(runtime);
 
   if (cfg.isMock) {
     throw new LLMMockError(

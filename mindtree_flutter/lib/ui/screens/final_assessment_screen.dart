@@ -1,3 +1,4 @@
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -15,6 +16,15 @@ import 'package:mindtree_flutter/ui/widgets/formatted_text.dart';
 import 'package:mindtree_flutter/ui/widgets/inputs.dart';
 import 'package:mindtree_flutter/ui/widgets/progress_bar.dart';
 import 'package:mindtree_flutter/ui/widgets/spinner.dart';
+
+const Map<String, String> masteryLabels = {
+  'awareness': 'Ознакомление',
+  'basic_understanding': 'Базовое понимание',
+  'solid_understanding': 'Устойчивое понимание',
+  'practical_application': 'Практическое применение',
+  'advanced': 'Продвинутый',
+  'expert': 'Эксперт',
+};
 
 class FinalAssessmentScreen extends ConsumerStatefulWidget {
   final String topicId;
@@ -37,6 +47,12 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
   final _answerController = TextEditingController();
   int? _selectedOption;
   int _startedAt = 0;
+
+  // Collect all answers before submit (like web FinalAssessment.tsx)
+  final Map<String, String> _answers = {};
+  final Map<String, bool> _results = {};
+  List<String>? _gaps;
+  String? _masteryLevel;
 
   @override
   void dispose() {
@@ -153,13 +169,17 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
       correct = selected.toString() == q.correctAnswer;
     } else {
       answer = _answerController.text.trim();
-      correct = answer.isNotEmpty;
+      // Rubric-based heuristic grading for open-ended questions.
+      // Mirrors web: check if explanation/rubric keywords are present.
+      correct = _gradeOpenEnded(answer, q);
     }
 
     setState(() {
       _lastCorrect = correct;
       _showingFeedback = true;
       if (correct) _correctCount++;
+      _answers[q.id] = answer;
+      _results[q.id] = correct;
     });
 
     engine.recordAttempt(
@@ -170,6 +190,30 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
       timeMs,
       feedback: q.explanation,
     );
+  }
+
+  /// Heuristic grading for open-ended questions (explanation/diagnosis/application/transfer).
+  /// Checks if the answer contains key concepts from the rubric/explanation field.
+  bool _gradeOpenEnded(String answer, AssessmentQuestion q) {
+    if (answer.isEmpty) return false;
+    final rubric = q.explanation ?? '';
+    if (rubric.isEmpty) return true; // Fallback: no rubric = accept
+
+    // Extract key terms from rubric (words > 3 chars, Cyrillic/Latin)
+    final rubricWords = rubric
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^\p{L}\p{N}\s]', unicode: true), ' ')
+        .split(RegExp(r'\s+'))
+        .where((w) => w.length > 3)
+        .toSet();
+
+    if (rubricWords.isEmpty) return answer.length > 10; // Fallback
+
+    final answerLower = answer.toLowerCase();
+    final matched = rubricWords.where((w) => answerLower.contains(w)).length;
+    final threshold = rubricWords.length * 0.3; // 30% совпадений = верно
+
+    return matched >= threshold;
   }
 
   void _nextQuestion() {
@@ -184,9 +228,71 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
             ? _correctCount / _totalQuestions
             : 0.0;
         ref.read(assessmentEngineProvider).finalize(_assessment!.id, score);
+        // Apply results to SRS (mirrors web: ReviewScheduler.onAnswered)
+        _applyResultsToSRS();
+        // Compute mastery level and gaps (как в web FinalAssessment.tsx)
+        _computeMasteryAndGaps();
       }
     });
     _startedAt = DateTime.now().millisecondsSinceEpoch;
+  }
+
+  /// Применяет результаты теста к SRS learner model.
+  void _applyResultsToSRS() {
+    final reviewScheduler = ref.read(reviewSchedulerProvider);
+    final topic = ref.read(graphStoreProvider).topic;
+    final topicId = topic?.id ?? widget.topicId;
+    for (final entry in _results.entries) {
+      final questionId = entry.key;
+      final correct = entry.value;
+      // Find the corresponding question
+      final question = _assessment!.questions.where((q) => q.id == questionId).firstOrNull;
+      if (question != null) {
+        reviewScheduler.onAnswered(
+          topicId,
+          question.nodeId,
+          correct ? 'correct' : 'incorrect',
+        );
+      }
+    }
+  }
+
+  /// Вычисляет уровень мастерства и список слабых мест по результатам теста.
+  void _computeMasteryAndGaps() {
+    final questions = _assessment!.questions;
+    final score = _totalQuestions > 0 ? _correctCount / _totalQuestions : 0.0;
+    final graph = ref.read(graphStoreProvider);
+    final topic = graph.topic;
+    final targetLevel = topic?.targetLevel ?? MasteryLevel.basicUnderstanding;
+
+    // Mastery level mapping (mirrors web: score-based progression)
+    String mastery;
+    if (score >= 0.9) {
+      mastery = targetLevel.index + 1 < MasteryLevel.order.length
+          ? MasteryLevel.order[min(targetLevel.index + 1, MasteryLevel.order.length - 1)].raw
+          : targetLevel.raw;
+    } else if (score >= 0.7) {
+      mastery = targetLevel.raw;
+    } else if (score >= 0.5) {
+      mastery = targetLevel.index > 0
+          ? MasteryLevel.order[max(targetLevel.index - 1, 0)].raw
+          : MasteryLevel.awareness.raw;
+    } else {
+      mastery = MasteryLevel.awareness.raw;
+    }
+    _masteryLevel = mastery;
+
+    // Gaps list: nodes with wrong answers
+    final gapLabels = <String>[];
+    for (final q in questions) {
+      if (_results[q.id] == false) {
+        final node = graph.nodes.where((n) => n.id == q.nodeId).firstOrNull;
+        if (node != null && !gapLabels.contains(node.label)) {
+          gapLabels.add(node.label);
+        }
+      }
+    }
+    _gaps = gapLabels;
   }
 
   @override
@@ -322,18 +428,47 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
                     else ...[
                       if (_isMultipleChoice)
                         _buildOptions(q)
-                      else
+                      else ...[
+                        if (q.explanation != null && q.explanation!.isNotEmpty)
+                          Container(
+                            margin: const EdgeInsets.only(bottom: 12),
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Рекомендация для проверки',
+                                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                                        color: AppColors.textMuted(context),
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  q.explanation!,
+                                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                        color: AppColors.textMuted(context),
+                                      ),
+                                ),
+                              ],
+                            ),
+                          ),
                         AppTextarea(
                           label: 'Ваш ответ',
                           controller: _answerController,
-                          hint: 'Введите ответ...',
+                          hint: 'Введите ответ своими словами...',
                           minLines: 3,
                         ),
+                      ],
                       const SizedBox(height: 16),
                       AppButton(
                         'Проверить',
                         fullWidth: true,
-                        onPressed: _isMultipleChoice && _selectedOption == null
+                        onPressed: (_isMultipleChoice && _selectedOption == null)
                             ? null
                             : _checkAnswer,
                       ),
@@ -426,6 +561,9 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
     final reachedTarget = pct >= 70;
     final graph = ref.read(graphStoreProvider);
     final topicName = graph.topicName ?? widget.topicId;
+    final masteryLabel = _masteryLevel != null
+        ? masteryLabels[_masteryLevel!] ?? _masteryLevel!
+        : null;
 
     return SingleChildScrollView(
       child: Card(
@@ -470,6 +608,85 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: 12),
+              // Mastery level (как в web)
+              if (masteryLabel != null) ...[
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: reachedTarget
+                        ? AppColors.ok.withValues(alpha: 0.1)
+                        : AppColors.warning(context).withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: reachedTarget
+                          ? AppColors.ok.withValues(alpha: 0.3)
+                          : AppColors.warning(context).withValues(alpha: 0.3),
+                    ),
+                  ),
+                  child: Column(
+                    children: [
+                      Text(
+                        'Достигнутый уровень',
+                        style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                              color: AppColors.textMuted(context),
+                            ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        masteryLabel,
+                        style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                              fontWeight: FontWeight.w700,
+                              color: reachedTarget
+                                  ? AppColors.ok
+                                  : AppColors.warning(context),
+                            ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
+              // Gaps list «Что стоит повторить» (как в web)
+              if (_gaps != null && _gaps!.isNotEmpty) ...[
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.errorContainer.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: Theme.of(context).colorScheme.errorContainer.withValues(alpha: 0.3),
+                    ),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Icon(Icons.report_problem_outlined, size: 16, color: AppColors.warning(context)),
+                          const SizedBox(width: 6),
+                          Text(
+                            'Что стоит повторить',
+                            style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                                  fontWeight: FontWeight.w600,
+                                ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: _gaps!.map((label) => Chip(
+                          label: Text(label),
+                          labelStyle: Theme.of(context).textTheme.labelSmall,
+                          visualDensity: VisualDensity.compact,
+                        )).toList(),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
               StatusBadge(
                 reachedTarget ? 'Цель достигнута' : 'Нужно больше практики',
                 variant:
@@ -504,6 +721,19 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
                 ),
               ),
               const SizedBox(height: 24),
+              // Expand tree option при pass (как в web)
+              if (reachedTarget && _totalQuestions > 0)
+                AppButton(
+                  'Раскрыть дерево глубже',
+                  fullWidth: true,
+                  icon: Icons.unfold_more,
+                  variant: AppButtonVariant.secondary,
+                  onPressed: () {
+                    ref.read(graphStoreProvider.notifier).autoExpandVisible();
+                    context.go('/topic/graph');
+                  },
+                ),
+              if (reachedTarget && _totalQuestions > 0) const SizedBox(height: 8),
               AppButton(
                 'Повторить',
                 fullWidth: true,

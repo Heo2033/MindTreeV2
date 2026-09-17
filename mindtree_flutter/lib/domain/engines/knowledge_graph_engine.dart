@@ -301,6 +301,21 @@ const int _maxDepth = 5;
 /// validate/repair -> content, backed by the repository for persistence and
 /// the [TreeScheduler] for LLM calls. Prompt builders are injected as pure
 /// Dart functions so the engine itself stays framework-free.
+/// Maximum tree generation depth for a given user level.
+/// Mirrors web: beginner→2, intermediate→3, advanced/expert→4.
+int _maxGenerationLevel(String? level) {
+  switch (level) {
+    case 'beginner':
+      return 2;
+    case 'intermediate':
+      return 3;
+    case 'expert':
+      return 4;
+    default:
+      return 3; // intermediate по умолчанию
+  }
+}
+
 class KnowledgeGraphEngine {
   final MindtreeRepository repo;
   final TreeScheduler scheduler;
@@ -343,6 +358,9 @@ class KnowledgeGraphEngine {
       level: level,
       timeBudgetMinutes: timeBudgetMinutes,
     );
+    // Ограничиваем максимальную глубину генерации по уровню пользователя.
+    // beginner → L2, intermediate → L3, advanced/expert → L4.
+    final maxGenLevel = _maxGenerationLevel(level);
 
     // Step 1: root (L1).
     onProgress?.call('structure', 'Определение корня темы...');
@@ -375,14 +393,16 @@ class KnowledgeGraphEngine {
       }
     }
 
-    // Step 2: sections (L2).
+    // Step 2: sections (L2) — генерируем всегда (уровень ≥ 2 для всех).
     onProgress?.call('structure', 'Генерация главных разделов (уровень 2)...');
     var l2 = <NodeDraft>[];
-    try {
-      l2 = await _generateL2FromRoot(query, nodes, opts);
-      nodes = [...nodes, ...l2];
-    } catch (err) {
-      warnings.add('Генерация разделов не завершена: ${err.toString()}');
+    if (maxGenLevel >= 2) {
+      try {
+        l2 = await _generateL2FromRoot(query, nodes, opts);
+        nodes = [...nodes, ...l2];
+      } catch (err) {
+        warnings.add('Генерация разделов не завершена: ${err.toString()}');
+      }
     }
 
     if (onBatch != null && l2.isNotEmpty) {
@@ -399,39 +419,43 @@ class KnowledgeGraphEngine {
     // Validate L1+L2 (and repair if needed).
     nodes = await _validateAndRepair(nodes, opts, onProgress, warnings, 'validate');
 
-    // Step 3: subsections (L3) — a separate request per L2 branch.
-    onProgress?.call('structure', 'Генерация подразделов (уровень 3)...');
-    final l2Nodes = nodes.where((n) => n.level == 2).toList();
-    for (final l2Node in l2Nodes) {
-      try {
-        final l3 = await _generateL3ForNode(query, l2Node, nodes, opts);
-        if (l3.isNotEmpty) {
-          nodes = [...nodes, ...l3];
-          final focusIds = l3.map((n) => n.id).toList();
-          nodes = await _validateAndRepair(
-            nodes,
-            opts,
-            onProgress,
-            warnings,
-            'validate-l3-${l2Node.id}',
-            focusIds,
-          );
-          if (onBatch != null) {
-            nodes = dedupeNodeIds(nodes);
-            final kept =
-                nodes.where((n) => n.parentId == l2Node.id && n.level == 3).toList();
-            if (kept.isNotEmpty) {
-              try {
-                await onBatch(kept);
-              } catch (_) {
-                // Final persist restores the tree.
+    // Step 3: subsections (L3) — only for intermediate+ levels.
+    if (maxGenLevel >= 3) {
+      onProgress?.call('structure', 'Генерация подразделов (уровень 3)...');
+      final l2Nodes = nodes.where((n) => n.level == 2).toList();
+      for (final l2Node in l2Nodes) {
+        try {
+          final l3 = await _generateL3ForNode(query, l2Node, nodes, opts);
+          if (l3.isNotEmpty) {
+            nodes = [...nodes, ...l3];
+            final focusIds = l3.map((n) => n.id).toList();
+            nodes = await _validateAndRepair(
+              nodes,
+              opts,
+              onProgress,
+              warnings,
+              'validate-l3-${l2Node.id}',
+              focusIds,
+            );
+            if (onBatch != null) {
+              nodes = dedupeNodeIds(nodes);
+              final kept =
+                  nodes.where((n) => n.parentId == l2Node.id && n.level == 3).toList();
+              if (kept.isNotEmpty) {
+                try {
+                  await onBatch(kept);
+                } catch (_) {
+                  // Final persist restores the tree.
+                }
               }
             }
           }
+        } catch (err) {
+          warnings.add('Подразделы для «${l2Node.title}» не завершены: ${err.toString()}');
         }
-      } catch (err) {
-        warnings.add('Подразделы для «${l2Node.title}» не завершены: ${err.toString()}');
       }
+    } else {
+      onProgress?.call('structure', 'Для текущего уровня достаточно 2 разделов — углубление доступно по кнопке.');
     }
 
     onProgress?.call('content', 'Заполнение контента узлов...');
@@ -738,8 +762,18 @@ class KnowledgeGraphEngine {
     }
   }
 
-  /// For MVP, top-level nodes get one_liner content; deep content is lazy.
-  List<NodeDraft> _fillTopLevelContent(String query, List<NodeDraft> nodes) => nodes;
+  /// Minimal content fill for top-level nodes so they are immediately usable.
+  /// Deep content is filled lazily via background fill.
+  List<NodeDraft> _fillTopLevelContent(String query, List<NodeDraft> nodes) {
+    return nodes.map((n) {
+      if (n.canonicalDefinition != null && n.canonicalDefinition!.isNotEmpty) return n;
+      // Fallback one_liner from title — at least something is better than nothing.
+      final depthHint = n.level <= 2 ? ' (основное понятие)' : '';
+      return n.copyWith(
+        canonicalDefinition: () => '${n.title} — ключевой элемент темы «$query».$depthHint',
+      );
+    }).toList();
+  }
 
   /// Generates content (one_liner/details/analogy) for a single node.
   Future<NodeContentResult> generateNodeContent(

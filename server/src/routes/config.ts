@@ -4,9 +4,10 @@ import {
   clearRuntimeConfig,
   getAppliedAt,
   getConfigFilePath,
+  getRuntimeConfig,
   type RuntimeLLMConfig,
 } from "../config/runtimeConfig.js";
-import { getModelName, getModelForTier, callLLM } from "../llm/client.js";
+import { getModelName, getModelForTier, getModelNameForConfig, callLLM } from "../llm/client.js";
 
 const FLAT_KEYS: Array<keyof RuntimeLLMConfig> = [
   "baseUrl",
@@ -40,9 +41,35 @@ function sanitize(raw: Record<string, unknown>): RuntimeLLMConfig {
   return out;
 }
 
+/** Мержит пробный конфиг поверх текущего runtime-конфига (без персиста на диск). */
+export function mergeProvisionConfig(
+  runtime: RuntimeLLMConfig | null,
+  provisional: RuntimeLLMConfig,
+): RuntimeLLMConfig {
+  return { ...(runtime ?? {}), ...provisional };
+}
+
+function hasApiKeyConfigured(): boolean {
+  const runtimeKey = getRuntimeConfig()?.apiKey;
+  if (runtimeKey !== undefined && runtimeKey.trim() !== "") return true;
+  const envKey = process.env.LLM_API_KEY ?? process.env.OPENAI_API_KEY;
+  return envKey !== undefined && envKey.trim() !== "";
+}
+
+function flatFromBody(body: unknown): Record<string, unknown> {
+  if (typeof body !== "object" || body === null) return {};
+  const b = body as Record<string, unknown>;
+  return typeof b.flat === "object" && b.flat !== null
+    ? (b.flat as Record<string, unknown>)
+    : b;
+}
+
 export async function configRoutes(app: FastifyInstance) {
   app.get("/", async (_request, reply) => {
-    const effective: Record<string, unknown> = { runtimeConfigured: getAppliedAt() !== null };
+    const effective: Record<string, unknown> = {
+      runtimeConfigured: getAppliedAt() !== null,
+      apiKeyConfigured: hasApiKeyConfigured(),
+    };
     try {
       effective.model = getModelName();
       effective.modelStrong = getModelForTier("strong");
@@ -62,10 +89,7 @@ export async function configRoutes(app: FastifyInstance) {
     const body = (request.body ?? {}) as Record<string, unknown>;
 
     // Support flat overrides and optional full AppSettings object
-    const flatSource = typeof body.flat === "object" && body.flat !== null
-      ? (body.flat as Record<string, unknown>)
-      : body;
-    const flat = sanitize(flatSource);
+    const flat = sanitize(flatFromBody(body));
 
     try {
       applyRuntimeConfig(flat);
@@ -87,17 +111,28 @@ export async function configRoutes(app: FastifyInstance) {
     return reply.send({ ok: true, appliedAt: null });
   });
 
-  app.post("/test", async (_request, reply) => {
+  app.post("/test", async (request, reply) => {
     const started = Date.now();
+    const provisional = sanitize(flatFromBody(request.body));
+    const testConfig =
+      Object.keys(provisional).length > 0
+        ? mergeProvisionConfig(getRuntimeConfig(), provisional)
+        : undefined;
+    let model: string | undefined;
     try {
-      const model = getModelName();
+      model = getModelNameForConfig(testConfig);
+    } catch {
+      model = undefined;
+    }
+    try {
       const result = await callLLM(
         'Ответь ровно одним словом "ok".',
         { timeoutMs: 30_000 },
+        testConfig,
       );
       return reply.send({
         ok: true,
-        model,
+        ...(model ? { model } : {}),
         latencyMs: Date.now() - started,
         preview: result.text.trim().slice(0, 200),
       });

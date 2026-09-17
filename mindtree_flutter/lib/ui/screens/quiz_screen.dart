@@ -33,9 +33,14 @@ class _QuizScreenState extends ConsumerState<QuizScreen> {
   bool _finished = false;
   bool _loading = false;
   String? _error;
+  String _mode = 'learning'; // 'learning' | 'exam' (как в web Quiz.tsx)
   final _answerController = TextEditingController();
   int? _selectedOption;
   int _startedAt = 0;
+
+  // Exam mode: collect answers before reveal
+  final Map<String, String> _examAnswers = {};
+  final Map<String, bool> _examResults = {};
 
   @override
   void dispose() {
@@ -131,7 +136,7 @@ class _QuizScreenState extends ConsumerState<QuizScreen> {
 
     bool correct;
     String answer;
-    if (_isMultipleChoice) {
+    if (q.options != null && q.options!.isNotEmpty) {
       final selected = _selectedOption ?? -1;
       answer = selected.toString();
       correct = selected.toString() == q.correctAnswer;
@@ -140,9 +145,15 @@ class _QuizScreenState extends ConsumerState<QuizScreen> {
       correct = answer.isNotEmpty;
     }
 
+    // Exam mode: collect answers, reveal at end
+    if (_mode == 'exam') {
+      _examAnswers[q.id] = answer;
+      _examResults[q.id] = correct;
+    }
+
     setState(() {
       _lastCorrect = correct;
-      _showingFeedback = true;
+      _showingFeedback = _mode == 'learning'; // Only show feedback in learning mode
       if (correct) _correctCount++;
     });
 
@@ -168,9 +179,40 @@ class _QuizScreenState extends ConsumerState<QuizScreen> {
             ? _correctCount / _totalQuestions
             : 0.0;
         ref.read(assessmentEngineProvider).finalize(_assessment!.id, score);
+        // SRS integration: apply quiz results to learner model (mirrors web)
+        _applyQuizResultsToSRS();
       }
     });
     _startedAt = DateTime.now().millisecondsSinceEpoch;
+  }
+
+  /// Apply quiz results to SRS learner model.
+  void _applyQuizResultsToSRS() {
+    final reviewScheduler = ref.read(reviewSchedulerProvider);
+    final graph = ref.read(graphStoreProvider);
+    final topicId = graph.topic?.id ?? widget.topicId;
+    final allResults = _mode == 'exam' ? _examResults : <String, bool>{};
+    // If learning mode, use inline results
+    if (_mode == 'learning' && _assessment != null) {
+      for (final q in _assessment!.questions) {
+        reviewScheduler.onAnswered(
+          topicId,
+          q.nodeId,
+          _examResults[q.id] ?? false ? 'correct' : 'incorrect',
+        );
+      }
+    } else {
+      for (final entry in allResults.entries) {
+        final question = _assessment!.questions.where((q) => q.id == entry.key).firstOrNull;
+        if (question != null) {
+          reviewScheduler.onAnswered(
+            topicId,
+            question.nodeId,
+            entry.value ? 'correct' : 'incorrect',
+          );
+        }
+      }
+    }
   }
 
   @override
@@ -242,6 +284,37 @@ class _QuizScreenState extends ConsumerState<QuizScreen> {
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 24),
+            // Mode toggle (как в web Quiz.tsx)
+            Row(
+              children: [
+                Expanded(
+                  child: ChoiceChip(
+                    label: const Text('Обучение'),
+                    selected: _mode == 'learning',
+                    onSelected: (_) => setState(() => _mode = 'learning'),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: ChoiceChip(
+                    label: const Text('Экзамен'),
+                    selected: _mode == 'exam',
+                    onSelected: (_) => setState(() => _mode = 'exam'),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              _mode == 'learning'
+                  ? 'Сразу видите объяснение после каждого ответа.'
+                  : 'Результаты и объяснения — только в конце.',
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: AppColors.textMuted(context),
+                  ),
+            ),
+            const SizedBox(height: 16),
             AppButton(
               'Начать тест',
               size: AppButtonSize.lg,
@@ -444,6 +517,11 @@ class _QuizScreenState extends ConsumerState<QuizScreen> {
               const SizedBox(height: 24),
               ProgressBar(value: pct.toDouble()),
               const SizedBox(height: 24),
+              // Exam mode review: expandable question details (как в web Quiz.tsx)
+              if (_mode == 'exam' && _examResults.isNotEmpty) ...[
+                _buildExamReview(),
+                const SizedBox(height: 16),
+              ],
               AppButton(
                 'Пройти заново',
                 fullWidth: true,
@@ -462,6 +540,70 @@ class _QuizScreenState extends ConsumerState<QuizScreen> {
           ),
         ),
       ),
+    );
+  }
+
+  /// Exam mode review: expandable list of all questions with correct/incorrect indicators.
+  Widget _buildExamReview() {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Разбор ответов',
+          style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600),
+        ),
+        const SizedBox(height: 8),
+        for (final q in _assessment!.questions) ...[
+          ExpansionTile(
+            leading: Icon(
+              _examResults[q.id] == true ? Icons.check_circle : Icons.cancel,
+              color: _examResults[q.id] == true ? AppColors.ok : AppColors.danger,
+              size: 20,
+            ),
+            title: Text(
+              q.question,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodyMedium,
+            ),
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (q.explanation != null && q.explanation!.isNotEmpty)
+                      Container(
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: theme.colorScheme.surfaceContainerHighest,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          q.explanation!,
+                          style: theme.textTheme.bodySmall,
+                        ),
+                      ),
+                    if (q.options != null && q.options!.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Text(
+                          'Правильный ответ: ${q.options![int.tryParse(q.correctAnswer ?? '0') ?? 0]}',
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.ok,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const Divider(height: 1),
+        ],
+      ],
     );
   }
 }

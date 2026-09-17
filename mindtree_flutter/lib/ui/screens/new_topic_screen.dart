@@ -6,6 +6,7 @@ import 'package:mindtree_flutter/providers/current_topic.dart';
 import 'package:mindtree_flutter/providers/ui_stores.dart';
 import 'package:mindtree_flutter/ui/theme/app_theme.dart';
 import 'package:mindtree_flutter/ui/widgets/button.dart';
+import 'package:mindtree_flutter/ui/widgets/error_banner.dart';
 import 'package:mindtree_flutter/ui/widgets/inputs.dart';
 import 'package:mindtree_flutter/ui/widgets/progress_bar.dart';
 
@@ -23,6 +24,7 @@ class _NewTopicScreenState extends ConsumerState<NewTopicScreen> {
   String _goal = 'overview';
   String _level = 'solid_understanding';
   bool _running = false;
+  String? _error;
 
   static const _goalOptions = <({String value, String label})>[
     (value: 'overview', label: 'Обзор'),
@@ -81,9 +83,7 @@ class _NewTopicScreenState extends ConsumerState<NewTopicScreen> {
       context.go('/topic/graph');
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Ошибка: $e')),
-      );
+      setState(() => _error = '$e');
     } finally {
       if (mounted) setState(() => _running = false);
     }
@@ -128,6 +128,13 @@ class _NewTopicScreenState extends ConsumerState<NewTopicScreen> {
                       ),
                 ),
                 const SizedBox(height: 24),
+                if (_error != null) ...[
+                  ErrorBanner(
+                    message: _error!,
+                    onDismiss: () => setState(() => _error = null),
+                  ),
+                  const SizedBox(height: 16),
+                ],
                 AppInput(
                   label: 'Название темы',
                   controller: _nameController,

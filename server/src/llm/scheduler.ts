@@ -78,6 +78,14 @@ export function tierForOperation(operation: string): ModelTier {
 
 const GATEWAY_RETRY_STATUSES = new Set([502, 503, 504]);
 
+/**
+ * Защитный потолок повторных попыток при рейт-лимите (429/408), если дедлайн
+ * операции отключён (LLM_OP_TIMEOUT_MS=0). Ретраи при рейт-лимите НЕ расходуют
+ * бюджет maxRetries — планировщик «пытается, пока не получится» в пределах
+ * дедлайна операции (или этого потолка).
+ */
+const RATE_LIMIT_RETRY_CAP = 20;
+
 function extractStatus(err: Error): number | null {
   if (err instanceof LLMRateLimitError) return err.status;
   if (err.name === "LLMRateLimitError") {
@@ -86,6 +94,12 @@ function extractStatus(err: Error): number | null {
   }
   const m = /\((\d{3})\)/.exec(err.message);
   return m ? Number(m[1]) : null;
+}
+
+/** Ошибки рейт-лимита (429/408): их ретраим вплоть до дедлайна операции. */
+export function isRateLimitError(err: Error): boolean {
+  const status = extractStatus(err);
+  return status === 408 || status === 429;
 }
 
 function retryAfterOf(err: Error): number | null {
@@ -128,6 +142,13 @@ export class TreeScheduler {
   private running = 0;
   private cache: LLMCache;
   private opDeadlineMs: number;
+
+  /**
+   * Хук прогресса при ожидании рейт-лимита (429/408): вызывается перед паузой
+   * перед следующей попыткой. Позволяет отдавать в UI сообщение вроде
+   * «Сервис ограничил частоту запросов — повторяю…» вместо «застрявшего» спиннера.
+   */
+  onBackoff: ((delayMs: number, attempt: number) => void) | null = null;
 
   constructor(config?: SchedulerConfig, cache?: LLMCache) {
     this.config = { ...readSchedulerConfigFromEnv(), ...config };
@@ -243,7 +264,11 @@ export class TreeScheduler {
       }
 
       let modelFailed = false;
-      for (let attempt = 0; attempt <= this.config.maxRetries; attempt++) {
+      for (let attempt = 0; ; attempt++) {
+        if (deadline !== undefined && Date.now() >= deadline) {
+          modelFailed = true;
+          break;
+        }
         await this.waitForSlot(deadline);
         this.acquire();
 
@@ -280,14 +305,27 @@ export class TreeScheduler {
             `[scheduler] ${operation}/${model} попытка ${attempt + 1}: ${lastError.message.slice(0, 120)} (промпт ${lastPromptLength} симв.)`,
           );
 
-          if (shouldRetry(lastError, attempt, this.config.maxRetries)) {
-            await sleep(retryDelayMs(lastError, attempt));
-            continue;
+          // Рейт-лимит (429/408) ретраим до дедлайна операции, НЕ расходуя
+          // бюджет maxRetries («пытаемся, пока не получится»). Прочие ошибки
+          // по-прежнему ограничены maxRetries.
+          const rateLimited = isRateLimitError(lastError);
+          const timeLeft = deadline !== undefined ? deadline - Date.now() : Infinity;
+          const retryAllowed = rateLimited
+            ? attempt < RATE_LIMIT_RETRY_CAP
+            : shouldRetry(lastError, attempt, this.config.maxRetries);
+
+          if (!retryAllowed || timeLeft <= 0) {
+            modelFailed = true;
+            break;
           }
-          modelFailed = true;
-          break;
+
+          const delay = Math.min(retryDelayMs(lastError, attempt), timeLeft);
+          if (rateLimited) {
+            this.onBackoff?.(delay, attempt);
+          }
+          await sleep(delay);
+          continue;
         }
-        attemptsMade = attempt + 1;
       }
       if (modelFailed && allModels.indexOf(model) < allModels.length - 1) {
         console.warn(`[scheduler] ${operation}: модель ${model} исчерпана, пробуем fallback...`);
@@ -330,7 +368,7 @@ export class TreeScheduler {
 
     for (const model of allModels) {
       let modelFailed = false;
-      for (let attempt = 0; attempt <= this.config.maxRetries; attempt++) {
+      for (let attempt = 0; ; attempt++) {
         if (deadline !== null && Date.now() >= deadline) {
           throw new LLMRetriesExhaustedError(
             lastError ?? new Error("Таймаут LLM-операции"),
@@ -379,12 +417,25 @@ export class TreeScheduler {
           if (err instanceof LLMMockError || lastError instanceof LLMMockError) {
             throw new LLMRetriesExhaustedError(lastError, attempt);
           }
-          if (shouldRetry(lastError, attempt, this.config.maxRetries)) {
-            await sleep(retryDelayMs(lastError, attempt));
-            continue;
+
+          // Рейт-лимит (429/408) ретраим до дедлайна операции, не расходуя
+          // бюджет maxRetries — как в execute().
+          const rateLimited = isRateLimitError(lastError);
+          const timeLeft = deadline !== null ? deadline - Date.now() : Infinity;
+          const retryAllowed = rateLimited
+            ? attempt < RATE_LIMIT_RETRY_CAP
+            : shouldRetry(lastError, attempt, this.config.maxRetries);
+
+          if (!retryAllowed || timeLeft <= 0) {
+            modelFailed = true;
+            break;
           }
-          modelFailed = true;
-          break;
+
+          const delay = Math.min(retryDelayMs(lastError, attempt), timeLeft);
+          if (rateLimited) {
+            this.onBackoff?.(delay, attempt);
+          }
+          await sleep(delay);
         } finally {
           // Гарантированно освобождаем слот, в т.ч. при раннем прекращении
           // итерации потребителем (возврат/прерывание потока).

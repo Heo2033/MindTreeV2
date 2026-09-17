@@ -51,8 +51,11 @@ class GraphScreen extends ConsumerStatefulWidget {
 class _GraphScreenState extends ConsumerState<GraphScreen> {
   String? _selectedId;
   bool _showLegend = false;
+  bool _hiddenPanelOpen = true;
   final Set<String> _expanding = {};
   final Set<String> _generating = {};
+  final Set<String> _revealingHidden = {};
+  final GlobalKey<GraphCanvasState> _canvasKey = GlobalKey<GraphCanvasState>();
 
   @override
   void initState() {
@@ -92,6 +95,13 @@ class _GraphScreenState extends ConsumerState<GraphScreen> {
     });
   }
 
+  void _onRevealHidden(String id) {
+    setState(() => _revealingHidden.add(id));
+    ref.read(graphStoreProvider.notifier).expandNode(id).whenComplete(() {
+      if (mounted) setState(() => _revealingHidden.remove(id));
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = ref.watch(graphStoreProvider);
@@ -115,6 +125,13 @@ class _GraphScreenState extends ConsumerState<GraphScreen> {
     final selectedActions = selected != null
         ? nodeActions(selected, state.nodes, state.visibleLevel, state.revealedNodes)
         : null;
+
+    // Узлы, у которых есть скрытые ещё не показанные подразделы — кандидаты
+    // панели «Есть подразделы», как в web Graph.tsx (canDeepen).
+    final deepenCandidates = state.nodes.where((n) {
+      final a = nodeActions(n, state.nodes, state.visibleLevel, state.revealedNodes);
+      return a.canReveal;
+    }).toList();
 
     return Column(
       children: [
@@ -148,6 +165,7 @@ class _GraphScreenState extends ConsumerState<GraphScreen> {
           child: Stack(
             children: [
               GraphCanvas(
+                key: _canvasKey,
                 nodes: layout.nodes,
                 edges: layout.edges,
                 selectedNodeId: _selectedId,
@@ -160,11 +178,76 @@ class _GraphScreenState extends ConsumerState<GraphScreen> {
                   context.go('/topic/focus');
                 },
               ),
+              // Controls: zoom in/out/fit (как web Controls)
+              Positioned(
+                bottom: 16,
+                right: 16,
+                child: _GraphControls(
+                  onZoomIn: () => _canvasKey.currentState?.zoomBy(1.3),
+                  onZoomOut: () => _canvasKey.currentState?.zoomBy(1 / 1.3),
+                  onFit: () => _canvasKey.currentState?.fitView(),
+                ),
+              ),
+              // MiniMap (как web ReactFlow MiniMap)
+              if (layout.nodes.isNotEmpty)
+                Positioned(
+                  bottom: 16,
+                  left: 16,
+                  child: _MiniMap(nodes: layout.nodes, edges: layout.edges),
+                ),
+              // Панель «Есть подразделы» — узлы со скрытыми детьми (web Graph.tsx)
+              if (deepenCandidates.isNotEmpty)
+                Positioned(
+                  top: 12,
+                  right: 12,
+                  child: _HiddenNodesPanel(
+                    nodes: deepenCandidates,
+                    hiddenCount: hiddenCount,
+                    visibleLevel: state.visibleLevel,
+                    open: _hiddenPanelOpen,
+                    busyId: _revealingHidden.isEmpty
+                        ? null
+                        : _revealingHidden.first,
+                    onToggle: () => setState(() => _hiddenPanelOpen = !_hiddenPanelOpen),
+                    onReveal: _onRevealHidden,
+                  ),
+                ),
               if (state.pipeline.running)
                 _PipelineOverlay(
                   phase: state.pipeline.phase,
                   message: state.pipeline.message,
                   stats: state.pipeline.stats,
+                ),
+              if (state.contentFilling)
+                Positioned(
+                  bottom: 16,
+                  left: 16,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: Theme.of(context).colorScheme.surfaceContainer,
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(
+                          color: Theme.of(context).colorScheme.outlineVariant),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Loader(size: LoaderSize.sm),
+                        const SizedBox(width: 8),
+                        Text(
+                          'Заполнение контента…',
+                          style:
+                              Theme.of(context).textTheme.bodySmall?.copyWith(
+                                    color: Theme.of(context)
+                                        .colorScheme
+                                        .onSurfaceVariant,
+                                  ),
+                        ),
+                      ],
+                    ),
+                  ),
                 ),
               if (layout.nodes.isEmpty && !state.pipeline.running)
                 Center(
@@ -502,14 +585,14 @@ class _DetailPanel extends StatelessWidget {
                 ),
               if (!node.contentLoaded)
                 AppButton(
-                  'Сгенерировать контент',
-                  icon: Icons.auto_awesome,
+                  generating ? 'Генерация…' : 'Сгенерировать контент',
+                  icon: generating ? null : Icons.auto_awesome,
                   variant: AppButtonVariant.primary,
                   size: AppButtonSize.sm,
                   busy: generating,
-                  onPressed: onGenerate,
+                  onPressed: generating ? null : onGenerate,
                 ),
-              AppButton(
+               AppButton(
                 'Фокус',
                 icon: Icons.center_focus_strong,
                 size: AppButtonSize.sm,
@@ -521,4 +604,328 @@ class _DetailPanel extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Панель «Есть подразделы» — список узлов со скрытыми детьми (web Graph.tsx).
+class _HiddenNodesPanel extends StatelessWidget {
+  final List<KnowledgeNode> nodes;
+  final int hiddenCount;
+  final int visibleLevel;
+  final bool open;
+  final String? busyId;
+  final VoidCallback onToggle;
+  final void Function(String id) onReveal;
+
+  const _HiddenNodesPanel({
+    required this.nodes,
+    required this.hiddenCount,
+    required this.visibleLevel,
+    required this.open,
+    required this.busyId,
+    required this.onToggle,
+    required this.onReveal,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final text = Theme.of(context).textTheme;
+    return Container(
+      width: 240,
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHigh.withValues(alpha: 0.95),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: scheme.outlineVariant),
+        boxShadow: [
+          BoxShadow(
+            color: scheme.shadow.withValues(alpha: 0.15),
+            blurRadius: 16,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          InkWell(
+            onTap: onToggle,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      'Есть подразделы (${nodes.length})',
+                      style: text.titleSmall,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  Icon(
+                    open ? Icons.keyboard_arrow_up : Icons.keyboard_arrow_down,
+                    size: 18,
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (hiddenCount > 0 && visibleLevel < 5)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                decoration: BoxDecoration(
+                  color: scheme.surfaceContainer,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: scheme.outlineVariant,
+                    style: BorderStyle.solid,
+                  ),
+                ),
+                child: Text(
+                  'Скрыто $hiddenCount узл.',
+                  style: text.bodySmall?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                    fontSize: 11,
+                  ),
+                ),
+              ),
+            ),
+          if (open) ...[
+            const Divider(height: 1),
+            Flexible(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 288),
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  itemCount: nodes.length,
+                  itemBuilder: (context, i) {
+                    final n = nodes[i];
+                    final busy = busyId == n.id;
+                    return InkWell(
+                      onTap: () => onReveal(n.id),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 6),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                n.label,
+                                style: text.bodySmall,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            InkWell(
+                              onTap: busy ? null : () => onReveal(n.id),
+                              borderRadius: BorderRadius.circular(6),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 8, vertical: 3),
+                                decoration: BoxDecoration(
+                                  border: Border.all(
+                                    color: scheme.primary,
+                                    width: 1,
+                                  ),
+                                  borderRadius: BorderRadius.circular(6),
+                                ),
+                                child: Text(
+                                  busy ? '…' : 'Раскрыть',
+                                  style: text.labelSmall?.copyWith(
+                                    color: scheme.primary,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// Zoom/fit controls overlay (как web Controls + ReactFlow).
+class _GraphControls extends StatelessWidget {
+  final VoidCallback onZoomIn;
+  final VoidCallback onZoomOut;
+  final VoidCallback onFit;
+
+  const _GraphControls({
+    required this.onZoomIn,
+    required this.onZoomOut,
+    required this.onFit,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      decoration: BoxDecoration(
+        color: scheme.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: scheme.outlineVariant),
+        boxShadow: [
+          BoxShadow(
+            color: scheme.shadow.withValues(alpha: 0.1),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IconButton(
+            tooltip: 'Приблизить',
+            icon: const Icon(Icons.zoom_in, size: 20),
+            onPressed: onZoomIn,
+            visualDensity: VisualDensity.compact,
+          ),
+          const Divider(height: 1),
+          IconButton(
+            tooltip: 'Вместить',
+            icon: const Icon(Icons.fit_screen, size: 20),
+            onPressed: onFit,
+            visualDensity: VisualDensity.compact,
+          ),
+          const Divider(height: 1),
+          IconButton(
+            tooltip: 'Отдалить',
+            icon: const Icon(Icons.zoom_out, size: 20),
+            onPressed: onZoomOut,
+            visualDensity: VisualDensity.compact,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// MiniMap overlay — показывает обзор всего дерева с индикатором viewport.
+/// Mirrors web ReactFlow MiniMap.
+class _MiniMap extends StatelessWidget {
+  final List<GraphLayoutNode> nodes;
+  final List<GraphLayoutEdge> edges;
+
+  const _MiniMap({
+    required this.nodes,
+    required this.edges,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    if (nodes.isEmpty) return const SizedBox.shrink();
+
+    // Compute world bounds
+    double minX = double.infinity, minY = double.infinity;
+    double maxX = double.negativeInfinity, maxY = double.negativeInfinity;
+    for (final n in nodes) {
+      if (n.x < minX) minX = n.x;
+      if (n.y < minY) minY = n.y;
+      if (n.x + n.w > maxX) maxX = n.x + n.w;
+      if (n.y + n.h > maxY) maxY = n.y + n.h;
+    }
+    const pad = 50.0;
+    minX -= pad; minY -= pad;
+    maxX += pad; maxY += pad;
+    final worldW = maxX - minX;
+    final worldH = maxY - minY;
+
+    const mapW = 180.0;
+    const mapH = 120.0;
+    final s = math.min(mapW / worldW, mapH / worldH);
+    final offX = (mapW - worldW * s) / 2;
+    final offY = (mapH - worldH * s) / 2;
+
+    return Container(
+      width: mapW + 8,
+      height: mapH + 8,
+      decoration: BoxDecoration(
+        color: scheme.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: scheme.outlineVariant),
+        boxShadow: [
+          BoxShadow(
+            color: scheme.shadow.withValues(alpha: 0.1),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      padding: const EdgeInsets.all(4),
+      child: CustomPaint(
+        size: const Size(mapW, mapH),
+        painter: _MiniMapPainter(
+          nodes: nodes,
+          edges: edges,
+          minX: minX, minY: minY,
+          scale: s, offX: offX, offY: offY,
+        ),
+      ),
+    );
+  }
+}
+
+class _MiniMapPainter extends CustomPainter {
+  final List<GraphLayoutNode> nodes;
+  final List<GraphLayoutEdge> edges;
+  final double minX, minY, scale, offX, offY;
+
+  _MiniMapPainter({
+    required this.nodes,
+    required this.edges,
+    required this.minX, required this.minY,
+    required this.scale, required this.offX, required this.offY,
+  });
+
+  double _sx(double x) => (x - minX) * scale + offX;
+  double _sy(double y) => (y - minY) * scale + offY;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final nodePaint = Paint()..style = PaintingStyle.fill;
+    final edgePaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 0.5;
+
+    for (final e in edges) {
+      final src = nodes.where((n) => n.id == e.source).firstOrNull;
+      final tgt = nodes.where((n) => n.id == e.target).firstOrNull;
+      if (src == null || tgt == null) continue;
+      edgePaint.color = e.color.withValues(alpha: 0.3);
+      canvas.drawLine(
+        Offset(_sx(src.x + src.w / 2), _sy(src.y + src.h / 2)),
+        Offset(_sx(tgt.x + tgt.w / 2), _sy(tgt.y + tgt.h / 2)),
+        edgePaint,
+      );
+    }
+
+    for (final n in nodes) {
+      nodePaint.color = n.color;
+      canvas.drawRect(
+        Rect.fromLTWH(_sx(n.x), _sy(n.y), n.w * scale, n.h * scale),
+        nodePaint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _MiniMapPainter oldDelegate) => true;
 }

@@ -1,4 +1,5 @@
 mod server_manager;
+mod system;
 
 use tauri::Manager;
 
@@ -18,8 +19,10 @@ pub fn run() {
             mindtree_tauri_common::commands::get_secret,
             mindtree_tauri_common::commands::delete_secret,
             server_manager::get_server_port,
+            server_manager::get_server_info,
             server_manager::server_status,
             server_manager::stop_server_command,
+            system::open_app_data_dir,
         ])
         .setup(|app| {
             mindtree_native::cleanup_stale_tmp(app.handle());
@@ -39,7 +42,7 @@ pub fn run() {
     app.run(|app_handle, event| {
         if let tauri::RunEvent::Exit = event {
             let state = app_handle.state::<server_manager::ServerState>();
-            let _ = server_manager::stop_server(&state);
+            let _ = server_manager::stop_server(&app_handle, &state);
         }
     });
 }

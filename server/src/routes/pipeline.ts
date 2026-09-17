@@ -4,6 +4,23 @@ import { scopeNodeIds, scopeId } from "../domain/scopedIds.js";
 import { getDb } from "../db/connection.js";
 import { getScheduler } from "../llm/scheduler.js";
 
+// Число активных форграунд-генераций (/api/pipeline/generate). Пока идёт хотя бы
+// одна, фоновое заполнение контента приостанавливается: фоновые 429 только
+// «разогревают» общий cooldown рейт-лимита и голодают основной поток.
+let foregroundGenerations = 0;
+
+export function beginForegroundGeneration(): void {
+  foregroundGenerations++;
+}
+
+export function endForegroundGeneration(): void {
+  foregroundGenerations = Math.max(0, foregroundGenerations - 1);
+}
+
+export function isForegroundGenerationActive(): boolean {
+  return foregroundGenerations > 0;
+}
+
 export async function pipelineRoutes(app: FastifyInstance) {
   app.post("/generate", async (request, reply) => {
     const body = (request.body ?? {}) as {
@@ -31,6 +48,18 @@ export async function pipelineRoutes(app: FastifyInstance) {
     };
 
     const engine = new KnowledgeGraphEngine();
+    const scheduler = getScheduler();
+    const prevBackoff = scheduler.onBackoff;
+    beginForegroundGeneration();
+    // Во время ожидания рейт-лимита сообщаем клиенту, что генерация продолжается,
+    // а не «зависла» — UI держит спиннер с понятным сообщением.
+    scheduler.onBackoff = (delayMs) => {
+      const waitS = Math.max(1, Math.ceil(delayMs / 1000));
+      sendEvent("progress", {
+        phase: "structure",
+        message: `Сервис ограничил частоту запросов — повторяю (ждать ~${waitS} с)…`,
+      });
+    };
 
     try {
       const { nodes, warnings } = await engine.generate(
@@ -99,6 +128,9 @@ export async function pipelineRoutes(app: FastifyInstance) {
       sendEvent("error", {
         message: err instanceof Error ? err.message : String(err),
       });
+    } finally {
+      scheduler.onBackoff = prevBackoff;
+      endForegroundGeneration();
     }
 
     reply.raw.end();
@@ -330,6 +362,7 @@ function scheduleBackgroundFill(topicId: string, engine: KnowledgeGraphEngine): 
   void (async () => {
     const db = getDb();
     const scheduler = getScheduler();
+    const backgroundIntervalMs = readBackgroundIntervalMs();
     try {
       const rows = db
         .prepare(
@@ -347,6 +380,12 @@ function scheduleBackgroundFill(topicId: string, engine: KnowledgeGraphEngine): 
           .get(id, topicId) as { content_loaded: number } | undefined;
         if (!stillPending || stillPending.content_loaded === 1) continue;
 
+        // Пока идёт форграунд-генерация — фон не мешаем: фоновые 429 только
+        // «разогревают» общий cooldown рейт-лимита и голодают основной поток.
+        while (isForegroundGenerationActive()) {
+          await sleep(500);
+        }
+
         // Интерактивные запросы (тьютор и пр.) не должны голодать из-за фона:
         // резервируем минимум один слот планировщика. Если все слоты заняты,
         // ждём освобождения (с тем же глобальным дедлайном операции).
@@ -354,7 +393,13 @@ function scheduleBackgroundFill(topicId: string, engine: KnowledgeGraphEngine): 
           scheduler.maxConcurrency > 1 &&
           scheduler.runningCount >= scheduler.maxConcurrency
         ) {
-          await new Promise((r) => setTimeout(r, 150));
+          await sleep(150);
+        }
+
+        // Пауза между фоновыми узлами: спокойный расход RPM/RPD, чтобы не
+        // упираться в лимиты провайдера (и не кормить общий cooldown 429-ками).
+        if (backgroundIntervalMs > 0) {
+          await sleep(backgroundIntervalMs);
         }
 
         try {
@@ -367,4 +412,21 @@ function scheduleBackgroundFill(topicId: string, engine: KnowledgeGraphEngine): 
       backgroundFillInFlight.delete(topicId);
     }
   })();
+}
+
+/**
+ * Пауза между фоновыми узлами при дозаполнении контента. По умолчанию 3 с —
+ * достаточно, чтобы не упираться в низкие RPM/RPD-лимиты провайдера и не
+ * циклично получать 429 (каждый из которых обновляет глобальный cooldown).
+ * 0 — отключить паузу.
+ */
+function readBackgroundIntervalMs(): number {
+  const raw = process.env.LLM_BACKGROUND_INTERVAL_MS;
+  if (raw === undefined || raw === "") return 3000;
+  const num = Number(raw);
+  return Number.isFinite(num) && num >= 0 ? Math.trunc(num) : 3000;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

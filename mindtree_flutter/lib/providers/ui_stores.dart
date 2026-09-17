@@ -134,6 +134,7 @@ class GraphState {
   final int visibleLevel;
   final Set<String> revealedNodes;
   final bool loading;
+  final bool contentFilling;
   final String? error;
   final PipelineState pipeline;
 
@@ -145,6 +146,7 @@ class GraphState {
     this.visibleLevel = 2,
     this.revealedNodes = const {},
     this.loading = false,
+    this.contentFilling = false,
     this.error,
     this.pipeline = const PipelineState(),
   });
@@ -157,6 +159,7 @@ class GraphState {
     int? visibleLevel,
     Set<String>? revealedNodes,
     bool? loading,
+    bool? contentFilling,
     String? error,
     PipelineState? pipeline,
   }) =>
@@ -168,6 +171,7 @@ class GraphState {
         visibleLevel: visibleLevel ?? this.visibleLevel,
         revealedNodes: revealedNodes ?? this.revealedNodes,
         loading: loading ?? this.loading,
+        contentFilling: contentFilling ?? this.contentFilling,
         error: error,
         pipeline: pipeline ?? this.pipeline,
       );
@@ -343,6 +347,8 @@ class GraphNotifier extends StateNotifier<GraphState> {
       _contentFillInFlight.remove(topicId);
       return;
     }
+    state = state.copyWith(contentFilling: true);
+    int filled = 0;
     try {
       final all = await repo.listNodes(topicId);
       final targets = all.where((n) => !n.contentLoaded).toList()
@@ -351,14 +357,29 @@ class GraphNotifier extends StateNotifier<GraphState> {
         if (state.topicId != topicId) return;
         try {
           await engine.generateNodeContentFromDb(topicId, node.id);
+          filled++;
         } catch (_) {
+          // После ошибки — пауза, чтобы scheduler успел восстановить cooldown.
+          await Future<void>.delayed(const Duration(seconds: 3));
           continue;
         }
         if (state.topicId != topicId) return;
-        state = state.copyWith(nodes: await repo.listNodes(topicId));
+        // Обновляем состояние каждые несколько узлов, а не после каждого,
+        // чтобы не перегружать Riverpod.
+        if (filled % 3 == 0) {
+          state = state.copyWith(nodes: await repo.listNodes(topicId));
+        }
+        // Пауза между вызовами (как LLM_BACKGROUND_INTERVAL_MS в server/pipeline.ts),
+        // чтобы не упереться в RPM/RPD лимиты.
+        await Future<void>.delayed(const Duration(seconds: 2));
       }
     } finally {
       _contentFillInFlight.remove(topicId);
+      state = state.copyWith(contentFilling: false);
+      // Финальное обновление состояния.
+      if (state.topicId == topicId) {
+        state = state.copyWith(nodes: await repo.listNodes(topicId));
+      }
     }
   }
 
@@ -376,13 +397,19 @@ class GraphNotifier extends StateNotifier<GraphState> {
     );
   }
 
+  /// Max visible tree depth for the user's target mastery level.
+  /// Mirrors web: beginner→2, intermediate→3, advanced+→4.
   static int _visibleLevel(MasteryLevel level) {
     switch (level) {
       case MasteryLevel.awareness:
       case MasteryLevel.basicUnderstanding:
         return 2;
-      default:
+      case MasteryLevel.solidUnderstanding:
+      case MasteryLevel.practicalApplication:
         return 3;
+      case MasteryLevel.advanced:
+      case MasteryLevel.expert:
+        return 4;
     }
   }
 
@@ -430,6 +457,7 @@ class SessionState {
   final int? answeredStepView;
   final bool studying;
   final bool loading;
+  final bool advancing;
   final String? error;
 
   const SessionState({
@@ -441,6 +469,7 @@ class SessionState {
     this.answeredStepView,
     this.studying = false,
     this.loading = false,
+    this.advancing = false,
     this.error,
   });
 
@@ -453,6 +482,7 @@ class SessionState {
     int? Function()? answeredStepView,
     bool? studying,
     bool? loading,
+    bool? advancing,
     String? error,
   }) =>
       SessionState(
@@ -465,6 +495,7 @@ class SessionState {
             answeredStepView != null ? answeredStepView() : this.answeredStepView,
         studying: studying ?? this.studying,
         loading: loading ?? this.loading,
+        advancing: advancing ?? this.advancing,
         error: error,
       );
 }
@@ -570,7 +601,7 @@ class SessionNotifier extends StateNotifier<SessionState> {
   Future<void> completeConcept(String itemId, {String? nodeId, String quality = 'correct'}) async {
     final sessionId = state.session?.id;
     if (sessionId == null) return;
-    state = state.copyWith(loading: true, error: null, answeredStepView: () => null);
+    state = state.copyWith(loading: true, error: null, answeredStepView: () => null, advancing: true);
     try {
       await _engine.markItemCompleted(sessionId, itemId, nodeId: nodeId, quality: quality);
       final session = await _engine.getSession(sessionId);
@@ -584,9 +615,10 @@ class SessionNotifier extends StateNotifier<SessionState> {
         activity: null,
         studying: false,
         loading: false,
+        advancing: false,
       );
     } catch (e) {
-      state = state.copyWith(loading: false, error: '$e');
+      state = state.copyWith(loading: false, error: '$e', advancing: false);
     }
   }
 
@@ -602,6 +634,10 @@ class SessionNotifier extends StateNotifier<SessionState> {
       state = state.copyWith(loading: false, error: '$e');
       return null;
     }
+  }
+
+  void resetAnsweredView() {
+    state = state.copyWith(answeredStepView: () => null);
   }
 
   void reset() {

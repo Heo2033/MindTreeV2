@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/nicegram/nicegram-tauri/refs/heads/main/crates/tauri-utils/schema.json",
+  "$schema": "https://schema.tauri.app/config/2",
   "productName": "MindTree",
   "version": "0.1.0",
   "identifier": "com.mindtree.desktop",
@@ -29,6 +29,10 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "publisher": "MindTree",
+    "copyright": "Copyright © 2026 MindTree",
+    "shortDescription": "Персональный обучающий ассистент с деревом знаний",
+    "longDescription": "MindTree — локальное десктопное приложение, которое строит дерево знаний по любому предмету и ведёт персонализацию обучения (уроки, квизы, репетитор, диагностика) с собственной локальной базой данных.",
     "resources": {
       "../../../server/sidecar": "server-sidecar"
     },

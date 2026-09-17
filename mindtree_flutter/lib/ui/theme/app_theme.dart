@@ -11,6 +11,32 @@ class AppColors {
   static const Color ink = Color(0xFF1F2937);
   static const Color muted = Color(0xFF6B7280);
 
+  // Shadows matching web (--shadow-card, --shadow-pop)
+  static const List<BoxShadow> shadowCard = [
+    BoxShadow(
+      color: Color(0x0A000000),
+      blurRadius: 4,
+      offset: Offset(0, 1),
+    ),
+    BoxShadow(
+      color: Color(0x0A000000),
+      blurRadius: 6,
+      offset: Offset(0, 2),
+    ),
+  ];
+  static const List<BoxShadow> shadowPop = [
+    BoxShadow(
+      color: Color(0x0F000000),
+      blurRadius: 4,
+      offset: Offset(0, 2),
+    ),
+    BoxShadow(
+      color: Color(0x14000000),
+      blurRadius: 8,
+      offset: Offset(0, 6),
+    ),
+  ];
+
   static Color success(BuildContext context) =>
       Theme.of(context).brightness == Brightness.dark
           ? const Color(0xFF4ADE80)
@@ -65,9 +91,36 @@ class IgnorePointerPageTransitionsBuilder extends PageTransitionsBuilder {
 }
 
 ThemeData _baseTheme(ColorScheme scheme) {
+  final baseTextTheme = Typography.material2021().black;
+  final letterSpacing = -0.011;
+
+  TextStyle addLetterSpacing(TextStyle s) => s.copyWith(
+        letterSpacing: letterSpacing * (s.fontSize ?? 14),
+        height: 1.5,
+      );
+
+  final textTheme = TextTheme(
+    displayLarge: addLetterSpacing(baseTextTheme.displayLarge!),
+    displayMedium: addLetterSpacing(baseTextTheme.displayMedium!),
+    displaySmall: addLetterSpacing(baseTextTheme.displaySmall!),
+    headlineLarge: addLetterSpacing(baseTextTheme.headlineLarge!),
+    headlineMedium: addLetterSpacing(baseTextTheme.headlineMedium!),
+    headlineSmall: addLetterSpacing(baseTextTheme.headlineSmall!),
+    titleLarge: addLetterSpacing(baseTextTheme.titleLarge!),
+    titleMedium: addLetterSpacing(baseTextTheme.titleMedium!),
+    titleSmall: addLetterSpacing(baseTextTheme.titleSmall!),
+    bodyLarge: addLetterSpacing(baseTextTheme.bodyLarge!),
+    bodyMedium: addLetterSpacing(baseTextTheme.bodyMedium!),
+    bodySmall: addLetterSpacing(baseTextTheme.bodySmall!),
+    labelLarge: addLetterSpacing(baseTextTheme.labelLarge!),
+    labelMedium: addLetterSpacing(baseTextTheme.labelMedium!),
+    labelSmall: addLetterSpacing(baseTextTheme.labelSmall!),
+  );
+
   return ThemeData(
     colorScheme: scheme,
     useMaterial3: true,
+    textTheme: textTheme,
     pageTransitionsTheme: const PageTransitionsTheme(
       builders: {
         TargetPlatform.android: IgnorePointerPageTransitionsBuilder(),

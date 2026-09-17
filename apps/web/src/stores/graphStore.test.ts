@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { KnowledgeNode } from "@mindtree/types";
-import { isNodeVisible, nodeHasHiddenChildren, maxVisibleLevelForTarget } from "./graphStore";
+import {
+  decorateLLMError,
+  isNodeVisible,
+  nodeHasHiddenChildren,
+  maxVisibleLevelForTarget,
+} from "./graphStore";
 
 function node(
   id: string,
@@ -91,5 +96,20 @@ describe("maxVisibleLevelForTarget", () => {
   it("глубокие цели показывают 3 уровня", () => {
     expect(maxVisibleLevelForTarget("solid_understanding")).toBe(3);
     expect(maxVisibleLevelForTarget("expert")).toBe(3);
+  });
+});
+
+describe("decorateLLMError", () => {
+  it("добавляет подсказку про ключ для 401/Incorrect API key", () => {
+    const decorated = decorateLLMError("LLM API ошибка (401): Incorrect API key provided");
+    expect(decorated).toContain("проверьте API-ключ в Настройках");
+    expect(decorated).toContain("Incorrect API key");
+  });
+
+  it("не трогает обычные транспортные/иные ошибки", () => {
+    expect(decorateLLMError("Соединение прервано: дерево не было завершено")).toBe(
+      "Соединение прервано: дерево не было завершено",
+    );
+    expect(decorateLLMError("Таймаут соединения с сервером")).toBe("Таймаут соединения с сервером");
   });
 });

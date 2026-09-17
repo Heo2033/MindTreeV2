@@ -44,6 +44,18 @@ const idlePipeline = (): PipelineState => ({
 });
 
 /**
+ * При ошибках провайдера про API-ключ (401/403) добавляем понятную подсказку,
+ * чтобы пользователь видел причину, а не абстрактный транспортный «Failed to fetch».
+ */
+const API_KEY_ERROR_RE =
+  /Incorrect API key|Invalid API key|invalid_api_key|Unauthorized|authentication failed|\b401\b|\b403\b|ключ.*(не.*принят|неверн)|api.?key/i;
+
+export function decorateLLMError(message: string): string {
+  if (!API_KEY_ERROR_RE.test(String(message))) return message;
+  return `${message} — проверьте API-ключ в Настройках: он должен соответствовать выбранному провайдеру.`;
+}
+
+/**
  * Максимальный видимый уровень узлов в зависимости от target_level.
  * Структура генерируется целиком, но пользователю показываются только уровни,
  * уместные для его целевого уровня знаний. Остальные раскрываются по запросу.
@@ -185,12 +197,13 @@ export const useGraphStore = create<GraphState>((set, get) => ({
           // Уже сохранённые узлы (частичное дерево) НЕ очищаем: Graph покажет
           // их вместе с сообщением об ошибке.
           const data = ev.data as { message?: unknown };
-          const msg =
+          const raw =
             data && typeof data.message === "string" && data.message.trim()
               ? data.message
               : ev.event === "__error__"
                 ? "Соединение прервано: дерево не было завершено"
                 : "Ошибка генерации";
+          const msg = decorateLLMError(raw);
           set({ pipeline: { ...idlePipeline(), status: "error", message: msg }, error: msg });
           return false;
         }
@@ -202,7 +215,7 @@ export const useGraphStore = create<GraphState>((set, get) => ({
       set({ pipeline: { ...idlePipeline(), status: "error", message: msg }, error: msg });
       return false;
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Ошибка генерации";
+      const msg = decorateLLMError(err instanceof Error ? err.message : "Ошибка генерации");
       set({ pipeline: { ...idlePipeline(), status: "error", message: msg }, error: msg });
       return false;
     }

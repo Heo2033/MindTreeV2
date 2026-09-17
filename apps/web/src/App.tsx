@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { Routes, Route } from "react-router-dom";
 import { HomeScreen } from "./screens/Home";
 import { NewTopicScreen } from "./screens/NewTopic";
@@ -14,10 +15,30 @@ import { ReviewScreen } from "./screens/Review";
 import { FinalAssessmentScreen } from "./screens/FinalAssessment";
 import { AnalyticsScreen } from "./screens/Analytics";
 import { SettingsScreen } from "./screens/Settings";
+import { configApi } from "./api";
+import { fetchKey, loadMindTreeSettings } from "@mindtree/tauri-common";
 
-export { setApiBase } from "./api/client";
+export { setApiBase, setAuthToken } from "./api/client";
+
+const SECRET_KEY_ID = "default";
 
 export default function App() {
+  useEffect(() => {
+    void (async () => {
+      try {
+        const s = await configApi.get();
+        if (s.effective.apiKeyConfigured) return;
+        const stored = await fetchKey(SECRET_KEY_ID).catch(() => null);
+        if (!stored) return;
+        const local = await loadMindTreeSettings().catch(() => null);
+        if (local?.provider === "ollama") return;
+        await configApi.apply({ apiKey: stored });
+      } catch {
+        // ключ применится при открытии экрана настроек
+      }
+    })();
+  }, []);
+
   return (
     <Routes>
       <Route path="/" element={<HomeScreen />} />

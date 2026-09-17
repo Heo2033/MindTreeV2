@@ -38,7 +38,11 @@ export const useTopicStore = create<TopicState>((set, get) => ({
   },
 
   async removeTopic(id) {
-    await topicsApi.remove(id);
-    set({ topics: get().topics.filter((t) => t.id !== id) });
+    try {
+      await topicsApi.remove(id);
+      set({ topics: get().topics.filter((t) => t.id !== id), error: null });
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : "Ошибка удаления темы" });
+    }
   },
 }));

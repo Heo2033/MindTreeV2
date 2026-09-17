@@ -1,5 +1,12 @@
 import { create } from "zustand";
-import { loadSettings, saveSettings, storeKey, fetchKey, forgetKey } from "@mindtree/tauri-common";
+import {
+  loadMindTreeSettings,
+  saveMindTreeSettings,
+  storeKey,
+  fetchKey,
+  forgetKey,
+  type MindTreeSettings,
+} from "@mindtree/tauri-common";
 import {
   adminApi,
   configApi,
@@ -114,18 +121,17 @@ export const useConfigStore = create<StudioConfigState>((set, get) => ({
   async loadLocal() {
     set({ loadError: null });
     try {
-      const [settings, storedKey] = await Promise.all([loadSettings(), fetchKey(SECRET_KEY_ID)]);
-      const s = settings ?? {};
+      const [settings, storedKey] = await Promise.all([loadMindTreeSettings(), fetchKey(SECRET_KEY_ID)]);
       set({
-        provider: (s.provider as FormState["provider"]) || "auto",
-        baseUrl: String(s.baseUrl ?? ""),
-        model: String(s.model ?? ""),
-        modelStrong: String(s.modelStrong ?? ""),
-        modelFast: String(s.modelFast ?? ""),
-        temperature: s.temperature !== undefined ? String(s.temperature) : "",
-        numCtx: s.numCtx !== undefined ? String(s.numCtx) : "",
+        provider: settings.provider || "auto",
+        baseUrl: settings.baseUrl ?? "",
+        model: settings.model ?? "",
+        modelStrong: settings.modelStrong ?? "",
+        modelFast: settings.modelFast ?? "",
+        temperature: settings.temperature !== undefined ? String(settings.temperature) : "",
+        numCtx: settings.numCtx !== undefined ? String(settings.numCtx) : "",
         apiKeyStored: Boolean(storedKey),
-        persistedLocal: Object.keys(s).length > 0,
+        persistedLocal: Object.keys(settings).length > 0,
         apiKey: "",
       });
     } catch (err) {
@@ -137,22 +143,19 @@ export const useConfigStore = create<StudioConfigState>((set, get) => ({
     set({ savingLocal: true, loadError: null });
     try {
       const s = get();
-      const settings: Record<string, unknown> = {
-        version: 1,
+      const settings: MindTreeSettings = {
         provider: s.provider,
-        baseUrl: s.baseUrl.trim(),
-        model: s.model.trim(),
-        modelStrong: s.modelStrong.trim(),
-        modelFast: s.modelFast.trim(),
-        temperature: num(s.temperature),
-        numCtx: num(s.numCtx),
+        ...(s.baseUrl.trim() ? { baseUrl: s.baseUrl.trim() } : {}),
+        ...(s.model.trim() ? { model: s.model.trim() } : {}),
+        ...(s.modelStrong.trim() ? { modelStrong: s.modelStrong.trim() } : {}),
+        ...(s.modelFast.trim() ? { modelFast: s.modelFast.trim() } : {}),
+        ...(s.temperature.trim() ? { temperature: num(s.temperature) } : {}),
+        ...(s.numCtx.trim() ? { numCtx: num(s.numCtx) } : {}),
       };
-      await saveSettings(settings);
+      await saveMindTreeSettings(settings);
       if (s.apiKey.trim()) {
         await storeKey(SECRET_KEY_ID, s.apiKey.trim());
         set({ apiKeyStored: true, apiKey: "" });
-      } else if (!s.apiKeyStored && !s.apiKey.trim()) {
-        // ничего не делаем — ключ не вводили и не было сохранено
       }
       set({ persistedLocal: true, savingLocal: false });
     } catch (err) {

@@ -264,12 +264,19 @@ class LearningActivityService {
     int chosenIndex,
     ActivityStep step,
   ) {
-    final correct = chosenIndex == step.correctIndex;
+    final options = step.options;
+    final correctIdx = step.correctIndex ?? 0;
+    if (options == null || options.isEmpty) {
+      // Без вариантов ответов считаем ответ верным — fallback без данных.
+      return (correct: true, feedback: 'Варианты не сгенерированы; переходим дальше.', score: 1.0);
+    }
+    final clamped = _clamp(0, chosenIndex, options.length - 1);
+    final correct = clamped == correctIdx;
     return (
       correct: correct,
       feedback: correct
-          ? '\u041f\u0440\u0430\u0432\u0438\u043b\u044c\u043d\u043e!'
-          : '\u041d\u0435\u0432\u0435\u0440\u043d\u043e. \u041f\u0440\u0430\u0432\u0438\u043b\u044c\u043d\u044b\u0439 \u043e\u0442\u0432\u0435\u0442: ${step.options?[step.correctIndex ?? 0] ?? ''}',
+          ? 'Правильно!'
+          : 'Неверно. Правильный ответ: ${options[correctIdx]}',
       score: correct ? 1.0 : 0.0,
     );
   }

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "default_agent": "architect",
+  "model": "opencode-go/qwen3.6-plus",
+  "small_model": "opencode-go/deepseek-v4-flash",
+  "instructions": ["AGENTS.md"],
+  "skills": {
+    "paths": [".opencode/skill"]
+  },
+  "permission": {
+    "bash": {
+      "flutter *": "allow",
+      "dart *": "allow",
+      "npm *": "allow",
+      "node *": "allow",
+      "git *": "allow",
+      "*": "ask"
+    }
+  }
+}

@@ -19,6 +19,8 @@ import { quizRoutes } from "./routes/quiz.js";
 import { learnerModelRoutes } from "./routes/learnerModel.js";
 import { adminRoutes } from "./routes/admin.js";
 import { analyticsRoutes } from "./routes/analytics.js";
+import { shutdownRoutes } from "./routes/shutdown.js";
+import { installAuth } from "./auth.js";
 
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const HOST = process.env.HOST || "0.0.0.0";
@@ -29,11 +31,29 @@ async function main() {
 
   const app = Fastify({ logger: true });
 
-  await app.register(cors, { origin: true });
+  // Preflight допускает не только GET/POST: десктоп-обвязка/браузер работают с другого
+  // origin и используют DELETE/PATCH (удаление тем и вех, очистка конфига, статус вехи).
+  await app.register(cors, {
+    origin: true,
+    methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  });
 
   app.decorate("db", db);
 
+  app.addHook("onClose", async () => {
+    try {
+      db.close();
+    } catch {
+      // база уже закрыта — игнорируем
+    }
+  });
+
+  // Хук авторизации регистрируется до всех маршрутов: без токена сервер
+  // отдаёт только /api/health.
+  installAuth(app);
+
   await app.register(healthRoutes);
+  await app.register(shutdownRoutes);
   await app.register(topicRoutes, { prefix: "/api/topics" });
   await app.register(sessionRoutes, { prefix: "/api/sessions" });
   await app.register(assessmentRoutes, { prefix: "/api/assessments" });

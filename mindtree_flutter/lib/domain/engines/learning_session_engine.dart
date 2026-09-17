@@ -1,7 +1,9 @@
+import 'dart:async';
 import '../models/models.dart';
 import '../../data/database/mindtree_repository.dart';
 import '../../data/llm/scheduler.dart';
 import '../../data/llm/client.dart';
+import '../../data/prompts/prompts.dart';
 import 'learner_model_service.dart';
 import 'review_scheduler.dart';
 import 'event_bus.dart';
@@ -120,26 +122,22 @@ class LearningSessionEngine {
       final level = await learnerModel.getCurrentLevel(session.topicId);
       final knowledgeLevel = _masteryLevelToKnowledgeLevel(level);
 
-      final ontologyContext = StringBuffer();
-      if (node.oneLiner.isNotEmpty) {
-        ontologyContext.writeln('Каноническое определение: ${node.oneLiner}');
-      }
-      if (node.conceptType != null) {
-        ontologyContext.writeln('Ось классификации: ${node.conceptType!.raw}');
-      }
-
-      final prompt = _buildContentPrompt(
+      final prompt = buildContentPrompt(
         rootTopic: topicName,
         nodePath: path,
+        nodeId: node.id,
+        nodeLabel: node.label,
+        nodeOneLiner: node.oneLiner,
         siblings: siblingNodes,
         knowledgeLevel: knowledgeLevel,
         goal: session.goal,
         nodeLevel: node.level,
         isRoot: node.level <= 1 && node.parentId == null,
         isCriticalDomain: _isCriticalDomain(topicName, path),
-        ontologyContext: ontologyContext.toString(),
-        nodeId: node.id,
-        nodeTitle: node.label,
+        ontologyContext: {
+          'canonical_definition': node.oneLiner.isNotEmpty ? node.oneLiner : null,
+          'semantic_axis': node.conceptType?.raw,
+        },
       );
 
       Map<String, dynamic> content;
@@ -297,59 +295,64 @@ class LearningSessionEngine {
     required int timeBudgetMinutes,
     required List<KnowledgeNode> nodes,
   }) async {
-    final nodesJson = nodes
-        .take(40)
-        .map((n) => '{"id":"${n.id}","label":"${n.label}","level":${n.level},"difficulty":${n.difficulty}}')
-        .join(',');
+    final nodesData = nodes.take(40).map((n) => <String, dynamic>{
+      'id': n.id,
+      'label': n.label,
+      'one_liner': n.oneLiner,
+      'importance': n.importance,
+      'difficulty': n.difficulty,
+      'estimated_time_minutes': n.estimatedTimeMinutes,
+      'prerequisites': <String>[],
+    }).toList();
 
-    final prompt = '''# Роль
-Ты — AI-методист. Составь учебный план (curriculum) для сессии изучения темы.
-
-# Контекст
-Тема: "$topicName"
-Цель: "$goal"
-Целевой уровень: "$targetLevel"
-Текущий уровень: "${currentLevel.raw}"
-Время (мин): $timeBudgetMinutes
-
-# Узлы темы (в порядке изучения):
-[$nodesJson]
-
-# Задача
-Сгенерируй JSON учебного плана — отсортированный список концептов для изучения.
-Каждый элемент:
-- id: уникальный идентификатор (itemId_N)
-- nodeId: id узла из дерева
-- label: краткое название
-- order: порядковый номер (с 1)
-- type: "explain"
-- estimatedMinutes: оценка времени в минутах (целое)
-- priority: приоритет 0.0–1.0
-- status: "pending"
-- reason: краткое объяснение почему этот концепт включён
-
-Покрой все叶子 узлы. Суммарное estimatedMinutes ≤ $timeBudgetMinutes.
-
-# Формат
-Строго JSON:
-{"sessionId":"","items":[...],"totalEstimatedMinutes":N}''';
+    final prompt = buildCurriculumPrompt(
+      topic: topicName,
+      goal: goal,
+      currentLevel: currentLevel.raw,
+      targetLevel: targetLevel,
+      timeBudgetMinutes: timeBudgetMinutes,
+      nodes: nodesData,
+    );
 
     try {
+      // Таймаут 20с — если LLM медлит, быстро переходим к детерминированному fallback.
+      // Curriculum — не критичный вызов; fallback даёт рабочий план.
       final res = await scheduler.execute<Map<String, dynamic>>(
         'curriculum',
         () => prompt,
         (raw) => parseLLMJson<Map<String, dynamic>>(raw),
+      ).timeout(
+        const Duration(seconds: 20),
+        onTimeout: () => throw TimeoutException('Curriculum LLM timeout'),
       );
-      final itemsRaw = res.result['items'] as List<dynamic>? ?? [];
-      final items = itemsRaw
-          .whereType<Map<String, dynamic>>()
-          .map(CurriculumItem.fromJson)
-          .toList();
+      final parsed = parseCurriculumResult(res.result);
+      final itemsRaw = parsed['items'] as List<Map<String, dynamic>>;
+      final nodeById = {for (final n in nodes) n.id: n};
+
+      final items = itemsRaw.asMap().entries.map((e) {
+        final i = e.key;
+        final item = e.value;
+        final nodeId = item['node_id'] as String;
+        final node = nodeById[nodeId];
+        return CurriculumItem(
+          id: 'itemId_${i + 1}',
+          nodeId: nodeId,
+          label: node?.label ?? nodeId,
+          order: (item['order'] as num?)?.toInt() ?? (i + 1),
+          type: CurriculumItemType.explain,
+          estimatedMinutes: (item['estimated_minutes'] as num?)?.toInt()
+              ?? node?.estimatedTimeMinutes ?? 5,
+          priority: node?.importance ?? 0.5,
+          status: CurriculumItemStatus.pending,
+          reason: item['why'] as String?,
+        );
+      }).toList();
+
       return Curriculum(
         sessionId: '',
         items: items,
-        totalEstimatedMinutes: (res.result['totalEstimatedMinutes'] as num?)?.toInt() ??
-            items.fold<int>(0, (s, i) => s + i.estimatedMinutes),
+        totalEstimatedMinutes: parsed['total_estimated_minutes'] as int?
+            ?? items.fold<int>(0, (s, i) => s + i.estimatedMinutes),
       );
     } catch (_) {
       final items = nodes.take(12).toList().asMap().entries.map((e) {
@@ -500,9 +503,6 @@ class LearningSessionEngine {
 
 // ─── MasteryLevel → KnowledgeLevel mapping ────────────────────────────────────
 
-const _noMetaRule = 'Не отвечайте на вопрос внутри формулировок.';
-const _alphabetRule = 'Все тексты на русском языке.';
-
 String _masteryLevelToKnowledgeLevel(MasteryLevel level) {
   switch (level) {
     case MasteryLevel.awareness:
@@ -535,174 +535,5 @@ bool _isCriticalDomain(String topicName, List<String> nodePath) {
   return _criticalDomainKeywords.any((kw) => text.contains(kw));
 }
 
-// ─── Content prompt builder (§64: sources for critical domains) ──────────────
-
-const _contentLevelTones = <String, String>{
-  'beginner':
-      'Пиши максимально доступно для новичка, без профессионального жаргона. Каждый специальный термин объясняй сразу простыми словами.',
-  'intermediate':
-      'Пиши для знакомого с основами читателя. Термины раскрывай через интуицию: сначала «как работает», затем термин.',
-  'expert':
-      'Пиши для специалиста, используй точную терминологию. Можно опускать базовые объяснения.',
-};
-
-const _contentGoalHints = <String, String>{
-  'overview': 'Цель — общий обзор: опиши суть и место понятия в теме, без глубоких деталей.',
-  'exam': 'Цель — подготовка к экзамену: делай акцент на ключевых фактах, определениях и формулировках.',
-  'deep':
-      'Цель — глубокое изучение: кроме сути кратко обозначь механизм/устройство и подтемы, которые стоит разобрать.',
-};
-
-const _rootGuidance = '''
-# Корневой узел (обзор темы)
-Это корневой/обзорный узел. СТРОГО соблюдай:
-- ТОЛЬКО интуиция «как это работает» + краткий перечень подтем (roadmap «что разберём дальше»).
-- НЕ углубляйся в механику, математику и формулы на корневом узле — это задача дочерних узлов.
-- Для цели deep особенно: покажи «зачем» и «что дальше», а не сжатую сводку.
-- Не противоречь дочерним узлам — не опережай их content.''';
-
-const _antiJargonRule = '''
-# Антижаргон (обязательное правило)
-- КАЖДЫЙ специальный термин (например «градиент лог-плотности», «score», «марковская цепь», «максимизация правдоподобия») объясни простыми словами в ТОМ ЖЕ предложении.
-- ЗАПРЕЩЕНО использовать термин, который ты не можешь объяснить простыми словами без жаргона.
-- ЗАПРЕЩЕНО давать плотную энциклопедическую выжимку: обучай читателя, а не перечисляй термины.
-- Если термин не влияет на понимание сути — опусти его.''';
-
-const _detailsInstruction =
-    '1–2 предложения (макс. 500 символов). Факты, цифры, ключевые свойства. Если понятие включает формулу или математическое выражение, записывай его в LaTeX: инлайн — \$формула\$, блочная — \$\$формула\$\$.';
-
-const _twoPartDetailsBlock = '''
-# Структура подробностей
-Для этой аудитории и цели (intermediate/beginner + deep) оформи details в ДВА абзаца, разделённых пустой строкой (\n\n), начинающихся со следующих заголовков:
-1. «Интуиция:» — 1–2 предложения простыми словами, БЕЗ терминов: как это работает.
-2. «Механика:» — ключевые термины/механизм, но КАЖДЫЙ термин сопровождай однострочным пояснением сразу после него.
-Не вылезай за лимит символов.''';
-
-const _rootFormulaBan = '''
-# Формулы на корневом узле
-Это корневой узел. НЕ пиши голые математические формулы. Опиши смысл словами (например: «сеть по более зашумленному кадру восстанавливает чуть менее зашумлённый»). Формулы и математика — на дочерние узлы.''';
-
-String _buildContentPrompt({
-  required String rootTopic,
-  required List<String> nodePath,
-  required List<String> siblings,
-  String? knowledgeLevel,
-  String? goal,
-  int nodeLevel = 1,
-  bool isRoot = false,
-  bool isCriticalDomain = false,
-  String ontologyContext = '',
-  required String nodeId,
-  required String nodeTitle,
-}) {
-  final sanitizedTopic = rootTopic
-      .replaceAll('\r', '')
-      .replaceAll(RegExp(r'^#+\s', multiLine: true), '')
-      .replaceAll(RegExp(r'^[-*]\s', multiLine: true), '')
-      .trim();
-
-  final tone = knowledgeLevel != null && _contentLevelTones.containsKey(knowledgeLevel)
-      ? '\n# Аудитория\n${_contentLevelTones[knowledgeLevel]}\n'
-      : '';
-
-  final goalBlock = goal != null && _contentGoalHints.containsKey(goal)
-      ? '\n# Цель\n${_contentGoalHints[goal]}\n'
-      : '';
-
-  final rootBlock = isRoot || nodeLevel == 1 ? _rootGuidance : '';
-  final antiJargon = knowledgeLevel != null && knowledgeLevel != 'expert' ? _antiJargonRule : '';
-  final twoPartDetails = knowledgeLevel != null && knowledgeLevel != 'expert' && goal == 'deep'
-      ? _twoPartDetailsBlock
-      : '';
-  final rootFormulaBan = isRoot || nodeLevel == 1 ? _rootFormulaBan : '';
-
-  final sourcesBlock = isCriticalDomain
-      ? '# Источники (§64: factual reliability)\nЭта тема относится к критически важной области (медицина, право, финансы, наука, экзамен).\nВключи в JSON поле sources — массив из 2–4 наиболее авторитетных источников.\nНе придумывай источники — указывай только реальные, общепризнанные.\nЕсли достоверных источников нет — верни "sources": [].\n'
-      : '';
-  final sourcesFormatNote = isCriticalDomain
-      ? 'Если sources запрошены: "sources": ["источник1", "источник2"].\nЕсли sources нет: "sources": [].'
-      : 'Если sources нет: "sources": [].';
-
-  return '''# Роль
-Ты — эксперт-энциклопедист. Дай точное, краткое описание понятия.
-
-# Контекст
-Тема: "$sanitizedTopic"
-Путь: ${nodePath.join(' → ')}
-Соседи: ${siblings.join(', ')}
-$tone$goalBlock
-$rootBlock
-$rootFormulaBan
-$ontologyContext
-# Задача
-Опиши узел «$nodeTitle»:
-
-- one_liner — СУТЬ в одном предложении (макс. 120 символов). Без воды, без вводных фраз. Прямо к делу.
-- details — КРАТКАЯ справка. $_detailsInstruction
-- analogy — НЕОБЯЗАТЕЛЬНО: бытовая метафора, 1 предложение (макс. 120 символов). Если метафора не приходит в голову — верни "".
-- relations — СВЯЗИ с другими понятиями (см. формат ниже). Генерируй 2–4 связи, если они есть.
-
-$twoPartDetails
-- analogy — НЕОБЯЗАТЕЛЬНО: бытовая метафора, 1 предложение (макс. 120 символов). Если метафора не приходит в голову — верни "".
-- relations — СВЯЗИ с другими понятиями (см. формат ниже). Генерируй 2–4 связи, если они есть.
-
-# Типы связей
-- related — общая связь
-- depends_on — зависит от
-- requires — требует знания
-- example_of — является примером
-- similar_to — похоже на
-- contrasts_with — противоположно
-- causes — вызывает
-- enables — позволяет/делает возможным
-- used_for — используется для
-- alternative_to — альтернатива
-- derives_from — вытекает из
-- parameterizes — параметризует
-- approximates — аппроксимирует
-- generalizes — обобщает
-- implements — реализует
-- explains_why — объясняет почему (цепочка «зачем?»)
-
-# Антипаттерны (НЕ пиши)
-- "Данное понятие означает..."
-- "В системе Таро это..."
-- "Является важной частью..."
-- "Описывает сферу..."
-- Повторение родителя или детей
-- Общие фразы без конкретики
-
-# Правила
-- Факты > рассуждений.
-- Конкретика > абстракции.
-- Если у понятия есть компоненты — перечисли их.
-- Если понятие — конкретный объект (карта, термин) — опиши его функцию, не общую теорию.
-- В relations указывай id узлов из дерева. Если подходящего id нет — не генерируй связь.
-- Используй canonical_definition как основу для details. Не противоречь ему.
-- Не нарушай forbidden_interpretations — не утверждай то, что запрещено.
-- Не смешивай semantic_axis — не описывай архитектуру как процесс и наоборот.
-- Не противоречь parent, ancestors и siblings.
-$_noMetaRule
-$antiJargon
-$_alphabetRule
-$sourcesBlock
-# Язык
-Отвечай СТРОГО на русском языке.
-Все термины в one_liner и details — на русском. Исключение: устоявшиеся аббревиатуры
-(U-Net, DDPM, VAE, CLIP, Stable Diffusion, ControlNet, DiT, NeRF, DDIM и т.д.).
-Всё остальное переводи.
-
-# Формат
-Только JSON:
-{"one_liner":"...","details":"...","analogy":"...","relations":[{"from":"id_этого_узла","to":"id_другого_узла","type":"requires","label":"опционально"}],"claims":[{"subject":"название_узла","predicate":"is_a","object":"категория"}],"sources":["URL_or_название_источника"]}
-
-Claims — список утверждений. Predicates: is_a, has_a, part_of, alternative_to, implements, requires, enables, contradicts, depends_on, related_to.
-$sourcesFormatNote
-
-Если analogy не нужна: "analogy": "".
-Если relations нет: "relations": [].
-Если claims нет: "claims": [].
-В поле from используй id текущего узла: "$nodeId".
-
-Никакого текста вне JSON.''';
-}
+// Content prompt building is now delegated to prompts.dart via buildContentPrompt.
+// Duplicated constants removed to avoid stack drift.

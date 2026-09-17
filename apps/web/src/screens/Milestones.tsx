@@ -4,7 +4,7 @@ import { useGraphStore, useSessionStore } from "../stores";
 import { milestonesApi, learnerModelApi } from "../api";
 import type { MilestoneDto } from "../api";
 import type { MasteryLevel } from "@mindtree/types";
-import { Button, Spinner, ErrorBanner, Badge, Input, Textarea, Select } from "@mindtree/ui";
+import { Button, Spinner, ErrorBanner, Badge, Input, Textarea, Select, Modal } from "@mindtree/ui";
 
 const LEVEL_LABEL: Record<MasteryLevel, string> = {
   awareness: "Ознакомление",
@@ -38,6 +38,7 @@ export function MilestonesScreen() {
   const [formCaps, setFormCaps] = useState("");
   const [formHours, setFormHours] = useState("2");
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [milestoneToDelete, setMilestoneToDelete] = useState<MilestoneDto | null>(null);
 
   const journeyId = session?.journeyId ?? null;
 
@@ -134,20 +135,25 @@ export function MilestonesScreen() {
     }
   }
 
-  async function removeMilestone(m: MilestoneDto) {
-    const confirmed = window.confirm(`Удалить веху «${m.title}»?`);
-    if (!confirmed) return;
-    setDeleting(m.id);
+  async function removeMilestone(id: string) {
+    setDeleting(id);
     setError(null);
     try {
-      await milestonesApi.remove(m.id);
-      setMilestones((prev) => prev.filter((x) => x.id !== m.id));
+      await milestonesApi.remove(id);
+      setMilestones((prev) => prev.filter((x) => x.id !== id));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось удалить веху");
     } finally {
       setDeleting(null);
     }
   }
+
+  const confirmRemoveMilestone = () => {
+    if (!milestoneToDelete) return;
+    const id = milestoneToDelete.id;
+    setMilestoneToDelete(null);
+    void removeMilestone(id);
+  };
 
   const currentIndex = currentLevel
     ? milestones.findIndex((m) => m.level === currentLevel)
@@ -246,7 +252,7 @@ export function MilestonesScreen() {
                         </Badge>
                         <span className="ml-auto text-xs text-ink-4">≈ {m.estimatedHours} ч</span>
                         <button
-                          onClick={() => void removeMilestone(m)}
+                          onClick={() => setMilestoneToDelete(m)}
                           disabled={deleting === m.id}
                           className="rounded-md border border-border px-2 py-0.5 text-xs text-danger hover:bg-danger-soft disabled:opacity-50"
                           title="Удалить веху"
@@ -312,6 +318,24 @@ export function MilestonesScreen() {
           </div>
         )}
       </div>
+
+      <Modal open={milestoneToDelete !== null} onClose={() => setMilestoneToDelete(null)} title="Удалить веху">
+        {milestoneToDelete && (
+          <div>
+            <p className="text-sm text-ink-2">
+              Удалить веху «{milestoneToDelete.title}»? Прогресс по ней будет потерян безвозвратно.
+            </p>
+            <div className="mt-6 flex justify-end gap-3">
+              <Button variant="secondary" onClick={() => setMilestoneToDelete(null)}>
+                Отмена
+              </Button>
+              <Button variant="danger" onClick={confirmRemoveMilestone}>
+                Удалить
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }

@@ -83,7 +83,11 @@ export function initRuntimeConfigFromFile(): void {
 }
 
 export function applyRuntimeConfig(config: RuntimeLLMConfig): void {
-  override = { config, appliedAt: new Date().toISOString() };
+  // Частичные apply (например, один apiKey при автозапуске) не должны
+  // затирать остальной уже применённый конфиг (baseUrl, провайдер, модели) —
+  // иначе генерация уходит на дефолтный api.openai.com. Сброс — DELETE /api/config.
+  const base = override?.config ?? {};
+  override = { config: { ...base, ...config }, appliedAt: new Date().toISOString() };
   persist(override);
 }
 

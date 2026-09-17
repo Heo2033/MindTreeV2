@@ -86,10 +86,56 @@ _HoverLayout _hoverLayoutFor(GraphLayoutNode node) {
   return (popover: popover, chips: chips);
 }
 
+/// Центр хэндла узла в мировых координатах. Общая для hit-test и painter,
+/// чтобы геометрия рёбер совпадала.
+Offset _handleCenter(GraphLayoutNode n, String handle) {
+  final rect = Rect.fromLTWH(n.x, n.y, n.w, n.h);
+  switch (handle) {
+    case 'bottom':
+      return Offset(rect.center.dx, rect.bottom);
+    case 'top':
+      return Offset(rect.center.dx, rect.top);
+    case 'right':
+      return Offset(rect.right, rect.center.dy);
+    default:
+      return Offset(rect.left, rect.center.dy);
+  }
+}
+
+Offset _outward(String handle, double bend) {
+  switch (handle) {
+    case 'bottom':
+      return Offset(0, bend);
+    case 'top':
+      return Offset(0, -bend);
+    case 'right':
+      return Offset(bend, 0);
+    default:
+      return Offset(-bend, 0);
+  }
+}
+
+Path _bezier(Offset s, Offset t, String sourceHandle, String targetHandle) {
+  final dx = (t.dx - s.dx).abs();
+  final dy = (t.dy - s.dy).abs();
+  final dist = math.sqrt(dx * dx + dy * dy);
+  final bend = math.max(28.0, math.min(120.0, dist * 0.35));
+  final c1 = s + _outward(sourceHandle, bend);
+  final c2 = t + _outward(targetHandle, bend);
+  return Path()
+    ..moveTo(s.dx, s.dy)
+    ..cubicTo(c1.dx, c1.dy, c2.dx, c2.dy, t.dx, t.dy);
+}
+
 class GraphCanvasState extends State<GraphCanvas> {
   final Matrix4 _gesture = Matrix4.identity();
   _View? _view;
   String? _hoveredId;
+  String? _hoveredEdgeId;
+
+  /// Hovered relation-edge id (debug/test hook; same lifecycle as hover UI).
+  @visibleForTesting
+  String? get debugHoveredEdgeId => _hoveredEdgeId;
 
   Matrix4? _startGesture;
   Offset _startFocal = Offset.zero;
@@ -128,10 +174,26 @@ class GraphCanvasState extends State<GraphCanvas> {
     final hit = _hitTest(event.localPosition);
     final id = hit?.id;
     if (id != _hoveredId) setState(() => _hoveredId = id);
+
+    // Подсветка relation-рёбер (зеркало web hoveredEdgeId): только когда
+    // курсор не над узлом, чтобы чипы и ребро не конфликтовали.
+    if (hit == null) {
+      final view = _view;
+      if (view == null) return;
+      final p = view.screenToGesture(event.localPosition);
+      final w = _inverseTransform(_gesture, p);
+      final edgeId = _hitTestEdge(w);
+      if (edgeId != _hoveredEdgeId) setState(() => _hoveredEdgeId = edgeId);
+    } else if (_hoveredEdgeId != null) {
+      setState(() => _hoveredEdgeId = null);
+    }
   }
 
   void _onHoverExit(PointerExitEvent event) {
-    setState(() => _hoveredId = null);
+    setState(() {
+      _hoveredId = null;
+      _hoveredEdgeId = null;
+    });
   }
 
   void _onTapUp(TapUpDetails d) {
@@ -258,6 +320,38 @@ class GraphCanvasState extends State<GraphCanvas> {
     return null;
   }
 
+  /// Hit-test relation-рёбер в мировых координатах: первый relation-edge,
+  /// ближе которого к курсору ~9 world units (аналог interactionWidth=24 в web).
+  String? _hitTestEdge(Offset worldPoint) {
+    final byId = {for (final n in widget.nodes) n.id: n};
+    for (final e in widget.edges) {
+      if (e.kind != 'relation') continue;
+      final source = byId[e.source];
+      final target = byId[e.target];
+      if (source == null || target == null) continue;
+      final s = _handleCenter(source, e.sourceHandle);
+      final t = _handleCenter(target, e.targetHandle);
+      final path = _bezier(s, t, e.sourceHandle, e.targetHandle);
+      if (_distanceToPath(path, worldPoint) <= 9) return e.id;
+    }
+    return null;
+  }
+
+  /// Минимальное расстояние от точки до кривой (аппроксимация полилинией).
+  double _distanceToPath(Path path, Offset point, {int samples = 24}) {
+    final metrics = path.computeMetrics().toList();
+    if (metrics.isEmpty) return double.infinity;
+    final metric = metrics.first;
+    var best = double.infinity;
+    for (var i = 0; i <= samples; i++) {
+      final tangent = metric.getTangentForOffset(metric.length * i / samples);
+      if (tangent == null) continue;
+      final d = (tangent.position - point).distance;
+      if (d < best) best = d;
+    }
+    return best;
+  }
+
   void _onLongPressStart(LongPressStartDetails d) {
     final hit = _hitTest(d.localPosition);
     if (hit != null) widget.onNodeLongPress(hit.id);
@@ -295,6 +389,7 @@ class GraphCanvasState extends State<GraphCanvas> {
                     selectedNodeId: widget.selectedNodeId,
                     busyNodeIds: widget.busyNodeIds,
                     hoveredNodeId: _hoveredId,
+                    hoveredEdgeId: _hoveredEdgeId,
                     gesture: _gesture,
                     fit: fit,
                     baseScale: base,
@@ -324,6 +419,7 @@ class _GraphPainter extends CustomPainter {
   final String? selectedNodeId;
   final Set<String> busyNodeIds;
   final String? hoveredNodeId;
+  final String? hoveredEdgeId;
   final Matrix4 gesture;
   final Offset fit;
   final double baseScale;
@@ -344,6 +440,7 @@ class _GraphPainter extends CustomPainter {
     required this.selectedNodeId,
     required this.busyNodeIds,
     required this.hoveredNodeId,
+    required this.hoveredEdgeId,
     required this.gesture,
     required this.fit,
     required this.baseScale,
@@ -406,12 +503,13 @@ class _GraphPainter extends CustomPainter {
     final path = _bezier(s, t, e.sourceHandle, e.targetHandle);
 
     if (e.kind == 'relation') {
+      final highlighted = e.id == hoveredEdgeId;
       final paint = Paint()
-        ..color = e.color.withValues(alpha: 0.55)
-        ..strokeWidth = 1.25
+        ..color = e.color.withValues(alpha: highlighted ? 1.0 : 0.55)
+        ..strokeWidth = highlighted ? 3 : 1.25
         ..style = PaintingStyle.stroke;
       _dashPath(canvas, path, paint, dash: 5, gap: 4);
-      _paintArrow(canvas, path, e.color);
+      _paintArrow(canvas, path, e.color.withValues(alpha: highlighted ? 1.0 : 0.85));
       // Always show label for relation edges (not just on hover)
       if (e.label != null && e.label!.isNotEmpty) {
         _paintEdgeLabel(canvas, path, e.label!, e.color);
@@ -425,45 +523,6 @@ class _GraphPainter extends CustomPainter {
           ..style = PaintingStyle.stroke,
       );
     }
-  }
-
-  Offset _handleCenter(GraphLayoutNode n, String handle) {
-    final rect = Rect.fromLTWH(n.x, n.y, n.w, n.h);
-    switch (handle) {
-      case 'bottom':
-        return Offset(rect.center.dx, rect.bottom);
-      case 'top':
-        return Offset(rect.center.dx, rect.top);
-      case 'right':
-        return Offset(rect.right, rect.center.dy);
-      default:
-        return Offset(rect.left, rect.center.dy);
-    }
-  }
-
-  Offset _outward(String handle, double bend) {
-    switch (handle) {
-      case 'bottom':
-        return Offset(0, bend);
-      case 'top':
-        return Offset(0, -bend);
-      case 'right':
-        return Offset(bend, 0);
-      default:
-        return Offset(-bend, 0);
-    }
-  }
-
-  Path _bezier(Offset s, Offset t, String sourceHandle, String targetHandle) {
-    final dx = (t.dx - s.dx).abs();
-    final dy = (t.dy - s.dy).abs();
-    final dist = math.sqrt(dx * dx + dy * dy);
-    final bend = math.max(28.0, math.min(120.0, dist * 0.35));
-    final c1 = s + _outward(sourceHandle, bend);
-    final c2 = t + _outward(targetHandle, bend);
-    return Path()
-      ..moveTo(s.dx, s.dy)
-      ..cubicTo(c1.dx, c1.dy, c2.dx, c2.dy, t.dx, t.dy);
   }
 
   void _dashPath(
@@ -787,6 +846,7 @@ class _GraphPainter extends CustomPainter {
         oldDelegate.selectedNodeId != selectedNodeId ||
         oldDelegate.busyNodeIds != busyNodeIds ||
         oldDelegate.hoveredNodeId != hoveredNodeId ||
+        oldDelegate.hoveredEdgeId != hoveredEdgeId ||
         oldDelegate.gesture != gesture ||
         oldDelegate.fit != fit ||
         oldDelegate.baseScale != baseScale ||

@@ -171,6 +171,73 @@ testWidgets('hover shows «Углубить» on a true leaf; tapping it deepens
       await _tap(tester, const Offset(400, 300));
       expect(tapped, 'n2');
     });
+
+    testWidgets('hover over a relation edge highlights it; moving away clears',
+        (tester) async {
+      final a = _node('a', 1, label: 'A', relations: [
+        Relation(from: 'a', to: 'b', type: RelationType.requires),
+      ]);
+      final b = _node('b', 2, parentId: 'a', label: 'B');
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 800,
+            height: 600,
+            child: GraphCanvas(
+              nodes: [
+                _fixedNode(
+                    id: 'a',
+                    x: 0,
+                    y: 0,
+                    w: 200,
+                    h: 80,
+                    node: a,
+                    isCompact: false,
+                    canReveal: false,
+                    canDeepen: false),
+                _fixedNode(
+                    id: 'b',
+                    x: 400,
+                    y: 0,
+                    w: 200,
+                    h: 80,
+                    node: b,
+                    isCompact: false,
+                    canReveal: false,
+                    canDeepen: false),
+              ],
+              edges: [
+                (
+                  id: 'rel:a-b',
+                  source: 'a',
+                  target: 'b',
+                  sourceHandle: 'right',
+                  targetHandle: 'left',
+                  kind: 'relation',
+                  color: const Color(0xFFF97316),
+                  label: 'требует',
+                ),
+              ],
+              onNodeTap: (_) {},
+              onNodeLongPress: (_) {},
+            ),
+          ),
+        ),
+      ));
+      await tester.pump();
+
+      // Узлы (0,0,200,80) и (400,0,200,80), base=0.625, fit=(212.5,275).
+      // Середина ребра в мировых (300,40) → экран (400,300).
+      await _hover(tester, const Offset(400, 300));
+      final state =
+          tester.state<GraphCanvasState>(find.byType(GraphCanvas));
+      expect(state.debugHoveredEdgeId, 'rel:a-b');
+
+      // Курсор в стороне от кривой — подсветка снимается.
+      await _hover(tester, const Offset(40, 520));
+      expect(state.debugHoveredEdgeId, isNull);
+      expect(tester.takeException(), isNull);
+    });
   });
 }
 

@@ -60,6 +60,7 @@ typedef GraphLayoutNode = ({
 });
 
 typedef GraphLayoutEdge = ({
+  String id,
   String source,
   String target,
   String sourceHandle,
@@ -440,6 +441,7 @@ GraphLayout layoutGraph(
       tp.y + cs.h / 2,
     );
     graphEdges.add((
+      id: '$parentId-${child.id}',
       source: parentId,
       target: child.id,
       sourceHandle: handles.sourceHandle,
@@ -473,6 +475,7 @@ GraphLayout layoutGraph(
       );
       final color = relationColors[rel.type] ?? const Color(0xFF64748B);
       graphEdges.add((
+        id: eid,
         source: rel.from,
         target: rel.to,
         sourceHandle: handles.sourceHandle,

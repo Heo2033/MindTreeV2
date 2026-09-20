@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { CurriculumEngine, scorePriority } from "../CurriculumEngine.js";
+import { CurriculumEngine, scorePriority, fitPlanToBudget } from "../CurriculumEngine.js";
 import type { CurriculumItem, KnowledgeNode } from "@mindtree/types";
 
 describe("scorePriority (§20: goal_relevance × prerequisite_value × importance ÷ time)", () => {
@@ -63,5 +63,42 @@ describe("CurriculumEngine.validate (§63: prereq → dependent ordering)", () =
       nodes,
     );
     expect(issues.length).toBeGreaterThan(0);
+  });
+});
+
+describe("fitPlanToBudget (§20: time budget cap)", () => {
+  function item(id: string, order: number, estimatedMinutes: number): CurriculumItem {
+    return {
+      id: `ci_${id}`,
+      nodeId: `node_${id}`,
+      order,
+      type: "explain",
+      estimatedMinutes,
+      priority: 1,
+      status: "pending",
+    } as CurriculumItem;
+  }
+
+  it("пустой план остаётся пустым", () => {
+    expect(fitPlanToBudget([], 30)).toEqual([]);
+  });
+
+  it("суммарное время плана не превышает бюджет", () => {
+    const items = [
+      item("a", 0, 10),
+      item("b", 1, 15),
+      item("c", 2, 20),
+      item("d", 3, 5),
+    ];
+    const fitted = fitPlanToBudget(items, 30);
+    expect(fitted.map((i) => i.id)).toEqual(["ci_a", "ci_b"]);
+    const total = fitted.reduce((acc, i) => acc + i.estimatedMinutes, 0);
+    expect(total).toBeLessThanOrEqual(30);
+  });
+
+  it("первый пункт сохраняется, даже если сам длиннее бюджета", () => {
+    const fitted = fitPlanToBudget([item("big", 0, 120)], 30);
+    expect(fitted).toHaveLength(1);
+    expect(fitted[0].id).toBe("ci_big");
   });
 });

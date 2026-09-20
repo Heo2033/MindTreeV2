@@ -92,13 +92,17 @@ export class CurriculumEngine {
       this.repairOrder(items, req.nodes);
     }
 
+    // Детерминированный кап по бюджету времени: план не должен обещать
+    // больше минут, чем пользователь выделил (зеркало fitPlanToBudget flutter).
+    const fitted = fitPlanToBudget(items, req.timeBudgetMinutes || 60);
+
     const sessionId = `curriculum_${crypto.randomUUID().slice(0, 8)}`;
 
     return {
       curriculum: {
         sessionId,
-        items,
-        totalEstimatedMinutes: items.reduce((s, i) => s + i.estimatedMinutes, 0),
+        items: fitted,
+        totalEstimatedMinutes: fitted.reduce((s, i) => s + i.estimatedMinutes, 0),
       },
       alreadyKnown,
     };
@@ -285,6 +289,25 @@ export function scorePriority(
     (importance + 0.5) /
     Math.max(1, estimatedMinutes);
   return Math.max(1, Math.round(raw * 100));
+}
+
+/**
+ * Детерминированный кап плана по бюджету: сортируем по order и набираем пункты,
+ * пока сумма не превысит бюджет. Первый пункт сохраняется всегда, даже если
+ * сам по себе длиннее бюджета (иначе план был бы пустым).
+ */
+export function fitPlanToBudget(items: CurriculumItem[], budgetMinutes: number): CurriculumItem[] {
+  if (items.length === 0) return items;
+  const sorted = [...items].sort((a, b) => a.order - b.order);
+  const fitted: CurriculumItem[] = [];
+  let sum = 0;
+  for (const it of sorted) {
+    if (fitted.length > 0 && sum + it.estimatedMinutes > budgetMinutes) break;
+    fitted.push(it);
+    sum += it.estimatedMinutes;
+  }
+  if (fitted.length === 0) fitted.push(sorted[0]);
+  return fitted;
 }
 
 function goalRelevanceOf(node?: KnowledgeNode): number {

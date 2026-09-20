@@ -221,9 +221,10 @@ export class LearningActivityService {
       ? generated.example
       : fallbackExample(node);
 
+    const siblingLabels = siblingOneLiners(node);
     const recall = generated.recall && generated.recall.options.length >= 2
       ? { question: generated.recall.question, options: generated.recall.options, correct_index: generated.recall.correct_index }
-      : fallbackRecall(node);
+      : fallbackRecall(node, siblingLabels);
     const rotation = order % recall.options.length;
     const rotated = rotateOptions(recall.options, rotation);
     const correctIndex = rotateIndex(recall.correct_index, rotation, recall.options.length);
@@ -236,7 +237,7 @@ export class LearningActivityService {
       {
         type: "explain",
         title: "Изучаем понятие",
-        body: node.details || node.one_liner,
+        body: node.details || explainBody(node, siblingLabels),
         status: "pending",
       },
       {
@@ -334,17 +335,61 @@ function fallbackExample(node: KnowledgeNodeRow): string {
   return `Пример понятия «${node.label}»: ${node.one_liner} — рассмотрите это на одном простом случае из темы.`;
 }
 
-function fallbackRecall(node: KnowledgeNodeRow): { question: string; options: string[]; correct_index: number } {
+/**
+ * Текст шага «объяснение»: подробный details, либо связка
+ * one_liner + связи — но не голый one_liner (зеркало _explainBody flutter).
+ */
+function explainBody(node: KnowledgeNodeRow, relatedLabels: string[]): string {
+  const parts = [node.one_liner];
+  if (node.analogy) {
+    parts.push(`Аналогия: ${node.analogy}`);
+  }
+  if (relatedLabels.length > 0) {
+    parts.push(`Связанные понятия: ${relatedLabels.slice(0, 3).join(", ")}.`);
+  }
+  return parts.join("\n\n");
+}
+
+/**
+ * Осмысленные дистракторы: one_liner соседних понятий (siblings по тому же
+ * родителю), дополненные generic-фразами (зеркало _fallbackRecall flutter).
+ */
+function fallbackRecall(
+  node: KnowledgeNodeRow,
+  relatedLabels: string[] = [],
+): { question: string; options: string[]; correct_index: number } {
+  const distractors: string[] = [];
+  for (const label of relatedLabels) {
+    if (!label || label === node.one_liner || distractors.includes(label)) continue;
+    distractors.push(label);
+    if (distractors.length >= 3) break;
+  }
+  const generic = [
+    "Понятие, обратное изучаемому",
+    "Термин из другого раздела темы",
+    "Случайная комбинация тезисов",
+  ];
+  for (const label of generic) {
+    if (distractors.includes(label)) continue;
+    distractors.push(label);
+    if (distractors.length >= 3) break;
+  }
   return {
     question: `Что означает понятие «${node.label}»?`,
-    options: [
-      node.one_liner || "Верный ответ — в определении понятия",
-      "Понятие, обратное изучаемому",
-      "Термин из другого раздела темы",
-      "Случайная комбинация тезисов",
-    ],
+    options: [node.one_liner || "Верный ответ — в определении понятия", ...distractors.slice(0, 3)],
     correct_index: 0,
   };
+}
+
+/** one_liner соседних узлов (общий родитель), до 4 штук. */
+function siblingOneLiners(node: KnowledgeNodeRow & { parent_id: string | null }): string[] {
+  if (!node.parent_id) return [];
+  const rows = getDb()
+    .prepare(
+      `SELECT one_liner FROM knowledge_nodes WHERE parent_id = ? AND id != ? AND one_liner != '' LIMIT 4`,
+    )
+    .all(node.parent_id, node.id) as { one_liner: string }[];
+  return rows.map((r) => r.one_liner);
 }
 
 function fallbackApply(node: KnowledgeNodeRow): { instruction: string; reference_answer: string } {
@@ -362,6 +407,7 @@ interface KnowledgeNodeRow {
   analogy?: string | null;
   concept_type?: string | null;
   difficulty: number;
+  parent_id: string | null;
 }
 
 function nodeRow(nodeId: string): KnowledgeNodeRow | null {
@@ -377,6 +423,7 @@ function nodeRow(nodeId: string): KnowledgeNodeRow | null {
     analogy: row.analogy ? String(row.analogy) : null,
     concept_type: row.concept_type ? String(row.concept_type) : null,
     difficulty: Number(row.difficulty ?? 0.5),
+    parent_id: row.parent_id ? String(row.parent_id) : null,
   };
 }
 

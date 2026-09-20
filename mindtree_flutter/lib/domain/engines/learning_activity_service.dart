@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:developer' as developer;
 
 import '../models/models.dart';
 import '../../data/database/mindtree_repository.dart';
@@ -58,7 +59,11 @@ class LearningActivityService {
     final node = await repo.getNode(current.item.nodeId);
     if (node == null) throw Exception('Node not found');
 
-    final steps = await _buildSteps(session, node, current.item.order);
+    // Prefetch: если фоном уже сгенерировали шаги для этого узла — берём их.
+    var steps = await repo.getCachedActivitySteps(node.id, session.goal);
+    steps ??= await _buildSteps(session, node, current.item.order);
+    await repo.saveActivityCache(session.topicId, node.id, session.goal, steps);
+
     final blob = jsonEncode({'itemId': current.item.id, 'steps': steps});
     final updated = session.copyWith(
       activityJson: () => blob,
@@ -75,6 +80,24 @@ class LearningActivityService {
     );
 
     return (await getActivity(sessionId))!;
+  }
+
+  /// Фоновая предгенерация шагов для узла (без изменения сессии).
+  /// Результат кладётся в activity_cache — подхватится при переходе.
+  Future<void> prefetchActivity(String sessionId, String nodeId, int order) async {
+    final session = await engine.getSession(sessionId);
+    if (session == null) return;
+    final node = await repo.getNode(nodeId);
+    if (node == null) return;
+
+    try {
+      final cached = await repo.getCachedActivitySteps(node.id, session.goal);
+      if (cached != null) return;
+      final built = await _buildSteps(session, node, order);
+      await repo.saveActivityCache(session.topicId, node.id, session.goal, built);
+    } catch (e, st) {
+      developer.log('[activity] prefetch failed for $nodeId', error: e, stackTrace: st);
+    }
   }
 
   Future<LearningActivity> answer(
@@ -207,19 +230,26 @@ class LearningActivityService {
         cacheKey: 'activity:${node.id}:${session.goal}:$targetLevel',
       );
       generated = _ActivityGenResult.fromJson(res.result);
-    } catch (_) {}
+    } catch (e, st) {
+      developer.log(
+        '[activity] LLM generation failed for ${node.id}',
+        error: e,
+        stackTrace: st,
+      );
+    }
 
+    final relatedLabels = await _relatedLabels(session.topicId, node);
     final exampleBody = generated.example.trim().isNotEmpty
         ? generated.example
         : _fallbackExample(node);
-    final recall = _buildRecall(node, generated, order);
+    final recall = _buildRecall(node, generated, order, relatedLabels);
     final apply = _buildApply(node, generated);
 
     final steps = [
       ActivityStep(
         type: 'explain',
         title: '\u0418\u0437\u0443\u0447\u0430\u0435\u043c \u043f\u043e\u043d\u044f\u0442\u0438\u0435',
-        body: node.details.isNotEmpty ? node.details : node.oneLiner,
+        body: _explainBody(node),
         status: 'current',
       ),
       ActivityStep(
@@ -318,6 +348,49 @@ class LearningActivityService {
 
   static int _clamp(int min, int value, int max) =>
       value < min ? min : (value > max ? max : value);
+
+  /// Собирает осмысленные термины-дистракторы: определения соседних узлов
+  /// (siblings по тому же родителю) и подписи relation-рёбер.
+  Future<List<String>> _relatedLabels(String topicId, KnowledgeNode node) async {
+    final result = <String>[];
+    final siblings = await repo.listNodes(topicId);
+    for (final n in siblings) {
+      if (result.length >= 3) break;
+      if (n.parentId == node.parentId &&
+          n.id != node.id &&
+          n.oneLiner.isNotEmpty &&
+          !result.contains(n.oneLiner)) {
+        result.add(n.oneLiner);
+      }
+    }
+    for (final rel in node.relations) {
+      if (result.length >= 3) break;
+      final label = rel.label;
+      if (label != null && label.trim().isNotEmpty && !result.contains(label.trim())) {
+        result.add(label.trim());
+      }
+    }
+    return result;
+  }
+}
+
+/// Текст шага «объяснение»: подробный details, либо связка
+/// one_liner + аналогия + связи — но не голый one_liner.
+String _explainBody(KnowledgeNode node) {
+  if (node.details.isNotEmpty) return node.details;
+  final parts = <String>[node.oneLiner];
+  if (node.analogy != null && node.analogy!.isNotEmpty) {
+    parts.add('\u0410\u043d\u0430\u043b\u043e\u0433\u0438\u044f: ${node.analogy}');
+  }
+  final related = node.relations
+      .map((r) => r.label?.trim() ?? '')
+      .where((l) => l.isNotEmpty)
+      .toSet()
+      .toList();
+  if (related.isNotEmpty) {
+    parts.add('\u0421\u0432\u044f\u0437\u0430\u043d\u043e \u0441: ${related.join(', ')}.');
+  }
+  return parts.join('\n\n');
 }
 
 // ─── Activity generation helpers ──────────────────────────────────────────────
@@ -383,8 +456,9 @@ class _ApplyGen {
 ({String question, List<String> options, int correctIndex}) _buildRecall(
   KnowledgeNode node,
   _ActivityGenResult generated,
-  int order,
-) {
+  int order, [
+  List<String> relatedLabels = const [],
+]) {
   final gen = generated.recall;
   if (gen != null && gen.options.length >= 2) {
     final rotation = order % gen.options.length;
@@ -392,7 +466,7 @@ class _ApplyGen {
     final correctIndex = rotateIndex(gen.correctIndex, rotation, gen.options.length);
     return (question: gen.question, options: rotated, correctIndex: correctIndex);
   }
-  return _fallbackRecall(node, order);
+  return _fallbackRecall(node, order, relatedLabels);
 }
 
 ({String instruction, String referenceAnswer}) _buildApply(
@@ -415,13 +489,29 @@ String _fallbackExample(KnowledgeNode node) {
 
 ({String question, List<String> options, int correctIndex}) _fallbackRecall(
   KnowledgeNode node,
-  int order,
-) {
-  final options = [
-    node.oneLiner.isNotEmpty ? node.oneLiner : '\u0412\u0435\u0440\u043d\u044b\u0439 \u043e\u0442\u0432\u0435\u0442 \u2014 \u0432 \u043e\u043f\u0440\u0435\u0434\u0435\u043b\u0435\u043d\u0438\u0438 \u043f\u043e\u043d\u044f\u0442\u0438\u044f',
+  int order, [
+  List<String> relatedLabels = const [],
+]) {
+  // Дистракторы — осмысленные определения соседних понятий (siblings/relations).
+  final distractors = <String>[];
+  for (final label in relatedLabels) {
+    if (label.isEmpty || label == node.oneLiner || distractors.contains(label)) continue;
+    distractors.add(label);
+    if (distractors.length >= 3) break;
+  }
+  const generic = [
     '\u041f\u043e\u043d\u044f\u0442\u0438\u0435, \u043e\u0431\u0440\u0430\u0442\u043d\u043e\u0435 \u0438\u0437\u0443\u0447\u0430\u0435\u043c\u043e\u043c\u0443',
     '\u0422\u0435\u0440\u043c\u0438\u043d \u0438\u0437 \u0434\u0440\u0443\u0433\u043e\u0433\u043e \u0440\u0430\u0437\u0434\u0435\u043b\u0430 \u0442\u0435\u043c\u044b',
     '\u0421\u043b\u0443\u0447\u0430\u0439\u043d\u0430\u044f \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u044f \u0442\u0435\u0437\u0438\u0441\u043e\u0432',
+  ];
+  for (final label in generic) {
+    if (distractors.contains(label)) continue;
+    distractors.add(label);
+    if (distractors.length >= 3) break;
+  }
+  final options = [
+    node.oneLiner.isNotEmpty ? node.oneLiner : '\u0412\u0435\u0440\u043d\u044b\u0439 \u043e\u0442\u0432\u0435\u0442 \u2014 \u0432 \u043e\u043f\u0440\u0435\u0434\u0435\u043b\u0435\u043d\u0438\u0438 \u043f\u043e\u043d\u044f\u0442\u0438\u044f',
+    ...distractors.take(3),
   ];
   final rotation = order % options.length;
   final rotated = rotateOptions(options, rotation);

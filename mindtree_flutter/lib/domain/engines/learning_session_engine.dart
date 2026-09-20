@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:developer' as developer;
 import '../models/models.dart';
 import '../../data/database/mindtree_repository.dart';
 import '../../data/llm/scheduler.dart';
@@ -159,7 +160,8 @@ class LearningSessionEngine {
               ? (res.result['sources'] as List).map((e) => e.toString()).toList()
               : <String>[],
         };
-      } catch (_) {
+      } catch (e, st) {
+        developer.log('[studyNode] content generation failed for $nodeId', error: e, stackTrace: st);
         content = {
           'one_liner': node.oneLiner,
           'details': node.details,
@@ -168,13 +170,15 @@ class LearningSessionEngine {
         };
       }
 
+      final details = content['details'] as String;
+      final hasContent = details.isNotEmpty;
       final updatedNode = node.copyWith(
         oneLiner: content['one_liner'] as String,
-        details: content['details'] as String,
+        details: details,
         analogy: () => content['analogy'] as String?,
         sources: content['sources'] as List<String>,
-        contentLoaded: true,
-        state: NodeState.contentGenerated,
+        contentLoaded: hasContent,
+        state: hasContent ? NodeState.contentGenerated : node.state,
       );
       await repo.updateNode(updatedNode);
 
@@ -348,11 +352,11 @@ class LearningSessionEngine {
         );
       }).toList();
 
+      final fitted = fitPlanToBudget(items, timeBudgetMinutes);
       return Curriculum(
         sessionId: '',
-        items: items,
-        totalEstimatedMinutes: parsed['total_estimated_minutes'] as int?
-            ?? items.fold<int>(0, (s, i) => s + i.estimatedMinutes),
+        items: fitted,
+        totalEstimatedMinutes: fitted.fold<int>(0, (s, i) => s + i.estimatedMinutes),
       );
     } catch (_) {
       final items = nodes.take(12).toList().asMap().entries.map((e) {
@@ -369,10 +373,11 @@ class LearningSessionEngine {
           status: CurriculumItemStatus.pending,
         );
       }).toList();
+      final fitted = fitPlanToBudget(items, timeBudgetMinutes);
       return Curriculum(
         sessionId: '',
-        items: items,
-        totalEstimatedMinutes: items.fold<int>(0, (s, i) => s + i.estimatedMinutes),
+        items: fitted,
+        totalEstimatedMinutes: fitted.fold<int>(0, (s, i) => s + i.estimatedMinutes),
       );
     }
   }
@@ -537,3 +542,23 @@ bool _isCriticalDomain(String topicName, List<String> nodePath) {
 
 // Content prompt building is now delegated to prompts.dart via buildContentPrompt.
 // Duplicated constants removed to avoid stack drift.
+
+// ─── Time-budget fitting ───────────────────────────────────────────────────────
+
+/// Детерминированно укладывает план в [budgetMinutes]: берёт пункты по порядку,
+/// пока сумма не превысит бюджет. Первый пункт сохраняется всегда, даже если
+/// сам по себе длиннее бюджета (иначе план был бы пустым).
+List<CurriculumItem> fitPlanToBudget(List<CurriculumItem> items, int budgetMinutes) {
+  if (items.isEmpty) return items;
+  final sorted = List<CurriculumItem>.from(items)
+    ..sort((a, b) => a.order.compareTo(b.order));
+  final fitted = <CurriculumItem>[];
+  var sum = 0;
+  for (final it in sorted) {
+    if (fitted.isNotEmpty && sum + it.estimatedMinutes > budgetMinutes) break;
+    fitted.add(it);
+    sum += it.estimatedMinutes;
+  }
+  if (fitted.isEmpty) fitted.add(sorted.first);
+  return fitted;
+}

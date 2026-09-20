@@ -25,6 +25,7 @@ interface SessionState {
   ensureActivity: () => Promise<ActivityDto | null>;
   answerStep: (stepIndex: number, answer: string) => Promise<void>;
   clearAnsweredView: () => void;
+  clearError: () => void;
   completeConcept: (itemId: string, nodeId?: string, quality?: string) => Promise<void>;
   finalize: () => Promise<FinalizeResultDto | null>;
   reset: () => void;
@@ -158,6 +159,10 @@ export const useSessionStore = create<SessionState>()(
 
   clearAnsweredView() {
     set({ answeredStepView: null });
+  },
+
+  clearError() {
+    set({ error: null });
   },
 
   async completeConcept(itemId, nodeId, quality) {

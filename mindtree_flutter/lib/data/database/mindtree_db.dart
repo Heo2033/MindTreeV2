@@ -161,6 +161,26 @@ class AssessmentAttempts extends Table {
   Set<Column> get primaryKey => {id};
 }
 
+/// Кэш сгенерированных шагов активности (prefetch): позволяет фоном
+/// подготовить следующий раздел сессии и не ждать LLM при переходе.
+@DataClassName('ActivityCacheRowData')
+class ActivityCache extends Table {
+  TextColumn get id => text()();
+  TextColumn get topicId => text().references(Topics, #id, onDelete: KeyAction.cascade)();
+  TextColumn get nodeId => text().references(KnowledgeNodes, #id, onDelete: KeyAction.cascade)();
+  TextColumn get goal => text().withDefault(const Constant('overview'))();
+  TextColumn get stepsJson => text().withDefault(const Constant('[]'))();
+  DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
+
+  @override
+  Set<Column> get primaryKey => {id};
+
+  @override
+  List<Set<Column>> get uniqueKeys => [
+        {nodeId, goal},
+      ];
+}
+
 @DriftDatabase(tables: [
   Topics,
   KnowledgeNodes,
@@ -171,18 +191,23 @@ class AssessmentAttempts extends Table {
   LearnerModels,
   Assessments,
   AssessmentAttempts,
+  ActivityCache,
 ])
 class MindtreeDb extends _$MindtreeDb {
   MindtreeDb(super.e);
 
   @override
-  int get schemaVersion => 1;
+  int get schemaVersion => 2;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
         onCreate: (m) async {
           await m.createAll();
         },
-        onUpgrade: (m, from, to) async {},
+        onUpgrade: (m, from, to) async {
+          if (from < 2) {
+            await m.createTable(activityCache);
+          }
+        },
       );
 }

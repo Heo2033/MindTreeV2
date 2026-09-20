@@ -162,6 +162,16 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     return Column(
       children: [
         _buildSessionHeader(ss, session, completedCount, items.length, eta),
+        // Ошибка активной сессии (падение LLM, таймаут и т.п.) видна сразу,
+        // а не только на стартовой карточке (session == null).
+        if (ss.error != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+            child: ErrorBanner(
+              message: ss.error!,
+              onDismiss: () => _session.clearError(),
+            ),
+          ),
         // "Достаточно" баннер — как в web (apps/web/src/screens/Session.tsx)
         if (ss.adaptive?.recommendedAction == RecommendedAction.finalAssessment || ss.adaptive?.recommendedAction == RecommendedAction.complete)
           _buildEnoughBanner(ss),
@@ -210,6 +220,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
           AppButton(
             'Итоговый тест',
             size: AppButtonSize.sm,
+            busy: ss.loading,
             onPressed: _finalizeSession,
           ),
         ],
@@ -286,6 +297,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                 'Завершить',
                 variant: AppButtonVariant.danger,
                 size: AppButtonSize.sm,
+                busy: ss.loading,
                 onPressed: _finalizeSession,
               ),
             ],
@@ -562,18 +574,22 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
 
   Widget _buildFeedback(ActivityStep step) {
     final isCorrect = step.correct == true;
+    final isReadStep = step.correct == null;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        StatusBadge(
-          isCorrect ? 'Верно' : 'Есть ошибки',
-          variant: isCorrect ? BadgeVariant.success : BadgeVariant.danger,
-        ),
+        if (isReadStep)
+          const StatusBadge('Прочитано', variant: BadgeVariant.muted)
+        else
+          StatusBadge(
+            isCorrect ? 'Верно' : 'Есть ошибки',
+            variant: isCorrect ? BadgeVariant.success : BadgeVariant.danger,
+          ),
         if (step.feedback != null && step.feedback!.isNotEmpty) ...[
           const SizedBox(height: 12),
           FormattedText(step.feedback!),
         ],
-        if (step.bestAnswer != null && !isCorrect) ...[
+        if (!isReadStep && step.bestAnswer != null && !isCorrect) ...[
           const SizedBox(height: 12),
           Container(
             padding: const EdgeInsets.all(12),
@@ -693,18 +709,24 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   void _advanceStep() {
     final activity = _sessionState.activity;
     if (activity == null) return;
-    final nextStep = activity.currentStep + 1;
-    if (nextStep < activity.steps.length) {
-      final next = activity.steps[nextStep];
-      // Для recall и apply нельзя отвечать пустой строкой — пользователь
-      // должен сам выбрать вариант или ввести текст. Сбрасываем
-      // answeredStepView, чтобы UI показал следующий pending шаг.
-      if (next.type == 'recall' || next.type == 'apply') {
-        _session.resetAnsweredView();
-        return;
-      }
-      _session.answerStep(nextStep, '');
+
+    // Ищем первый не-отвеченный шаг (pending/current).
+    final pending = activity.steps.indexWhere((s) => !s.isAnswered);
+    if (pending == -1) {
+      // Все шаги отвечены — показываем экран завершения концепта.
+      _session.resetAnsweredView();
+      return;
     }
+
+    final next = activity.steps[pending];
+    // Для recall и apply пользователь должен сам выбрать вариант или ввести текст.
+    // Сбрасываем answeredStepView, чтобы UI показал pending шаг.
+    if (next.type == 'recall' || next.type == 'apply') {
+      _session.resetAnsweredView();
+      return;
+    }
+
+    _session.answerStep(pending, '');
   }
 
   Future<void> _completeCurrentConcept(SessionState ss) async {

@@ -268,4 +268,39 @@ class MindtreeRepository {
     if (rows.isEmpty) return null;
     return Mappers.assessmentFromRow(rows.first);
   }
+
+  // ---------- Activity Cache (prefetch) ----------
+
+  /// Шаги активности для узла из кэша (по nodeId + goal), либо null.
+  Future<List<ActivityStep>?> getCachedActivitySteps(String nodeId, String goal) async {
+    final row = await (db.select(db.activityCache)
+          ..where((c) => c.nodeId.equals(nodeId) & c.goal.equals(goal)))
+        .getSingleOrNull();
+    if (row == null) return null;
+    try {
+      final list = jsonDecode(row.stepsJson) as List<dynamic>;
+      return list.map((e) => ActivityStep.fromJson(e as Map<String, dynamic>)).toList();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Сохраняет сгенерированные шаги активности в кэш (upsert по nodeId+goal).
+  Future<void> saveActivityCache(
+    String topicId,
+    String nodeId,
+    String goal,
+    List<ActivityStep> steps,
+  ) async {
+    await db.into(db.activityCache).insert(
+          ActivityCacheCompanion(
+            id: Value('ac_${nodeId}_$goal'),
+            topicId: Value(topicId),
+            nodeId: Value(nodeId),
+            goal: Value(goal),
+            stepsJson: Value(jsonEncode(steps.map((s) => s.toJson()).toList())),
+          ),
+          mode: InsertMode.insertOrReplace,
+        );
+  }
 }

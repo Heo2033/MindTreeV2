@@ -5032,6 +5032,425 @@ class AssessmentAttemptsCompanion
   }
 }
 
+class $ActivityCacheTable extends ActivityCache
+    with TableInfo<$ActivityCacheTable, ActivityCacheRowData> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $ActivityCacheTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<String> id = GeneratedColumn<String>(
+    'id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _topicIdMeta = const VerificationMeta(
+    'topicId',
+  );
+  @override
+  late final GeneratedColumn<String> topicId = GeneratedColumn<String>(
+    'topic_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'REFERENCES topics (id) ON DELETE CASCADE',
+    ),
+  );
+  static const VerificationMeta _nodeIdMeta = const VerificationMeta(
+    'nodeId',
+  );
+  @override
+  late final GeneratedColumn<String> nodeId = GeneratedColumn<String>(
+    'node_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'REFERENCES knowledge_nodes (id) ON DELETE CASCADE',
+    ),
+  );
+  static const VerificationMeta _goalMeta = const VerificationMeta('goal');
+  @override
+  late final GeneratedColumn<String> goal = GeneratedColumn<String>(
+    'goal',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant('overview'),
+  );
+  static const VerificationMeta _stepsJsonMeta = const VerificationMeta(
+    'stepsJson',
+  );
+  @override
+  late final GeneratedColumn<String> stepsJson = GeneratedColumn<String>(
+    'steps_json',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant('[]'),
+  );
+  static const VerificationMeta _createdAtMeta = const VerificationMeta(
+    'createdAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> createdAt = GeneratedColumn<DateTime>(
+    'created_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: false,
+    defaultValue: currentDateAndTime,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    topicId,
+    nodeId,
+    goal,
+    stepsJson,
+    createdAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'activity_cache';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<ActivityCacheRowData> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    } else if (isInserting) {
+      context.missing(_idMeta);
+    }
+    if (data.containsKey('topic_id')) {
+      context.handle(
+        _topicIdMeta,
+        topicId.isAcceptableOrUnknown(data['topic_id']!, _topicIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_topicIdMeta);
+    }
+    if (data.containsKey('node_id')) {
+      context.handle(
+        _nodeIdMeta,
+        nodeId.isAcceptableOrUnknown(data['node_id']!, _nodeIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_nodeIdMeta);
+    }
+    if (data.containsKey('goal')) {
+      context.handle(
+        _goalMeta,
+        goal.isAcceptableOrUnknown(data['goal']!, _goalMeta),
+      );
+    }
+    if (data.containsKey('steps_json')) {
+      context.handle(
+        _stepsJsonMeta,
+        stepsJson.isAcceptableOrUnknown(data['steps_json']!, _stepsJsonMeta),
+      );
+    }
+    if (data.containsKey('created_at')) {
+      context.handle(
+        _createdAtMeta,
+        createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  List<Set<GeneratedColumn>> get uniqueKeys => [
+    {nodeId, goal},
+  ];
+  @override
+  ActivityCacheRowData map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return ActivityCacheRowData(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}id'],
+      )!,
+      topicId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}topic_id'],
+      )!,
+      nodeId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}node_id'],
+      )!,
+      goal: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}goal'],
+      )!,
+      stepsJson: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}steps_json'],
+      )!,
+      createdAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}created_at'],
+      )!,
+    );
+  }
+
+  @override
+  $ActivityCacheTable createAlias(String alias) {
+    return $ActivityCacheTable(attachedDatabase, alias);
+  }
+}
+
+class ActivityCacheRowData extends DataClass
+    implements Insertable<ActivityCacheRowData> {
+  final String id;
+  final String topicId;
+  final String nodeId;
+  final String goal;
+  final String stepsJson;
+  final DateTime createdAt;
+  const ActivityCacheRowData({
+    required this.id,
+    required this.topicId,
+    required this.nodeId,
+    required this.goal,
+    required this.stepsJson,
+    required this.createdAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<String>(id);
+    map['topic_id'] = Variable<String>(topicId);
+    map['node_id'] = Variable<String>(nodeId);
+    map['goal'] = Variable<String>(goal);
+    map['steps_json'] = Variable<String>(stepsJson);
+    map['created_at'] = Variable<DateTime>(createdAt);
+    return map;
+  }
+
+  ActivityCacheCompanion toCompanion(bool nullToAbsent) {
+    return ActivityCacheCompanion(
+      id: Value(id),
+      topicId: Value(topicId),
+      nodeId: Value(nodeId),
+      goal: Value(goal),
+      stepsJson: Value(stepsJson),
+      createdAt: Value(createdAt),
+    );
+  }
+
+  factory ActivityCacheRowData.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return ActivityCacheRowData(
+      id: serializer.fromJson<String>(json['id']),
+      topicId: serializer.fromJson<String>(json['topicId']),
+      nodeId: serializer.fromJson<String>(json['nodeId']),
+      goal: serializer.fromJson<String>(json['goal']),
+      stepsJson: serializer.fromJson<String>(json['stepsJson']),
+      createdAt: serializer.fromJson<DateTime>(json['createdAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<String>(id),
+      'topicId': serializer.toJson<String>(topicId),
+      'nodeId': serializer.toJson<String>(nodeId),
+      'goal': serializer.toJson<String>(goal),
+      'stepsJson': serializer.toJson<String>(stepsJson),
+      'createdAt': serializer.toJson<DateTime>(createdAt),
+    };
+  }
+
+  ActivityCacheRowData copyWith({
+    String? id,
+    String? topicId,
+    String? nodeId,
+    String? goal,
+    String? stepsJson,
+    DateTime? createdAt,
+  }) => ActivityCacheRowData(
+    id: id ?? this.id,
+    topicId: topicId ?? this.topicId,
+    nodeId: nodeId ?? this.nodeId,
+    goal: goal ?? this.goal,
+    stepsJson: stepsJson ?? this.stepsJson,
+    createdAt: createdAt ?? this.createdAt,
+  );
+  ActivityCacheRowData copyWithCompanion(ActivityCacheCompanion data) {
+    return ActivityCacheRowData(
+      id: data.id.present ? data.id.value : this.id,
+      topicId: data.topicId.present ? data.topicId.value : this.topicId,
+      nodeId: data.nodeId.present ? data.nodeId.value : this.nodeId,
+      goal: data.goal.present ? data.goal.value : this.goal,
+      stepsJson: data.stepsJson.present ? data.stepsJson.value : this.stepsJson,
+      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ActivityCacheRowData(')
+          ..write('id: $id, ')
+          ..write('topicId: $topicId, ')
+          ..write('nodeId: $nodeId, ')
+          ..write('goal: $goal, ')
+          ..write('stepsJson: $stepsJson, ')
+          ..write('createdAt: $createdAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    topicId,
+    nodeId,
+    goal,
+    stepsJson,
+    createdAt,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is ActivityCacheRowData &&
+          other.id == this.id &&
+          other.topicId == this.topicId &&
+          other.nodeId == this.nodeId &&
+          other.goal == this.goal &&
+          other.stepsJson == this.stepsJson &&
+          other.createdAt == this.createdAt);
+}
+
+class ActivityCacheCompanion extends UpdateCompanion<ActivityCacheRowData> {
+  final Value<String> id;
+  final Value<String> topicId;
+  final Value<String> nodeId;
+  final Value<String> goal;
+  final Value<String> stepsJson;
+  final Value<DateTime> createdAt;
+  final Value<int> rowid;
+  const ActivityCacheCompanion({
+    this.id = const Value.absent(),
+    this.topicId = const Value.absent(),
+    this.nodeId = const Value.absent(),
+    this.goal = const Value.absent(),
+    this.stepsJson = const Value.absent(),
+    this.createdAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  ActivityCacheCompanion.insert({
+    required String id,
+    required String topicId,
+    required String nodeId,
+    this.goal = const Value.absent(),
+    this.stepsJson = const Value.absent(),
+    this.createdAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  })  : id = Value(id),
+        topicId = Value(topicId),
+        nodeId = Value(nodeId);
+  static Insertable<ActivityCacheRowData> custom({
+    Expression<String>? id,
+    Expression<String>? topicId,
+    Expression<String>? nodeId,
+    Expression<String>? goal,
+    Expression<String>? stepsJson,
+    Expression<DateTime>? createdAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (topicId != null) 'topic_id': topicId,
+      if (nodeId != null) 'node_id': nodeId,
+      if (goal != null) 'goal': goal,
+      if (stepsJson != null) 'steps_json': stepsJson,
+      if (createdAt != null) 'created_at': createdAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  ActivityCacheCompanion copyWith({
+    Value<String>? id,
+    Value<String>? topicId,
+    Value<String>? nodeId,
+    Value<String>? goal,
+    Value<String>? stepsJson,
+    Value<DateTime>? createdAt,
+    Value<int>? rowid,
+  }) {
+    return ActivityCacheCompanion(
+      id: id ?? this.id,
+      topicId: topicId ?? this.topicId,
+      nodeId: nodeId ?? this.nodeId,
+      goal: goal ?? this.goal,
+      stepsJson: stepsJson ?? this.stepsJson,
+      createdAt: createdAt ?? this.createdAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<String>(id.value);
+    }
+    if (topicId.present) {
+      map['topic_id'] = Variable<String>(topicId.value);
+    }
+    if (nodeId.present) {
+      map['node_id'] = Variable<String>(nodeId.value);
+    }
+    if (goal.present) {
+      map['goal'] = Variable<String>(goal.value);
+    }
+    if (stepsJson.present) {
+      map['steps_json'] = Variable<String>(stepsJson.value);
+    }
+    if (createdAt.present) {
+      map['created_at'] = Variable<DateTime>(createdAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ActivityCacheCompanion(')
+          ..write('id: $id, ')
+          ..write('topicId: $topicId, ')
+          ..write('nodeId: $nodeId, ')
+          ..write('goal: $goal, ')
+          ..write('stepsJson: $stepsJson, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$MindtreeDb extends GeneratedDatabase {
   _$MindtreeDb(QueryExecutor e) : super(e);
   $MindtreeDbManager get managers => $MindtreeDbManager(this);
@@ -5050,6 +5469,7 @@ abstract class _$MindtreeDb extends GeneratedDatabase {
   late final $AssessmentsTable assessments = $AssessmentsTable(this);
   late final $AssessmentAttemptsTable assessmentAttempts =
       $AssessmentAttemptsTable(this);
+  late final $ActivityCacheTable activityCache = $ActivityCacheTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -5064,6 +5484,7 @@ abstract class _$MindtreeDb extends GeneratedDatabase {
     learnerModels,
     assessments,
     assessmentAttempts,
+    activityCache,
   ];
   @override
   StreamQueryUpdateRules get streamUpdateRules => const StreamQueryUpdateRules([
@@ -5136,6 +5557,20 @@ abstract class _$MindtreeDb extends GeneratedDatabase {
         limitUpdateKind: UpdateKind.delete,
       ),
       result: [TableUpdate('assessment_attempts', kind: UpdateKind.delete)],
+    ),
+    WritePropagation(
+      on: TableUpdateQuery.onTableName(
+        'topics',
+        limitUpdateKind: UpdateKind.delete,
+      ),
+      result: [TableUpdate('activity_cache', kind: UpdateKind.delete)],
+    ),
+    WritePropagation(
+      on: TableUpdateQuery.onTableName(
+        'knowledge_nodes',
+        limitUpdateKind: UpdateKind.delete,
+      ),
+      result: [TableUpdate('activity_cache', kind: UpdateKind.delete)],
     ),
   ]);
 }

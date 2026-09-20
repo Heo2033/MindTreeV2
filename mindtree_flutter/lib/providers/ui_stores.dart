@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:developer' as developer;
 import 'dart:math';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -532,8 +533,39 @@ class SessionNotifier extends StateNotifier<SessionState> {
         currentIndex: current?.index ?? 0,
         loading: false,
       );
+      // Фоновая предгенерация следующих разделов (контент узлов + шаги activity).
+      unawaited(_prefetchAhead(session.id, current?.index ?? 0));
     } catch (e) {
       state = state.copyWith(loading: false, error: '$e');
+    }
+  }
+
+  /// Фоново готовит 2 следующих раздела плана: details узлов + кэш шагов activity.
+  Future<void> _prefetchAhead(String sessionId, int currentIndex) async {
+    try {
+      final session = await _engine.getSession(sessionId);
+      if (session == null) return;
+      final items = session.curriculum.items;
+      final start = (currentIndex + 1).clamp(0, items.length);
+      final ahead = items.sublist(start).take(2).toList();
+      for (final item in ahead) {
+        try {
+          await _engine.studyNode(sessionId, item.nodeId);
+          await _activityService.prefetchActivity(
+            sessionId,
+            item.nodeId,
+            item.order,
+          );
+        } catch (e, st) {
+          developer.log(
+            '[prefetch] item ${item.nodeId} failed',
+            error: e,
+            stackTrace: st,
+          );
+        }
+      }
+    } catch (e, st) {
+      developer.log('[prefetch] failed for session $sessionId', error: e, stackTrace: st);
     }
   }
 
@@ -567,9 +599,11 @@ class SessionNotifier extends StateNotifier<SessionState> {
     try {
       await _engine.studyNode(sessionId, nodeId);
       await ensureActivity();
-      state = state.copyWith(studying: true, loading: false);
+      state = state.copyWith(studying: false, loading: false);
     } catch (e) {
-      state = state.copyWith(loading: false, error: '$e');
+      // Зеркально web-стору (sessionStore.ts): studying сбрасывается и при
+      // ошибке, иначе UI навсегда остаётся на спиннере «Генерация объяснения…».
+      state = state.copyWith(studying: false, loading: false, error: '$e');
     }
   }
 
@@ -638,6 +672,10 @@ class SessionNotifier extends StateNotifier<SessionState> {
 
   void resetAnsweredView() {
     state = state.copyWith(answeredStepView: () => null);
+  }
+
+  void clearError() {
+    state = state.copyWith(error: null);
   }
 
   void reset() {

@@ -12,6 +12,11 @@ class SchedulerConfig {
   final int maxConcurrency;
   final int maxRetries;
   final int batchSize;
+  /// Общий дедлайн одной LLM-операции (мс): ограничивает ожидание слота и
+  /// старт новых попыток/моделей. Сам уже запущенный запрос дедлайном НЕ
+  /// прерывается — его жёсткая граница — клиентский LLMConfig.timeoutMs
+  /// (по умолчанию 180 с), зеркально server client.ts (controller.abort()).
+  /// 0 — без лимита. По умолчанию 120 с (как серверный readOpDeadlineMs()).
   final int opDeadlineMs;
 
   const SchedulerConfig({
@@ -57,6 +62,15 @@ class ExecuteResult<T> {
   const ExecuteResult({required this.result, required this.llmResult, this.cached = false});
 }
 
+/// Точка инъекции LLM-вызова (для тестов дедлайна): заменяет глобальный callLLM.
+typedef LLMInvoke = Future<LLMResult> Function(
+  LLMConfig cfg,
+  String prompt, {
+  String? model,
+  double? temperature,
+  int? seed,
+});
+
 // ─── TreeScheduler ────────────────────────────────────────────────────────────
 
 class TreeScheduler {
@@ -64,6 +78,7 @@ class TreeScheduler {
   final LLMCache cache;
   final LLMTelemetry telemetry;
   final LLMConfig Function() _configProvider;
+  final LLMInvoke? _llmCallOverride;
   final _rpmTracker = _RateTracker(windowMs: 60000);
   final _rpdTracker = _RateTracker(windowMs: 86400000);
   int _running = 0;
@@ -73,13 +88,26 @@ class TreeScheduler {
     SchedulerConfig? config,
     LLMCache? cache,
     LLMTelemetry? telemetry,
+    LLMInvoke? llmCall,
   })  : config = config ?? const SchedulerConfig(),
         cache = cache ?? LLMCache(),
         telemetry = telemetry ?? LLMTelemetry(),
+        _llmCallOverride = llmCall,
         _configProvider = configProvider {
     _rpmTracker.limit = this.config.maxRPM;
     _rpdTracker.limit = this.config.maxRPD;
   }
+
+  Future<LLMResult> _invokeLLM(
+    LLMConfig cfg,
+    String prompt, {
+    String? model,
+    double? temperature,
+    int? seed,
+  }) =>
+      _llmCallOverride != null
+          ? _llmCallOverride(cfg, prompt, model: model, temperature: temperature, seed: seed)
+          : callLLM(cfg, prompt, model: model, temperature: temperature, seed: seed);
 
   int get runningCount => _running;
   int get batchLimit => config.batchSize;
@@ -163,12 +191,22 @@ class TreeScheduler {
 
       var modelFailed = false;
       for (var attempt = 0; attempt <= config.maxRetries; attempt++) {
+        // Дедлайн операции: не начинаем новую попытку, если лимит исчерпан
+        // (зеркально server scheduler: Date.now() >= deadline → break).
+        if (deadline != null && !DateTime.now().isBefore(deadline)) {
+          modelFailed = true;
+          break;
+        }
         await _waitForSlot(deadline);
         _acquire();
 
         try {
           final prompt = promptFn();
-          final llmResult = await callLLM(cfg, prompt, model: m);
+          // Запущенный запрос дедлайном не прерывается (зеркально server):
+          // если провайдер отвечает медленно, но успешно (L2/L3-структура),
+          // вызов должен завершиться. Жёсткая граница «висящего» запроса —
+          // клиентский LLMConfig.timeoutMs (по умолчанию 180 с).
+          final llmResult = await _invokeLLM(cfg, prompt, model: m);
           final result = parseFn(llmResult.text);
           attemptsMade = attempt + 1;
 
@@ -249,6 +287,8 @@ class TreeScheduler {
         try {
           final prompt = promptFn();
           var any = false;
+          // Чтение стрима ограничено клиентским callLLMStream (LLMConfig.timeoutMs),
+          // зеркально server (controller.abort() по истечении timeoutMs).
           await for (final token in callLLMStream(cfg, prompt, model: m)) {
             any = true;
             yield token;

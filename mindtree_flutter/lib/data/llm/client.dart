@@ -643,7 +643,11 @@ Stream<String> callLLMStream(
   }
 
   var emitted = 0;
-  await for (final piece in _parseSseStream(streamedResponse.stream)) {
+  // Чтение стрима ограничено клиентским таймаутом (зеркально server client.ts:
+  // setTimeout(() => controller.abort(), timeoutMs)) — зависший SSE-провайдер
+  // не может держать запрос бесконечно.
+  await for (final piece in _parseSseStream(streamedResponse.stream)
+      .timeout(Duration(milliseconds: cfg.timeoutMs))) {
     emitted += piece.length;
     yield piece;
   }

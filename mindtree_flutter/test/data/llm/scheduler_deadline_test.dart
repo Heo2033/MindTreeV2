@@ -16,7 +16,10 @@ void main() {
       var calls = 0;
       final scheduler = TreeScheduler(
         configProvider: () => const llm_client.LLMConfig(isMock: false),
-        config: const SchedulerConfig(opDeadlineMs: 50, maxRetries: 0),
+        // Дедлайн 200 мс заметно меньше длительности вызова (300 мс), но с
+        // запасом против OS-preemption: без него под нагрузкой полного
+        // прогона дедлайн мог сгореть до старта первого вызова (флейк).
+        config: const SchedulerConfig(opDeadlineMs: 200, maxRetries: 0),
         llmCall: (cfg, prompt, {model, temperature, seed}) async {
           calls++;
           // Ответ приходит ПОСЛЕ истечения дедлайна операции.

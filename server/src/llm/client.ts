@@ -5,6 +5,9 @@ const DEFAULT_MODEL = "gpt-4o";
 const DEFAULT_TEMPERATURE = 0.4;
 const DEFAULT_NUM_CTX = 16384;
 const DEFAULT_TIMEOUT_MS = 180_000;
+// Явный generous-лимит выходных токенов (зеркало flutter client.dart): без него
+// провайдеры режут ответ дефолтным капом, и details обрывается на полуслове.
+const DEFAULT_MAX_OUTPUT_TOKENS = 4096;
 
 export interface ILLMUsage {
   input_tokens: number;
@@ -472,6 +475,7 @@ export async function callLLM(
     model,
     messages: [{ role: "system", content: systemPrompt }],
     temperature,
+    max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
   };
 
   const candidates: Array<Record<string, unknown>> = [];
@@ -484,6 +488,7 @@ export async function callLLM(
     model,
     messages: [{ role: "user", content: systemPrompt }],
     temperature,
+    max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
   });
 
   const timeoutMs = options.timeoutMs ?? cfg.timeoutMs;
@@ -542,6 +547,7 @@ async function callOllama(
   const options: Record<string, unknown> = {
     temperature,
     num_ctx: cfg.numCtx,
+    num_predict: DEFAULT_MAX_OUTPUT_TOKENS,
   };
   if (seed !== null && seed !== undefined) {
     options.seed = seed;

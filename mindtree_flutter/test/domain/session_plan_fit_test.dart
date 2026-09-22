@@ -17,6 +17,24 @@ CurriculumItem _item({
       estimatedMinutes: minutes,
     );
 
+KnowledgeNode _node({
+  required String id,
+  required int level,
+  required int minutes,
+  double importance = 0.5,
+}) =>
+    KnowledgeNode(
+      id: id,
+      topicId: 't1',
+      parentId: null,
+      level: level,
+      label: 'Узел $id',
+      oneLiner: 'Определение $id',
+      details: '',
+      estimatedTimeMinutes: minutes,
+      importance: importance,
+    );
+
 void main() {
   group('fitPlanToBudget', () {
     test('пустой план остаётся пустым', () {
@@ -79,6 +97,31 @@ void main() {
       fitPlanToBudget(items, 30);
 
       expect([for (final it in items) it.id], ['a', 'b']);
+    });
+  });
+
+  group('sortFallbackReadingOrder', () {
+    test('сначала базовые уровни, затем короткие пункты (чтобы план заполнил бюджет)',
+        () {
+      final nodes = [
+        _node(id: 'sec_big', level: 2, minutes: 40),
+        _node(id: 'root', level: 1, minutes: 5),
+        _node(id: 'sec_5', level: 2, minutes: 5),
+        _node(id: 'sec_15', level: 2, minutes: 15),
+      ];
+      final ordered = sortFallbackReadingOrder(nodes);
+
+      expect([for (final n in ordered) n.id], ['root', 'sec_5', 'sec_15', 'sec_big']);
+    });
+
+    test('внутри одного уровня и минут приоритет важности (importance)', () {
+      final nodes = [
+        _node(id: 'b', level: 2, minutes: 5, importance: 0.3),
+        _node(id: 'a', level: 2, minutes: 5, importance: 0.9),
+      ];
+      final ordered = sortFallbackReadingOrder(nodes);
+
+      expect([for (final n in ordered) n.id], ['a', 'b']);
     });
   });
 }

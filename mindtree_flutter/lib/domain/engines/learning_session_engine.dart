@@ -359,7 +359,8 @@ class LearningSessionEngine {
         totalEstimatedMinutes: fitted.fold<int>(0, (s, i) => s + i.estimatedMinutes),
       );
     } catch (_) {
-      final items = nodes.take(12).toList().asMap().entries.map((e) {
+      final fallbackNodes = sortFallbackReadingOrder(nodes);
+      final items = fallbackNodes.take(12).toList().asMap().entries.map((e) {
         final i = e.key;
         final n = e.value;
         return CurriculumItem(
@@ -544,6 +545,19 @@ bool _isCriticalDomain(String topicName, List<String> nodePath) {
 // Duplicated constants removed to avoid stack drift.
 
 // ─── Time-budget fitting ───────────────────────────────────────────────────────
+
+/// Порядок для детерминированного fallback-плана: базовые понятия раньше,
+/// затем самые короткие (чтобы план из нескольких пунктов заполнил бюджет).
+List<KnowledgeNode> sortFallbackReadingOrder(List<KnowledgeNode> nodes) {
+  final sorted = List<KnowledgeNode>.from(nodes);
+  sorted.sort((a, b) {
+    if (a.level != b.level) return a.level.compareTo(b.level);
+    final byMinutes = a.estimatedTimeMinutes.compareTo(b.estimatedTimeMinutes);
+    if (byMinutes != 0) return byMinutes;
+    return b.importance.compareTo(a.importance);
+  });
+  return sorted;
+}
 
 /// Детерминированно укладывает план в [budgetMinutes]: берёт пункты по порядку,
 /// пока сумма не превысит бюджет. Первый пункт сохраняется всегда, даже если

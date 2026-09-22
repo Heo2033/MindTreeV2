@@ -131,7 +131,7 @@ export class CurriculumEngine {
     const sorted = req.nodes
       .filter((n) => n.level >= 2 && !known.has(n.id))
       .map((n) => ({ n, score: scorePriority(goalRelevanceOf(n), prerequisiteValueOf(n, [], byId), n.importance, Math.max(1, n.estimatedTimeMinutes || 5)) }))
-      .sort((a, b) => b.score - a.score)
+      .sort((a, b) => b.score - a.score || (a.n.estimatedTimeMinutes || 5) - (b.n.estimatedTimeMinutes || 5))
       .map((x) => x.n);
 
     const selected: Array<{ node_id: string; order: number; estimated_minutes: number; why: string }> = [];
@@ -146,6 +146,17 @@ export class CurriculumEngine {
         why: "Важное понятие с высокой пользой на единицу времени",
       });
       used += est;
+    }
+    // Детерминированный guard (зеркало «первый пункт сохраняется» фиттера):
+    // при коротком бюджете падать до пустого плана нельзя — берём лучший узел.
+    if (selected.length === 0 && sorted.length > 0) {
+      const node = sorted[0]!;
+      selected.push({
+        node_id: node.id,
+        order: 1,
+        estimated_minutes: Math.min(node.estimatedTimeMinutes || 5, 20),
+        why: "Базовое понятие — план не может быть пустым",
+      });
     }
     return selected;
   }

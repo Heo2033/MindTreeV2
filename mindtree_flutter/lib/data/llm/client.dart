@@ -107,6 +107,10 @@ LLMConfig configFromEffective(EffectiveConfig ec) {
   );
 }
 
+/// Явный generous-лимит выходных токенов. Без него провайдеры режут ответ
+/// дефолтным капом (часто 256–512), и `details` обрывается на полуслове.
+const int _defaultMaxOutputTokens = 4096;
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 typedef ModelTier = String;
@@ -384,6 +388,7 @@ Future<LLMResult> _callOllama(LLMConfig cfg, String systemPrompt, double tempera
     'options': {
       'temperature': temperature,
       'num_ctx': cfg.numCtx,
+      'num_predict': _defaultMaxOutputTokens,
     },
   };
 
@@ -553,6 +558,7 @@ Future<LLMResult> callLLM(
     'model': useModel,
     'messages': [{'role': 'system', 'content': systemPrompt}],
     'temperature': temp,
+    'max_tokens': _defaultMaxOutputTokens,
   };
   final candidates = <Map<String, dynamic>>[];
   if (seed != null) {
@@ -564,6 +570,7 @@ Future<LLMResult> callLLM(
     'model': useModel,
     'messages': [{'role': 'user', 'content': systemPrompt}],
     'temperature': temp,
+    'max_tokens': _defaultMaxOutputTokens,
   });
 
   // Try streaming first, then non-streaming, for each candidate.

@@ -239,9 +239,11 @@ class LearningActivityService {
     }
 
     final relatedLabels = await _relatedLabels(session.topicId, node);
-    final exampleBody = generated.example.trim().isNotEmpty
+    final explainText = explainBody(node);
+    final rawExample = generated.example.trim().isNotEmpty
         ? generated.example
-        : _fallbackExample(node);
+        : fallbackExample(node);
+    final exampleBody = ensureDistinctExample(node, explainText, rawExample);
     final recall = _buildRecall(node, generated, order, relatedLabels);
     final apply = _buildApply(node, generated);
 
@@ -249,7 +251,7 @@ class LearningActivityService {
       ActivityStep(
         type: 'explain',
         title: '\u0418\u0437\u0443\u0447\u0430\u0435\u043c \u043f\u043e\u043d\u044f\u0442\u0438\u0435',
-        body: _explainBody(node),
+        body: explainBody(node),
         status: 'current',
       ),
       ActivityStep(
@@ -311,7 +313,7 @@ class LearningActivityService {
     );
   }
 
-  Future<({bool correct, String feedback, double score})> _evaluateApply(
+  Future<({bool? correct, String feedback, double score})> _evaluateApply(
     String topicId,
     String topicName,
     String nodeId,
@@ -342,7 +344,12 @@ class LearningActivityService {
         score: isCorrect ? 1.0 : (assessment == 'partial' ? 0.5 : 0.0),
       );
     } catch (_) {
-      return (correct: false, feedback: '', score: 0.0);
+      // LLM недоступен: не помечаем ответ ложным «Есть ошибки».
+      // Нейтральный статус (correct: null) → в UI бейдж «Принято».
+      final feedback = referenceAnswer.trim().isNotEmpty
+          ? '\u041e\u0442\u0432\u0435\u0442 \u043f\u0440\u0438\u043d\u044f\u0442. \u0421\u0432\u0435\u0440\u044c\u0442\u0435\u0441\u044c \u0441 \u043e\u0431\u0440\u0430\u0437\u0446\u043e\u043c \u043d\u0438\u0436\u0435.'
+          : '\u041e\u0442\u0432\u0435\u0442 \u043f\u0440\u0438\u043d\u044f\u0442.';
+      return (correct: null, feedback: feedback, score: 0.5);
     }
   }
 
@@ -375,13 +382,11 @@ class LearningActivityService {
 }
 
 /// Текст шага «объяснение»: подробный details, либо связка
-/// one_liner + аналогия + связи — но не голый one_liner.
-String _explainBody(KnowledgeNode node) {
+/// one_liner + связи — но не голый one_liner. Аналогия НЕ включается:
+/// она отдаётся шагу «пример» (fallbackExample), иначе оба шага дублируются.
+String explainBody(KnowledgeNode node) {
   if (node.details.isNotEmpty) return node.details;
   final parts = <String>[node.oneLiner];
-  if (node.analogy != null && node.analogy!.isNotEmpty) {
-    parts.add('\u0410\u043d\u0430\u043b\u043e\u0433\u0438\u044f: ${node.analogy}');
-  }
   final related = node.relations
       .map((r) => r.label?.trim() ?? '')
       .where((l) => l.isNotEmpty)
@@ -480,11 +485,28 @@ class _ApplyGen {
   return _fallbackApply(node);
 }
 
-String _fallbackExample(KnowledgeNode node) {
+/// Защита от дубля «пример повторяет объяснение»: если LLM/fallback вернул
+/// для примера тот же текст, что в шаге «объяснение», подменяем его на
+/// fallback-пример (аналогия либо нейтральная инструкция) — иначе пользователь
+/// видит одинаковые шаги подряд.
+String ensureDistinctExample(KnowledgeNode node, String explainBody, String example) {
+  final a = example.trim();
+  final b = explainBody.trim();
+  if (a.isEmpty) return fallbackExample(node);
+  if (b.isNotEmpty && (a == b || a.contains(b) || b.contains(a))) {
+    return fallbackExample(node);
+  }
+  return a;
+}
+
+/// Fallback «пример»: НЕ повторяет определение (one_liner) — иначе пример
+/// дублирует шаг «объяснение». Используем аналогию либо нейтральную инструкцию.
+String fallbackExample(KnowledgeNode node) {
   if (node.analogy != null && node.analogy!.isNotEmpty) {
     return '\u0410\u043d\u0430\u043b\u043e\u0433\u0438\u044f: ${node.analogy}';
   }
-  return '\u041f\u0440\u0438\u043c\u0435\u0440 \u043f\u043e\u043d\u044f\u0442\u0438\u044f \u00ab${node.label}\u00bb: ${node.oneLiner} \u2014 \u0440\u0430\u0441\u0441\u043c\u043e\u0442\u0440\u0438\u0442\u0435 \u044d\u0442\u043e \u043d\u0430 \u043e\u0434\u043d\u043e\u043c \u043f\u0440\u043e\u0441\u0442\u043e\u043c \u0441\u043b\u0443\u0447\u0430\u0435 \u0438\u0437 \u0442\u0435\u043c\u044b.';
+  return '\u0420\u0430\u0441\u0441\u043c\u043e\u0442\u0440\u0438\u0442\u0435, \u043a\u0430\u043a \u043f\u043e\u043d\u044f\u0442\u0438\u0435 \u00ab${node.label}\u00bb \u043f\u0440\u043e\u044f\u0432\u043b\u044f\u0435\u0442\u0441\u044f \u0432\u043e\u043a\u0440\u0443\u0433: \u0432 \u0436\u0438\u0437\u043d\u0438, \u0440\u0430\u0431\u043e\u0442\u0435 \u0438\u043b\u0438 \u0443\u0447\u0451\u0431\u0435. '
+      '\u041f\u0440\u0438\u0432\u0435\u0434\u0438\u0442\u0435 \u043e\u0434\u0438\u043d \u043f\u0440\u043e\u0441\u0442\u043e\u0439 \u043f\u0440\u0438\u043c\u0435\u0440, \u0433\u0434\u0435 \u043e\u043d\u043e \u043f\u0440\u0438\u043c\u0435\u043d\u0438\u043c\u043e, \u0438 \u0440\u0430\u0437\u0431\u0435\u0440\u0438\u0442\u0435 \u0435\u0433\u043e.';
 }
 
 ({String question, List<String> options, int correctIndex}) _fallbackRecall(

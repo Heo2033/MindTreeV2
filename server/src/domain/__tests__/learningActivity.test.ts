@@ -5,6 +5,9 @@ import {
   nextPendingIndex,
   parseSteps,
   parseActivityBlob,
+  fallbackExample,
+  explainBody,
+  ensureDistinctExample,
   type ActivityStep,
 } from "../LearningActivityService.js";
 
@@ -84,6 +87,53 @@ describe("LearningActivityService helpers", () => {
       expect(parseActivityBlob("{oops")).toEqual({ steps: [] });
       expect(parseActivityBlob("")).toEqual({ steps: [] });
       expect(parseActivityBlob('{"itemId":"ci_1","steps":{}}')).toEqual({ steps: [] });
+    });
+  });
+
+  describe("fallbackExample / explainBody / ensureDistinctExample (зеркало flutter)", () => {
+    const node = {
+      id: "n1",
+      label: "Понятие X",
+      one_liner: "Определение понятия X",
+      details: "Подробное объяснение",
+      analogy: null,
+      difficulty: 0.5,
+      parent_id: null,
+    };
+
+    it("fallbackExample не повторяет определение и содержит пример", () => {
+      const text = fallbackExample(node);
+      expect(text).not.toContain("Определение понятия X");
+      expect(text).toContain("Понятие X");
+      expect(text).toContain("пример");
+    });
+
+    it("fallbackExample использует аналогию, если она есть", () => {
+      expect(fallbackExample({ ...node, analogy: "Это как рецепт блюда" })).toContain(
+        "Аналогия: Это как рецепт блюда",
+      );
+    });
+
+    it("explainBody (fallback без details) НЕ содержит аналогию", () => {
+      const text = explainBody(
+        { ...node, details: "", analogy: "Это как рецепт блюда" },
+        [],
+      );
+      expect(text).toContain("Определение понятия X");
+      expect(text).not.toContain("Аналогия");
+    });
+
+    it("ensureDistinctExample подменяет дубль объяснения на fallback-пример", () => {
+      const explain = "Объяснение с определениями";
+      const distinct = ensureDistinctExample(node, explain, explain);
+      expect(distinct).toContain("Понятие X");
+      expect(distinct).not.toBe(explain);
+    });
+
+    it("ensureDistinctExample не трогает различный пример", () => {
+      expect(ensureDistinctExample(node, "Объяснение", "Пример про жизнь")).toBe(
+        "Пример про жизнь",
+      );
     });
   });
 });

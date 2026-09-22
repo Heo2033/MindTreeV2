@@ -86,7 +86,7 @@ class _StatefulSessionNotifier extends SessionNotifier {
     String? nodeId,
     String quality = 'correct',
   }) async {
-    state = state.copyWith(activity: null, answeredStepView: () => null);
+    state = state.copyWith(clearActivity: true, answeredStepView: () => null);
   }
 
   @override
@@ -251,6 +251,30 @@ void main() {
 
       expect(find.text('Верно'), findsOneWidget);
       expect(find.text('Есть ошибки'), findsNothing);
+    });
+
+    testWidgets('apply без оценки (LLM недоступен) — «Принято» и «Образец ответа»',
+        (tester) async {
+      final activity = _activity(const [
+        ActivityStep(
+          type: 'apply',
+          title: 'Применение',
+          status: 'answered',
+          userAnswer: 'Мой ответ',
+          correct: null,
+          feedback: 'Ответ принят. Сверьтесь с образцом ниже.',
+          bestAnswer: 'Образец ответа для проверки',
+        ),
+      ]);
+      await _pumpSession(tester, activity: activity, answeredStepView: 0);
+
+      expect(find.text('Принято'), findsOneWidget);
+      expect(find.text('Есть ошибки'), findsNothing);
+      // Образец показывается, чтобы пользователь мог свериться (фикс Issue 2).
+      expect(find.text('Образец ответа:'), findsOneWidget);
+      expect(find.text('Образец ответа для проверки'), findsOneWidget);
+      expect(find.text('Лучший ответ:'), findsNothing);
+      expect(find.text('Далее'), findsOneWidget);
     });
   });
 

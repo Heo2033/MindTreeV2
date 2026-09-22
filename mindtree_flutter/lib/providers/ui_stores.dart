@@ -480,6 +480,7 @@ class SessionState {
     int? currentIndex,
     AdaptiveDecision? adaptive,
     LearningActivity? activity,
+    bool clearActivity = false,
     int? Function()? answeredStepView,
     bool? studying,
     bool? loading,
@@ -491,7 +492,7 @@ class SessionState {
         currentItem: currentItem ?? this.currentItem,
         currentIndex: currentIndex ?? this.currentIndex,
         adaptive: adaptive ?? this.adaptive,
-        activity: activity ?? this.activity,
+        activity: clearActivity ? null : (activity ?? this.activity),
         answeredStepView:
             answeredStepView != null ? answeredStepView() : this.answeredStepView,
         studying: studying ?? this.studying,
@@ -621,14 +622,18 @@ class SessionNotifier extends StateNotifier<SessionState> {
   Future<void> answerStep(int stepIndex, String answer) async {
     final sessionId = state.session?.id;
     if (sessionId == null) return;
+    // Busy-флаг на время оценки (особенно apply: LLM-вызов без видимого хода
+    // заставлял думать, что кнопка «не работает»).
+    state = state.copyWith(loading: true, error: null);
     try {
       final activity = await _activityService.answer(sessionId, stepIndex, answer);
       state = state.copyWith(
         activity: activity,
         answeredStepView: () => stepIndex,
+        loading: false,
       );
     } catch (e) {
-      state = state.copyWith(error: '$e');
+      state = state.copyWith(loading: false, error: '$e');
     }
   }
 
@@ -646,7 +651,10 @@ class SessionNotifier extends StateNotifier<SessionState> {
         currentItem: current?.item,
         currentIndex: current?.index ?? session?.currentIndex ?? 0,
         adaptive: adaptive,
-        activity: null,
+        // Обязательно сбрасываем пройденную активность: без этого UI после
+        // «Завершить концепт» показывает старую завершённую активность и
+        // следующий концепт «сразу завершается».
+        clearActivity: true,
         studying: false,
         loading: false,
         advancing: false,

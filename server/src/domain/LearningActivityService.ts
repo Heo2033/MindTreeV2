@@ -217,11 +217,12 @@ export class LearningActivityService {
       );
     }
 
-    const exampleBody = generated.example?.trim()
+    const siblingLabels = siblingOneLiners(node);
+    const explainBodyText = node.details || explainBody(node, siblingLabels);
+    const rawExample = generated.example?.trim()
       ? generated.example
       : fallbackExample(node);
-
-    const siblingLabels = siblingOneLiners(node);
+    const exampleBody = ensureDistinctExample(node, explainBodyText, rawExample);
     const recall = generated.recall && generated.recall.options.length >= 2
       ? { question: generated.recall.question, options: generated.recall.options, correct_index: generated.recall.correct_index }
       : fallbackRecall(node, siblingLabels);
@@ -237,7 +238,7 @@ export class LearningActivityService {
       {
         type: "explain",
         title: "Изучаем понятие",
-        body: node.details || explainBody(node, siblingLabels),
+        body: explainBodyText,
         status: "pending",
       },
       {
@@ -328,26 +329,45 @@ export function rotateIndex(index: number, shift: number, length: number): numbe
   return ((index - ((shift % length) + length) % length) + length) % length;
 }
 
-function fallbackExample(node: KnowledgeNodeRow): string {
+export function fallbackExample(node: KnowledgeNodeRow): string {
   if (node.analogy) {
     return `Аналогия: ${node.analogy}`;
   }
-  return `Пример понятия «${node.label}»: ${node.one_liner} — рассмотрите это на одном простом случае из темы.`;
+  return `Рассмотрите, как понятие «${node.label}» проявляется вокруг: в жизни, работе или учёбе. Приведите один простой пример, где оно применимо, и разберите его.`;
 }
 
 /**
  * Текст шага «объяснение»: подробный details, либо связка
- * one_liner + связи — но не голый one_liner (зеркало _explainBody flutter).
+ * one_liner + связи — но не голый one_liner. Аналогия НЕ включается:
+ * она отдаётся шагу «пример» (fallbackExample), иначе оба шага дублируются.
+ * (зеркало _explainBody flutter).
  */
-function explainBody(node: KnowledgeNodeRow, relatedLabels: string[]): string {
+export function explainBody(node: KnowledgeNodeRow, relatedLabels: string[]): string {
   const parts = [node.one_liner];
-  if (node.analogy) {
-    parts.push(`Аналогия: ${node.analogy}`);
-  }
   if (relatedLabels.length > 0) {
     parts.push(`Связанные понятия: ${relatedLabels.slice(0, 3).join(", ")}.`);
   }
   return parts.join("\n\n");
+}
+
+/**
+ * Защита от дубля «пример повторяет объяснение»: если LLM/fallback вернул
+ * для примера тот же текст, что в шаге «объяснение», подменяем его на
+ * fallback-пример (аналогия либо нейтральная инструкция).
+ * (зеркало _ensureDistinctExample flutter).
+ */
+export function ensureDistinctExample(
+  node: KnowledgeNodeRow,
+  explainBodyText: string,
+  example: string,
+): string {
+  const a = example.trim();
+  const b = explainBodyText.trim();
+  if (!a) return fallbackExample(node);
+  if (b && (a === b || a.includes(b) || b.includes(a))) {
+    return fallbackExample(node);
+  }
+  return a;
 }
 
 /**

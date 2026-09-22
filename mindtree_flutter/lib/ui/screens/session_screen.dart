@@ -180,20 +180,23 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         Expanded(
           child: SingleChildScrollView(
             padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                if (_showPlan) _buildPlan(session, ss),
-                const SizedBox(height: 16),
-                if (ss.activity != null)
-                  _buildActivityStep(ss)
-                else if (ss.currentItem != null)
-                  _buildStudyPrompt(ss)
-                else if (progress >= 1.0)
-                  _buildAllComplete(ss)
-                else
-                  _buildWaitingForActivity(ss),
-              ],
+            // Тексты сессии можно выделять/копировать (SelectionArea).
+            child: SelectionArea(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (_showPlan) _buildPlan(session, ss),
+                  const SizedBox(height: 16),
+                  if (ss.activity != null)
+                    _buildActivityStep(ss)
+                  else if (ss.currentItem != null)
+                    _buildStudyPrompt(ss)
+                  else if (progress >= 1.0)
+                    _buildAllComplete(ss)
+                  else
+                    _buildWaitingForActivity(ss),
+                ],
+              ),
             ),
           ),
         ),
@@ -560,6 +563,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     return _ApplyInputWidget(
       instruction: step.instruction,
       placeholder: step.placeholder,
+      busy: _sessionState.loading,
       onSubmit: (answer) => _session.answerStep(stepIndex, answer),
     );
   }
@@ -568,18 +572,25 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     return AppButton(
       'Продолжить',
       fullWidth: true,
+      busy: _sessionState.loading,
       onPressed: () => _session.answerStep(stepIndex, ''),
     );
   }
 
   Widget _buildFeedback(ActivityStep step) {
     final isCorrect = step.correct == true;
-    final isReadStep = step.correct == null;
+    final isNeutral = step.correct == null;
+    final isReadStep =
+        isNeutral && (step.type == 'explain' || step.type == 'example');
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         if (isReadStep)
           const StatusBadge('Прочитано', variant: BadgeVariant.muted)
+        else if (isNeutral)
+          // apply без автоматической оценки (LLM недоступен) — «Принято»,
+          // а не ложное «Есть ошибки».
+          const StatusBadge('Принято', variant: BadgeVariant.muted)
         else
           StatusBadge(
             isCorrect ? 'Верно' : 'Есть ошибки',
@@ -589,7 +600,9 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
           const SizedBox(height: 12),
           FormattedText(step.feedback!),
         ],
-        if (!isReadStep && step.bestAnswer != null && !isCorrect) ...[
+        if (!isReadStep &&
+            step.bestAnswer != null &&
+            step.correct != true) ...[
           const SizedBox(height: 12),
           Container(
             padding: const EdgeInsets.all(12),
@@ -601,7 +614,9 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Лучший ответ:',
+                  // Нейтральная оценка (LLM недоступен) — «образец», а не
+                  // «лучший ответ» (нет вердикта, только ориентир для сверки).
+                  isNeutral ? 'Образец ответа:' : 'Лучший ответ:',
                   style: Theme.of(context).textTheme.labelSmall?.copyWith(
                         color: AppColors.textMuted(context),
                       ),
@@ -616,6 +631,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         AppButton(
           'Далее',
           fullWidth: true,
+          busy: _sessionState.loading,
           onPressed: () => _advanceStep(),
         ),
       ],
@@ -767,11 +783,13 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
 class _ApplyInputWidget extends StatefulWidget {
   final String? instruction;
   final String? placeholder;
+  final bool busy;
   final ValueChanged<String> onSubmit;
 
   const _ApplyInputWidget({
     this.instruction,
     this.placeholder,
+    this.busy = false,
     required this.onSubmit,
   });
 
@@ -808,6 +826,7 @@ class _ApplyInputWidgetState extends State<_ApplyInputWidget> {
         AppButton(
           'Проверить',
           fullWidth: true,
+          busy: widget.busy,
           onPressed: () {
             final answer = _controller.text.trim();
             if (answer.isNotEmpty) widget.onSubmit(answer);

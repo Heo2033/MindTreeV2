@@ -48,7 +48,13 @@ class TopicNotifier extends StateNotifier<TopicState> {
 
   Future<void> loadTopics() async {
     final repo = await _repoOrNull();
-    if (repo == null) return;
+    if (repo == null) {
+      state = state.copyWith(
+        loading: false,
+        error: 'Не удалось открыть хранилище. Проверьте доступ к базе данных.',
+      );
+      return;
+    }
     state = state.copyWith(loading: true, error: null);
     try {
       final topics = await repo.listTopics();
@@ -196,7 +202,13 @@ class GraphNotifier extends StateNotifier<GraphState> {
 
   Future<void> loadTopic(String id) async {
     final repo = await _repoOrNull();
-    if (repo == null) return;
+    if (repo == null) {
+      state = state.copyWith(
+        loading: false,
+        error: 'Не удалось открыть хранилище. Проверьте доступ к базе данных.',
+      );
+      return;
+    }
     state = state.copyWith(loading: true, error: null);
     try {
       final topic = await repo.getTopic(id);

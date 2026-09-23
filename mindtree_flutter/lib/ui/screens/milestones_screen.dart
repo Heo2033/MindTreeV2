@@ -117,7 +117,17 @@ class _MilestonesScreenState extends ConsumerState<MilestonesScreen> {
       await repo.updateMilestone(updated);
       final journey = await repo.getJourneyForTopic(widget.topicId);
       if (mounted) setState(() => _journey = journey);
-    } catch (_) {}
+    } catch (e) {
+      // Не молчим: смена статуса не сохранилась — сообщаем, список остаётся.
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Не удалось сохранить статус вехи: $e'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    }
   }
 
   Future<void> _startSession(String? milestoneId) async {

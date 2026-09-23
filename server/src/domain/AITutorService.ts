@@ -69,8 +69,34 @@ export class AITutorService {
     | { kind: "token"; text: string }
     | { kind: "done"; usedFallback: boolean; timeRemainingMinutes?: number }
   > {
-    const ctx = this.buildContext(topicId, opts);
-    const prompt = this.buildPrompt(ctx, message);
+    let ctx: TutorContext;
+    let prompt: string;
+    try {
+      ctx = this.buildContext(topicId, opts);
+      prompt = this.buildPrompt(ctx, message);
+    } catch (err) {
+      // Контекст не собрался (ошибка БД/модели) — не роняем стрим, отдаём fallback.
+      const text = this.fallbackText(
+        {
+          topic: undefined,
+          currentLevel: "awareness",
+          targetLevel: "basic_understanding",
+          currentNode: undefined,
+          currentMastery: undefined,
+          misconceptions: [],
+          recentAttempts: [],
+          timeRemainingMinutes: undefined,
+        },
+        message,
+        err,
+      );
+      const chunk = 64;
+      for (let i = 0; i < text.length; i += chunk) {
+        yield { kind: "token", text: text.slice(i, i + chunk) };
+      }
+      yield { kind: "done", usedFallback: true, timeRemainingMinutes: undefined };
+      return;
+    }
 
     try {
       const stream = getScheduler().executeStream("tutor", () => prompt, {

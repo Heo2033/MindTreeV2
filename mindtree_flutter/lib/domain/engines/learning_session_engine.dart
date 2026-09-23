@@ -4,6 +4,8 @@ import '../models/models.dart';
 import '../../data/database/mindtree_repository.dart';
 import '../../data/llm/scheduler.dart';
 import '../../data/llm/client.dart';
+import 'package:mindtree_flutter/domain/lib/short_ids.dart';
+
 import '../../data/prompts/prompts.dart';
 import 'learner_model_service.dart';
 import 'review_scheduler.dart';
@@ -43,7 +45,7 @@ class LearningSessionEngine {
   Future<LearningSession> create(CreateSessionInput input) async {
     var journeyId = input.journeyId;
     if (journeyId == null) {
-      journeyId = 'journey_${_shortId()}';
+      journeyId = shortIdWith('journey_');
       await repo.createJourney(journeyId, input.topicId);
     }
 
@@ -64,7 +66,7 @@ class LearningSessionEngine {
       nodes: ordered,
     );
 
-    final sessionId = 'session_${_shortId()}';
+    final sessionId = shortIdWith('session_');
     final session = LearningSession(
       id: sessionId,
       journeyId: journeyId,
@@ -268,7 +270,7 @@ class LearningSessionEngine {
         ? [for (final nid in studiedNodeIds) await _nodeBrief(session.topicId, nid)]
         : await _allNodeBriefs(session.topicId);
 
-    final assessmentId = 'assess_${_shortId()}';
+    final assessmentId = shortIdWith('assess_');
     final assessment = Assessment(
       id: assessmentId,
       sessionId: sessionId,
@@ -330,27 +332,34 @@ class LearningSessionEngine {
         onTimeout: () => throw TimeoutException('Curriculum LLM timeout'),
       );
       final parsed = parseCurriculumResult(res.result);
-      final itemsRaw = parsed['items'] as List<Map<String, dynamic>>;
       final nodeById = {for (final n in nodes) n.id: n};
 
-      final items = itemsRaw.asMap().entries.map((e) {
-        final i = e.key;
-        final item = e.value;
-        final nodeId = item['node_id'] as String;
-        final node = nodeById[nodeId];
-        return CurriculumItem(
-          id: 'itemId_${i + 1}',
-          nodeId: nodeId,
-          label: node?.label ?? nodeId,
-          order: (item['order'] as num?)?.toInt() ?? (i + 1),
-          type: CurriculumItemType.explain,
-          estimatedMinutes: (item['estimated_minutes'] as num?)?.toInt()
-              ?? node?.estimatedTimeMinutes ?? 5,
-          priority: node?.importance ?? 0.5,
-          status: CurriculumItemStatus.pending,
-          reason: item['why'] as String?,
-        );
-      }).toList();
+      final itemsRaw = parsed['items'];
+      // Контракт хрупкий: не допускаем TypeError на кривом JSON модели —
+      // отбираем только валидные пункты, остальное отдаётся fallback'у ниже.
+      final items = <CurriculumItem>[];
+      if (itemsRaw is List) {
+        var i = 0;
+        for (final rawItem in itemsRaw) {
+          if (rawItem is! Map<String, dynamic>) continue;
+          final nodeId = rawItem['node_id'];
+          if (nodeId is! String) continue;
+          final node = nodeById[nodeId];
+          items.add(CurriculumItem(
+            id: 'itemId_${i + 1}',
+            nodeId: nodeId,
+            label: node?.label ?? nodeId,
+            order: (rawItem['order'] as num?)?.toInt() ?? (i + 1),
+            type: CurriculumItemType.explain,
+            estimatedMinutes: (rawItem['estimated_minutes'] as num?)?.toInt()
+                ?? node?.estimatedTimeMinutes ?? 5,
+            priority: node?.importance ?? 0.5,
+            status: CurriculumItemStatus.pending,
+            reason: rawItem['why'] as String?,
+          ));
+          i++;
+        }
+      }
 
       final fitted = fitPlanToBudget(items, timeBudgetMinutes);
       return Curriculum(
@@ -490,11 +499,6 @@ class LearningSessionEngine {
             correctAnswer: i.oneLiner.isNotEmpty ? i.oneLiner : 'Верный ответ',
           )).toList();
     }
-  }
-
-  static String _shortId() {
-    final hex = DateTime.now().millisecondsSinceEpoch.toRadixString(16);
-    return hex.substring(hex.length - 8);
   }
 
   static List<KnowledgeNode> _readingOrder(List<KnowledgeNode> nodes) {

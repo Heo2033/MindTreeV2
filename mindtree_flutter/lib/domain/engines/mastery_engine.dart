@@ -202,16 +202,15 @@ unknown (не знал), confused (перепутал понятия), incomplet
   MasteryResult _parseMasteryResult(Map<String, dynamic> data) {
     final conceptsRaw = data['concepts'];
     final List<MasteryConceptResult> concepts = conceptsRaw is List
-        ? conceptsRaw.map((c) {
-            final m = c as Map<String, dynamic>;
-            final miscon = m['misconception'];
+        ? conceptsRaw.whereType<Map<String, dynamic>>().map((c) {
+            final miscon = c['misconception'];
             return MasteryConceptResult(
-              nodeId: m['nodeId'] as String? ?? '',
-              understanding: (m['understanding'] as num? ?? 0).toDouble(),
-              recall: (m['recall'] as num? ?? 0).toDouble(),
-              application: (m['application'] as num? ?? 0).toDouble(),
-              transfer: (m['transfer'] as num? ?? 0).toDouble(),
-              confidence: (m['confidence'] as num? ?? 0).toDouble(),
+              nodeId: c['nodeId'] as String? ?? '',
+              understanding: (c['understanding'] as num? ?? 0).toDouble(),
+              recall: (c['recall'] as num? ?? 0).toDouble(),
+              application: (c['application'] as num? ?? 0).toDouble(),
+              transfer: (c['transfer'] as num? ?? 0).toDouble(),
+              confidence: (c['confidence'] as num? ?? 0).toDouble(),
               misconception: miscon is Map<String, dynamic>
                   ? miscon
                   : null,

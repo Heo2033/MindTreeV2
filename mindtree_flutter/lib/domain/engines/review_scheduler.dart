@@ -65,10 +65,23 @@ class ReviewScheduler {
     int limit = 10,
   }) async {
     final nodes = await repo.listNodes(topicId);
+    // Батч-чтение профилей одним запросом: раньше каждый узел делал
+    // собственный getLearnerModel (N+1) — на тему с сотней узлов это сто
+    // последовательных SELECT.
+    final profiles = await _learnerModel.getConceptProfiles(topicId);
+    final byNode = {
+      for (final p in profiles) p.nodeId: p,
+    };
+
     final due = <({String nodeId, String? dueAt})>[];
     for (final n in nodes) {
-      if (await isDueNode(n.id, topicId)) {
-        final p = await _learnerModel.getConceptProfile(n.id, topicId);
+      final p = byNode[n.id];
+      if (p == null || isDue(SrsState(
+            interval: p.srsInterval,
+            ease: p.srsEase,
+            reps: p.reviewCount,
+            dueAt: p.srsDueAt ?? DateTime.now().toIso8601String(),
+          ))) {
         due.add((nodeId: n.id, dueAt: p?.srsDueAt));
       }
     }

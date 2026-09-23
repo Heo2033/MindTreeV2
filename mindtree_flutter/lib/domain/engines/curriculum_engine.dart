@@ -4,6 +4,8 @@ import 'dart:math';
 import '../models/models.dart';
 import '../../data/llm/scheduler.dart';
 import '../../data/llm/client.dart';
+import 'package:mindtree_flutter/domain/lib/short_ids.dart';
+
 import '../../data/database/mindtree_repository.dart';
 import 'learner_model_service.dart';
 
@@ -122,19 +124,12 @@ class CurriculumEngine {
   final MindtreeRepository repo;
   final TreeScheduler scheduler;
   final LearnerModelService learnerModel;
-  final Random _random = Random();
 
   CurriculumEngine({
     required this.repo,
     required this.scheduler,
     LearnerModelService? learnerModel,
   }) : learnerModel = learnerModel ?? LearnerModelService(repo);
-
-  String _shortId() {
-    final ts = DateTime.now().millisecondsSinceEpoch.toRadixString(36);
-    final rnd = _random.nextInt(0xFFFFFF).toRadixString(36).padLeft(6, '0');
-    return (ts.substring(max(0, ts.length - 8)) + rnd).substring(0, 8);
-  }
 
   /// Generate a curriculum from the full knowledge tree.
   Future<CurriculumPlanResult> generate(CurriculumRequest req) async {
@@ -168,7 +163,7 @@ class CurriculumEngine {
       final est = max(1, item.estimatedMinutes).toDouble();
       final priority = scorePriority(goalRelevance, prerequisiteValue, importance, est);
       return CurriculumItem(
-        id: 'ci_${_shortId()}',
+        id: shortIdWith('ci_'),
         nodeId: item.nodeId,
         label: node?.label ?? item.nodeId,
         order: order,
@@ -185,7 +180,7 @@ class CurriculumEngine {
       repairOrder(items, req.nodes);
     }
 
-    final sessionId = 'curriculum_${_shortId()}';
+    final sessionId = shortIdWith('curriculum_');
     final total = items.fold<int>(0, (s, i) => s + i.estimatedMinutes);
 
     return CurriculumPlanResult(

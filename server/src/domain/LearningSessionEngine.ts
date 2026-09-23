@@ -4,7 +4,6 @@ import type {
   Curriculum,
   KnowledgeNode,
 } from "@mindtree/types";
-import crypto from "crypto";
 import { getDb } from "../db/connection.js";
 import { CurriculumEngine } from "./CurriculumEngine.js";
 import { AssessmentEngine } from "./AssessmentEngine.js";
@@ -12,6 +11,7 @@ import { MasteryEngine } from "./MasteryEngine.js";
 import { ReviewScheduler } from "./ReviewScheduler.js";
 import { LearnerModelService } from "./LearnerModelService.js";
 import { EventBus } from "./EventBus.js";
+import { shortIdWith } from "./shortIds.js";
 import { getScheduler } from "../llm/scheduler.js";
 import { parseLLMJson } from "../llm/client.js";
 import { buildContentPrompt, isCriticalDomain } from "../prompts/content.js";
@@ -38,7 +38,7 @@ export class LearningSessionEngine {
   async create(input: CreateSessionInput): Promise<LearningSession> {
     let journeyId = input.journeyId;
     if (!journeyId) {
-      journeyId = `journey_${crypto.randomUUID().slice(0, 8)}`;
+      journeyId = shortIdWith("journey_");
       getDb()
         .prepare(`INSERT INTO learning_journeys (id, topic_id) VALUES (?,?)`)
         .run(journeyId, input.topicId);
@@ -65,7 +65,7 @@ export class LearningSessionEngine {
     // re-key curriculum with actual session id placeholder
     curriculum.sessionId = "";
 
-    const sessionId = `session_${crypto.randomUUID().slice(0, 8)}`;
+    const sessionId = shortIdWith("session_");
     curriculum.sessionId = sessionId;
 
     getDb()

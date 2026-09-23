@@ -442,7 +442,9 @@ class _RecallGen {
 
   factory _RecallGen.fromJson(Map<String, dynamic> j) => _RecallGen(
         question: (j['question'] as String?) ?? '',
-        options: (j['options'] as List<dynamic>? ?? []).cast<String>(),
+        options: (j['options'] as List<dynamic>? ?? [])
+            .whereType<String>()
+            .toList(),
         correctIndex: (j['correct_index'] as num?)?.toInt() ?? 0,
       );
 }

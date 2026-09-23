@@ -3,6 +3,8 @@ import 'dart:math';
 import '../models/models.dart';
 import '../../data/llm/scheduler.dart';
 import '../../data/llm/client.dart';
+import 'package:mindtree_flutter/domain/lib/short_ids.dart';
+
 import '../../data/database/mindtree_repository.dart';
 
 // ─── Prompt constants ─────────────────────────────────────────────────────────
@@ -151,15 +153,8 @@ MilestoneLlmResult parseMilestoneResult(dynamic data) {
 class MilestoneEngine {
   final MindtreeRepository repo;
   final TreeScheduler scheduler;
-  final Random _random = Random();
 
   MilestoneEngine({required this.repo, required this.scheduler});
-
-  String _shortId() {
-    final ts = DateTime.now().millisecondsSinceEpoch.toRadixString(36);
-    final rnd = _random.nextInt(0xFFFFFF).toRadixString(36).padLeft(6, '0');
-    return (ts.substring(max(0, ts.length - 8)) + rnd).substring(0, 8);
-  }
 
   /// Build learning milestones for a journey, persisted via repository.
   Future<List<LearningMilestone>> generate(String journeyId, String topicId) async {
@@ -185,7 +180,7 @@ class MilestoneEngine {
     }
 
     final persisted = milestones.map((m) {
-      final id = 'ms_${_shortId()}';
+      final id = shortIdWith('ms_');
       final level = MasteryLevel.fromString(m.level);
       final status = level == currentLevel
           ? MilestoneStatus.active

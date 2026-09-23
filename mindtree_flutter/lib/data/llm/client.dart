@@ -123,7 +123,18 @@ const _strongOps = {
   'tutor', 'milestone',
 };
 
-ModelTier tierForOperation(String op) => _strongOps.contains(op) ? tierStrong : tierFast;
+/// Операции, явно приписанные к быстрому тиру («остальное» по AGENTS.md).
+/// Любая операция вне `_strongOps` тоже fast — список фиксирует намерение
+/// (например, `feedback` — дешёвая оценка ответа шага, не LLM-мастерство)
+/// и защищает от случайного переноса операции в strong.
+const _fastOps = {
+  'feedback', 'activity', 'content', 'expand',
+};
+
+ModelTier tierForOperation(String op) {
+  if (_fastOps.contains(op)) return tierFast;
+  return _strongOps.contains(op) ? tierStrong : tierFast;
+}
 
 String modelForTier(LLMConfig cfg, ModelTier tier) =>
     tier == tierStrong ? cfg.modelStrongResolved : cfg.modelFastResolved;

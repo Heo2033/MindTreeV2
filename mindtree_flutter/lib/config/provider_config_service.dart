@@ -151,7 +151,18 @@ class ProviderConfigService {
 
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_prefsKey);
-    final saved = raw != null ? jsonDecode(raw) as Map<String, dynamic> : null;
+    // Битую запись (обрыв, ручная правка) не превращаем в вечный boot-краш:
+    // сбрасываем ключ и возвращаемся к build-дефолтам.
+    Map<String, dynamic>? saved;
+    if (raw != null) {
+      try {
+        final decoded = jsonDecode(raw);
+        saved = decoded is Map<String, dynamic> ? decoded : null;
+      } catch (_) {
+        saved = null;
+        await prefs.remove(_prefsKey);
+      }
+    }
     final key = await _storage.read(key: _storageKey);
     final defaults = buildDefaults;
 
@@ -166,7 +177,7 @@ class ProviderConfigService {
       provider: saved?['provider'] as String? ?? defaults.provider,
       temperature: (saved?['temperature'] as num?)?.toDouble() ?? defaults.temperature,
       numCtx: (saved?['numCtx'] as num?)?.toInt() ?? defaults.numCtx,
-      runtimeConfigured: raw != null,
+      runtimeConfigured: saved != null,
     );
   }
 

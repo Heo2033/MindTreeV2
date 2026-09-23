@@ -6,8 +6,8 @@ import {
   parseMilestoneResult,
   type MilestoneResult,
 } from "../prompts/milestone.js";
-import crypto from "crypto";
 import { getDb } from "../db/connection.js";
+import { shortIdWith } from "./shortIds.js";
 
 export interface Milestone {
   id: string;
@@ -51,7 +51,7 @@ export class MilestoneEngine {
     }
 
     const persisted = milestones.map((m): Milestone => {
-      const id = `ms_${crypto.randomUUID().slice(0, 8)}`;
+      const id = shortIdWith("ms_");
       getDb()
         .prepare(
           `INSERT INTO learning_milestones

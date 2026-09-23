@@ -137,7 +137,7 @@ class FeedbackEngine {
     String? misconception;
     try {
       final res = await scheduler.execute<dynamic>(
-        'mastery',
+        'feedback',
         () => prompt,
         (raw) => parseLLMJson<dynamic>(raw),
         cacheKey: 'activity_fb:$nodeId:${_fnv1aHash(userAnswer)}',

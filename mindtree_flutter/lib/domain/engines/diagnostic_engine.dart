@@ -1,5 +1,6 @@
 import 'dart:convert';
-import 'dart:math';
+
+import 'package:mindtree_flutter/domain/lib/short_ids.dart';
 
 import '../../data/database/mindtree_repository.dart';
 import '../../data/llm/client.dart';
@@ -127,13 +128,12 @@ List<DiagnosticQuestion> _parseDiagnosticResult(String raw) {
   if (data is! Map<String, dynamic>) return [];
   final questions = data['questions'];
   if (questions is! List) return [];
-  final rng = Random();
   return questions.whereType<Map<String, dynamic>>().map((q) {
     final options = q['options'];
     return DiagnosticQuestion(
       id: q['id'] is String
           ? q['id'] as String
-          : 'd_${rng.nextInt(0xffffff).toRadixString(36)}',
+          : shortIdWith('d_'),
       nodeId: q['nodeId'] is String ? q['nodeId'] as String : '',
       question: q['question'] is String ? q['question'] as String : '',
       options: options is List ? options.whereType<String>().toList() : const [],

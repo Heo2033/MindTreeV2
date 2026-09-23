@@ -55,11 +55,25 @@ export class ReviewScheduler {
     const nodes = getDb()
       .prepare(`SELECT id FROM knowledge_nodes WHERE topic_id = ?`)
       .all(topicId) as Array<{ id: string }>;
+
+    // Батч: один запрос профилей вместо N+1 по каждому узлу (зеркало review_scheduler.dart).
+    const byNode = new Map(
+      this.learnerModel.getConceptProfiles(topicId).map((p) => [p.nodeId, p]),
+    );
+
     const due: Array<{ nodeId: string; dueAt: string | null }> = [];
     for (const n of nodes) {
-      if (this.isDueNode(n.id, topicId)) {
-        const p = this.learnerModel.getConceptProfile(n.id, topicId);
-        due.push({ nodeId: n.id, dueAt: p?.srsDueAt ?? null });
+      const profile = byNode.get(n.id);
+      if (
+        profile == null ||
+        isDue({
+          interval: profile.srsInterval,
+          ease: profile.srsEase,
+          reps: profile.reviewCount,
+          dueAt: profile.srsDueAt ?? new Date().toISOString(),
+        })
+      ) {
+        due.push({ nodeId: n.id, dueAt: profile?.srsDueAt ?? null });
       }
     }
     return due

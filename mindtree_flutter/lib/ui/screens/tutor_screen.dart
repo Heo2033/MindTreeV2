@@ -51,6 +51,9 @@ class _TutorScreenState extends ConsumerState<TutorScreen> {
   }
 
   Future<void> _send() async {
+    // Двойная отправка (Enter + кнопка) не должна слать второй запрос:
+    // send() меняет state только после await, поэтому смотрим значение здесь.
+    if (ref.read(tutorStoreProvider).sending) return;
     final text = _controller.text.trim();
     if (text.isEmpty) return;
     _controller.clear();

@@ -238,6 +238,53 @@ testWidgets('hover shows «Углубить» on a true leaf; tapping it deepens
       expect(state.debugHoveredEdgeId, isNull);
       expect(tester.takeException(), isNull);
     });
+
+    testWidgets('degenerate edge between overlapping nodes does not crash',
+        (tester) async {
+      // Регрессия «Bad state: No element» в _paintArrow/_paintEdgeLabel:
+      // ребро, источник и цель которого лежат в одной точке (вырожденная
+      // геометрия), не должно ронять отрисовку стрелки и метки.
+      final a = _node('a', 1, label: 'A', relations: [
+        Relation(from: 'a', to: 'a', type: RelationType.requires),
+      ]);
+      final node = _fixedNode(
+          id: 'a',
+          x: 140,
+          y: 110,
+          w: 200,
+          h: 80,
+          node: a,
+          isCompact: false,
+          canReveal: false,
+          canDeepen: false);
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 800,
+            height: 600,
+            child: GraphCanvas(
+              nodes: [node],
+              edges: [
+                (
+                  id: 'rel:a-self',
+                  source: 'a',
+                  target: 'a',
+                  sourceHandle: 'right',
+                  targetHandle: 'right',
+                  kind: 'relation',
+                  color: const Color(0xFFF97316),
+                  label: 'требует',
+                ),
+              ],
+              onNodeTap: (_) {},
+              onNodeLongPress: (_) {},
+            ),
+          ),
+        ),
+      ));
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+    });
   });
 }
 

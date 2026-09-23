@@ -90,8 +90,28 @@ class AITutorService {
     String? sessionId,
     String? nodeId,
   }) async* {
-    final ctx = await _buildContext(topicId, sessionId: sessionId, nodeId: nodeId);
-    final prompt = _buildPrompt(ctx, message);
+    late final _TutorContext ctx;
+    late final String prompt;
+    try {
+      ctx = await _buildContext(topicId, sessionId: sessionId, nodeId: nodeId);
+      prompt = _buildPrompt(ctx, message);
+    } catch (err) {
+      // Контекст не собрался (ошибка БД/модели) — не роняем стрим, отдаём fallback.
+      final text = _fallbackText(
+        const _TutorContext(
+          targetLevel: 'basic_understanding',
+          currentLevel: 'awareness',
+        ),
+        message,
+        err,
+      );
+      const chunk = 64;
+      for (var i = 0; i < text.length; i += chunk) {
+        yield {'kind': 'token', 'text': text.substring(i, math.min(i + chunk, text.length))};
+      }
+      yield {'kind': 'done', 'usedFallback': true, 'timeRemainingMinutes': null};
+      return;
+    }
 
     try {
       final stream = scheduler.executeStream('tutor', () => prompt);

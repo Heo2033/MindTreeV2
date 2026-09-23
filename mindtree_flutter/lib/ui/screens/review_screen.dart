@@ -90,7 +90,19 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     try {
       final scheduler = ref.read(reviewSchedulerProvider);
       await scheduler.onAnswered(widget.topicId, card.nodeId, quality);
-    } catch (_) {}
+    } catch (e) {
+      // Не «сжигаем» карточку и не теряем ответ: повторение остаётся в списке,
+      // пользователь видит ошибку и может повторить оценку ещё раз.
+      if (!mounted) return;
+      setState(() => _busy = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Не удалось сохранить ответ: $e'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
 
     if (!mounted) return;
     setState(() {

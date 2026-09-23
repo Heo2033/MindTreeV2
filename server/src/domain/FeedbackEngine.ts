@@ -52,7 +52,7 @@ export class FeedbackEngine {
     let misconception: string | null = null;
     try {
       const res = await getScheduler().execute(
-        "mastery",
+        "feedback",
         () => prompt,
         (raw) =>
           parseLLMJson<{

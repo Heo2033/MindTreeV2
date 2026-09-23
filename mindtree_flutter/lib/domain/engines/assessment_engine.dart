@@ -1,5 +1,6 @@
 import 'dart:convert';
-import 'dart:math';
+
+import 'package:mindtree_flutter/domain/lib/short_ids.dart';
 
 import '../../data/database/mindtree_repository.dart';
 import '../../data/llm/client.dart';
@@ -106,13 +107,12 @@ List<AssessmentQuestion> _parseAssessmentResult(String raw) {
   if (data is! Map<String, dynamic>) return [];
   final questions = data['questions'];
   if (questions is! List) return [];
-  final rng = Random();
   return questions.whereType<Map<String, dynamic>>().map((q) {
     final options = q['options'];
     return AssessmentQuestion(
       id: q['id'] is String
           ? q['id'] as String
-          : 'a_${rng.nextInt(0xffffff).toRadixString(36)}',
+          : shortIdWith('a_'),
       type: QuestionType.fromString(q['type'] as String? ?? 'recall'),
       nodeId: q['nodeId'] is String ? q['nodeId'] as String : '',
       question: q['question'] is String ? q['question'] as String : '',
@@ -172,7 +172,7 @@ class AssessmentEngine {
       }).toList();
     }
 
-    final id = 'asmt_${_randomSuffix()}';
+    final id = shortIdWith('asmt_');
     final assessment = Assessment(
       id: id,
       sessionId: sessionId,
@@ -194,7 +194,7 @@ class AssessmentEngine {
     String? feedback,
   }) async {
     final attempt = Attempt(
-      id: 'att_${_randomSuffix()}',
+      id: shortIdWith('att_'),
       assessmentId: assessmentId,
       questionId: questionId,
       answer: answer,
@@ -221,10 +221,5 @@ class AssessmentEngine {
 
   Future<Assessment?> getById(String assessmentId) async {
     return repo.getAssessment(assessmentId);
-  }
-
-  static String _randomSuffix() {
-    final rng = Random();
-    return rng.nextInt(0xffffffff).toRadixString(16).padLeft(8, '0');
   }
 }

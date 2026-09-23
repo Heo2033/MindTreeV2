@@ -7,7 +7,7 @@ import {
   type CurriculumPromptContext,
 } from "../prompts/curriculum.js";
 import { LearnerModelService } from "./LearnerModelService.js";
-import crypto from "crypto";
+import { shortIdWith } from "./shortIds.js";
 
 export interface CurriculumRequest {
   topicId: string;
@@ -74,7 +74,7 @@ export class CurriculumEngine {
         const est = Math.max(1, item.estimated_minutes);
         const priority = scorePriority(goalRelevance, prerequisiteValue, importance, est);
         return {
-          id: `ci_${crypto.randomUUID().slice(0, 8)}`,
+          id: shortIdWith("ci_"),
           nodeId: item.node_id,
           label: node?.label ?? item.node_id,
           order,
@@ -96,7 +96,7 @@ export class CurriculumEngine {
     // больше минут, чем пользователь выделил (зеркало fitPlanToBudget flutter).
     const fitted = fitPlanToBudget(items, req.timeBudgetMinutes || 60);
 
-    const sessionId = `curriculum_${crypto.randomUUID().slice(0, 8)}`;
+    const sessionId = shortIdWith("curriculum_");
 
     return {
       curriculum: {

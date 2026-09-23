@@ -1,12 +1,12 @@
 import { getScheduler } from "../llm/scheduler.js";
 import { parseLLMJson } from "../llm/client.js";
-import crypto from "crypto";
 import {
   buildAssessmentPrompt,
   parseAssessmentResult,
   type AssessmentQuestionResult,
 } from "../prompts/assessment.js";
 import { getDb } from "../db/connection.js";
+import { shortIdWith } from "./shortIds.js";
 
 export interface AssessmentItem {
   nodeId: string;
@@ -69,7 +69,7 @@ export class AssessmentEngine {
       }));
     }
 
-    const id = `asmt_${crypto.randomUUID().slice(0, 8)}`;
+    const id = shortIdWith("asmt_");
     getDb()
       .prepare(
         `INSERT INTO assessments (id, session_id, type, questions_json, started_at)
@@ -95,7 +95,7 @@ export class AssessmentEngine {
          VALUES (?,?,?,?,?,?,?)`,
       )
       .run(
-        `att_${crypto.randomUUID().slice(0, 8)}`,
+        shortIdWith("att_"),
         assessmentId,
         questionId,
         answer,

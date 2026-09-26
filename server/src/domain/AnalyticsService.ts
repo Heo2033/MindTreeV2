@@ -180,13 +180,13 @@ export class AnalyticsService {
           WHERE s.topic_id = ?`,
       )
       .get(topicId) as { total?: number };
-    let minutes = Math.round((Number(events.total || 0) / 60000) * 10) / 10;
+    let minutes = Math.round(Number(events.total || 0) / 60000);
 
     // If no duration events, approximate from session span (capped).
     if (minutes === 0 && topicStart?.first) {
       const now = Date.now();
       const start = new Date(topicStart.first).getTime();
-      minutes = Math.round(((now - start) / 60000) / 10) / 10;
+      minutes = Math.round((now - start) / 60000);
       const sessions = db
         .prepare(`SELECT COUNT(*) AS n FROM learning_sessions WHERE topic_id = ?`)
         .get(topicId) as { n: number };
@@ -197,6 +197,8 @@ export class AnalyticsService {
 
   /**
    * Immediate accuracy by question type across assessments (final + quiz + diagnostic).
+   * Зеркало flutter: для каждой сессии берём только ПОСЛЕДНИЙ (latest) assessment
+   * каждого типа (final/quiz/diagnostic) — старые попытки не искажают метрику.
    */
   private accuracyByType(topicId: string): Array<{ type: string; accuracy: number }> {
     const db = getDb();
@@ -204,10 +206,16 @@ export class AnalyticsService {
       .prepare(
         `SELECT a.id, a.questions_json, a.type AS atype
            FROM assessments a
-           LEFT JOIN learning_sessions s ON s.id = a.session_id
-          WHERE s.topic_id = ? OR a.type IS NOT NULL`,
+           JOIN learning_sessions s ON s.id = a.session_id
+          WHERE s.topic_id = ?
+            AND a.started_at = (
+              SELECT MAX(a2.started_at)
+                FROM assessments a2
+                JOIN learning_sessions s2 ON s2.id = a2.session_id
+               WHERE s2.topic_id = ? AND s2.id = s.id AND a2.type = a.type
+            )`,
       )
-      .all(topicId) as Array<{ id: string; questions_json: string; atype: string }>;
+      .all(topicId, topicId) as Array<{ id: string; questions_json: string; atype: string }>;
 
     const byType: Record<string, { correct: number; total: number }> = {};
 
@@ -234,8 +242,9 @@ export class AnalyticsService {
   }
 
   /**
-   * Delayed recall: accuracy of recall questions that were asked via quiz/review
-   * after the study session's final assessment was completed.
+   * Delayed recall: точность recall-вопросов quiz/diagnostic, заданных ПОСЛЕ
+   * завершения сессии. Зеркало flutter: только последний (latest) quiz и
+   * последний (latest) diagnostic на сессию; final-проверки не учитываются.
    */
   private delayedRecall(topicId: string): number {
     const db = getDb();
@@ -244,10 +253,17 @@ export class AnalyticsService {
       .prepare(
         `SELECT a.id, a.type, a.questions_json
            FROM assessments a
-           LEFT JOIN learning_sessions s ON s.id = a.session_id
-          WHERE s.topic_id = ?`,
+           JOIN learning_sessions s ON s.id = a.session_id
+          WHERE s.topic_id = ?
+            AND a.type IN ('quiz', 'diagnostic')
+            AND a.started_at = (
+              SELECT MAX(a2.started_at)
+                FROM assessments a2
+                JOIN learning_sessions s2 ON s2.id = a2.session_id
+               WHERE s2.topic_id = ? AND s2.id = s.id AND a2.type = a.type
+            )`,
       )
-      .all(topicId) as Array<{ id: string; type: string; questions_json: string }>;
+      .all(topicId, topicId) as Array<{ id: string; type: string; questions_json: string }>;
 
     let correct = 0;
     let total = 0;
@@ -297,7 +313,7 @@ export class AnalyticsService {
 
     const first = db
       .prepare(
-        `SELECT MIN(started_at) AS first, MIN(completed_at) AS completed
+        `SELECT MIN(started_at) AS first, MAX(completed_at) AS completed
            FROM learning_sessions WHERE topic_id = ?`,
       )
       .get(topicId) as { first?: string; completed?: string };

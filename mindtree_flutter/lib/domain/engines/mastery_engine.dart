@@ -1,9 +1,8 @@
-import 'dart:convert';
-
 import '../models/models.dart';
 import '../../data/database/mindtree_repository.dart';
 import '../../data/llm/scheduler.dart';
 import '../../data/llm/client.dart' show parseLLMJson;
+import '../../data/prompts/prompts.dart';
 import 'learner_model_service.dart';
 
 class MasteryItem {
@@ -44,10 +43,19 @@ class MasteryEngine {
 
     MasteryResult? mastery;
     try {
-      final prompt = _buildMasteryPrompt(
+      final prompt = buildMasteryPrompt(
         topic: topic?.name ?? '',
         targetLevel: targetLevel,
-        items: items,
+        items: items.map((i) => {
+          'nodeId': i.nodeId,
+          'label': i.label,
+          'type': i.type,
+          'userAnswer': i.userAnswer.length > 800 ? i.userAnswer.substring(0, 800) : i.userAnswer,
+          'correct': i.correct,
+          'rubric': i.rubric != null
+              ? (i.rubric!.length > 400 ? i.rubric!.substring(0, 400) : i.rubric)
+              : null,
+        }).toList(),
       );
       final res = await scheduler.execute<Map<String, dynamic>>(
         'mastery',
@@ -132,71 +140,6 @@ class MasteryEngine {
           ? ['Требуется дополнительное закрепление ключевых понятий']
           : [],
     );
-  }
-
-  String _buildMasteryPrompt({
-    required String topic,
-    required String targetLevel,
-    required List<MasteryItem> items,
-  }) {
-    final itemsJson = jsonEncode(
-      items
-          .map((i) => {
-                'nodeId': i.nodeId,
-                'label': i.label,
-                'type': i.type,
-                'userAnswer':
-                    i.userAnswer.length > 800 ? i.userAnswer.substring(0, 800) : i.userAnswer,
-                'correct': i.correct,
-                'rubric': i.rubric != null
-                    ? (i.rubric!.length > 400 ? i.rubric!.substring(0, 400) : i.rubric)
-                    : null,
-              })
-          .toList(),
-    );
-
-    return '''
-# Роль
-Ты — преподаватель, определяющий освоение материала. Оцени по ответам пользователя, достиг ли он целевого уровня.
-
-# Контекст
-Тема: "$topic"
-Целевой уровень: $targetLevel
-
-# Ответы пользователя на проверку
-$itemsJson
-
-# Задача
-Для КАЖДОГО понятия оцени метрики освоения (0..1):
-- understanding — понимание идеи
-- recall — способность воспроизвести
-- application — способность применить
-- transfer — способность перенести на новую ситуацию
-
-Также:
-- определи misconception по каждому понятию (тип и описание), или null если нет
-- дай общий вердикт: достиг ли пользователь целевого уровня (enough: true/false)
-- если not enough — укажи, чего не хватает
-
-# Типы misconceptions
-unknown (не знал), confused (перепутал понятия), incomplete (неполная модель), definition_only (знает только определение), mechanism_error (неверный механизм), application_failure (не смог применить), careless (небрежная ошибка).
-
-# Формат ответа
-Строгий JSON-объект:
-{
-  "concepts": [
-    {"nodeId":"n2_a","understanding":0.8,"recall":0.9,"application":0.6,"transfer":0.5,"confidence":0.75,"misconception":null},
-    {"nodeId":"n2_b","understanding":0.4,"recall":0.3,"application":0.2,"transfer":0.1,"confidence":0.3,"misconception":{"type":"incomplete","description":"Не объясняет reverse diffusion как итеративный процесс"}}
-  ],
-  "enough": false,
-  "overall_level": "solid_understanding",
-  "gaps": ["Разделённые концепции: ...", "Не хватает: ..."]
-}
-
-# Язык
-Отвечай СТРОГО на русском языке. Описания misconceptions и gaps — на русском.
-
-Никакого текста вне JSON. Без ```json и без пояснений.''';
   }
 
   MasteryResult _parseMasteryResult(Map<String, dynamic> data) {

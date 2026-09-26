@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import '../models/models.dart';
 import '../../data/database/mindtree_repository.dart';
 import '../../data/llm/scheduler.dart';
+import '../../data/prompts/prompts.dart';
 import 'learner_model_service.dart';
 
 class TutorReply {
@@ -62,7 +63,19 @@ class AITutorService {
     String? nodeId,
   }) async {
     final ctx = await _buildContext(topicId, sessionId: sessionId, nodeId: nodeId);
-    final prompt = _buildPrompt(ctx, message);
+    final prompt = buildTutorPrompt(
+      topic: ctx.topicName ?? '',
+      goal: ctx.topicGoal ?? '',
+      targetLevel: ctx.targetLevel,
+      currentLevel: ctx.currentLevel,
+      currentNode: ctx.currentNodeLabel,
+      nodePath: ctx.nodePath,
+      currentMastery: ctx.currentMastery,
+      misconceptions: ctx.misconceptions.isNotEmpty ? ctx.misconceptions : null,
+      timeRemainingMinutes: ctx.timeRemainingMinutes,
+      recentAttempts: ctx.recentAttempts.isNotEmpty ? ctx.recentAttempts : null,
+      message: message,
+    );
 
     try {
       final res = await scheduler.execute<String>(
@@ -94,7 +107,19 @@ class AITutorService {
     late final String prompt;
     try {
       ctx = await _buildContext(topicId, sessionId: sessionId, nodeId: nodeId);
-      prompt = _buildPrompt(ctx, message);
+      prompt = buildTutorPrompt(
+        topic: ctx.topicName ?? '',
+        goal: ctx.topicGoal ?? '',
+        targetLevel: ctx.targetLevel,
+        currentLevel: ctx.currentLevel,
+        currentNode: ctx.currentNodeLabel,
+        nodePath: ctx.nodePath,
+        currentMastery: ctx.currentMastery,
+        misconceptions: ctx.misconceptions.isNotEmpty ? ctx.misconceptions : null,
+        timeRemainingMinutes: ctx.timeRemainingMinutes,
+        recentAttempts: ctx.recentAttempts.isNotEmpty ? ctx.recentAttempts : null,
+        message: message,
+      );
     } catch (err) {
       // Контекст не собрался (ошибка БД/модели) — не роняем стрим, отдаём fallback.
       final text = _fallbackText(
@@ -190,54 +215,6 @@ class AITutorService {
       recentAttempts: recentAttempts,
       timeRemainingMinutes: timeLeft,
     );
-  }
-
-  String _buildPrompt(_TutorContext ctx, String message) {
-    final nodePathStr = ctx.nodePath != null && ctx.nodePath!.isNotEmpty
-        ? ctx.nodePath!.join(' → ')
-        : '—';
-    final misconceptionsStr = ctx.misconceptions.isNotEmpty
-        ? ctx.misconceptions.join('; ')
-        : '—';
-    final attemptsStr = ctx.recentAttempts.isNotEmpty
-        ? ctx.recentAttempts.join(' | ')
-        : '—';
-
-    return '''
-# Роль
-Ты — контекстный AI-репетитор в системе обучения. Ты знаешь тему, цель, текущий уровень, текущее понятие, ошибки и оставшееся время. Ты не «чат-болванка»: твой ответ должен помогать именно на текущем этапе обучения.
-
-# Контекст
-Тема: "${ctx.topicName ?? ''}"
-Цель пользователя: "${ctx.topicGoal ?? ''}"
-Целевой уровень: ${ctx.targetLevel}
-Текущий уровень: ${ctx.currentLevel}
-Текущее понятие: ${ctx.currentNodeLabel ?? '—'}
-Путь понятия: $nodePathStr
-Текущее освоение: ${ctx.currentMastery ?? '—'}
-Известные заблуждения: $misconceptionsStr
-Оставшееся время (мин): ${ctx.timeRemainingMinutes ?? '—'}
-Последние ответы пользователя: $attemptsStr
-
-# Правила
-- Учитывай время: если осталось мало времени (например 5 минут), НЕ давай 20-минутную лекцию. Сфокусируйся на закреплении ключевой идеи.
-- Если осталось мало времени — приоритет закреплению уже изученного (recall / краткая проверка), а не новому материалу.
-- Не начинай тему с нуля, если пользователь уже в середине.
-- Учитывай текущие ошибки и заблуждения — исправляй именно их. Ориентируйся на «Известные заблуждения» и «Последние ответы пользователя».
-- Учитывай «Текущее освоение»: если понятие уже освоено, не повторяй базовое объяснение, а углубляй или проверяй перенос (transfer/application).
-- Применяй active learning: не просто объясняй, а задавай проверочные вопросы, проси объяснить своими словами, давай применение.
-- Подстраивай сложность под текущий уровень.
-- Будь структурирован и краток.
-
-# Формат ответа
-Только текст (markdown). Структура:
-1. Краткий прямой ответ на вопрос пользователя.
-2. При необходимости — уточняющий вопрос или задание для закрепления.
-
-# Язык
-Отвечай СТРОГО на русском языке.
-
-Сообщение пользователя: "$message"''';
   }
 
   String _fallbackText(_TutorContext ctx, String message, Object err) {

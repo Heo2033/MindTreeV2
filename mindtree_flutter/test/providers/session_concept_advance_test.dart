@@ -6,6 +6,8 @@ import 'package:mindtree_flutter/data/database/mindtree_db.dart';
 import 'package:mindtree_flutter/data/database/mindtree_repository.dart';
 import 'package:mindtree_flutter/data/llm/client.dart' as llm_client;
 import 'package:mindtree_flutter/data/llm/scheduler.dart';
+import 'package:mindtree_flutter/domain/engines/assessment_engine.dart';
+import 'package:mindtree_flutter/domain/engines/curriculum_engine.dart';
 import 'package:mindtree_flutter/domain/engines/event_bus.dart';
 import 'package:mindtree_flutter/domain/engines/learner_model_service.dart';
 import 'package:mindtree_flutter/domain/engines/learning_session_engine.dart';
@@ -62,6 +64,8 @@ void main() {
       learnerModel: LearnerModelService(repo),
       reviewScheduler: ReviewScheduler(repo),
       eventBus: EventBus(repo),
+      curriculumEngine: CurriculumEngine(repo: repo, scheduler: scheduler),
+      assessmentEngine: AssessmentEngine(repo: repo, scheduler: scheduler),
     );
     await repo.createTopic(const Topic(id: _topicId, name: 'Тема'));
     await repo.createJourney('j1', _topicId);

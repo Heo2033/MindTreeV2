@@ -250,6 +250,8 @@ final learningSessionEngineProvider = Provider<LearningSessionEngine>((ref) {
     learnerModel: ref.watch(learnerModelProvider),
     reviewScheduler: ref.watch(reviewSchedulerProvider),
     eventBus: ref.watch(eventBusProvider),
+    curriculumEngine: ref.watch(curriculumEngineProvider),
+    assessmentEngine: ref.watch(assessmentEngineProvider),
   );
 });
 

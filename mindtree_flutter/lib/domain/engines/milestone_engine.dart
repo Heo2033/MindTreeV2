@@ -3,68 +3,10 @@ import 'dart:math';
 import '../models/models.dart';
 import '../../data/llm/scheduler.dart';
 import '../../data/llm/client.dart';
+import '../../data/prompts/prompts.dart';
 import 'package:mindtree_flutter/domain/lib/short_ids.dart';
 
 import '../../data/database/mindtree_repository.dart';
-
-// ─── Prompt constants ─────────────────────────────────────────────────────────
-
-const _noMetaRule =
-    '- В значениях полей пиши только готовый контент по теме. '
-    'Запрещены служебные фразы о своих действиях и решениях '
-    '(«Узел помечен как…», «Переименовал узел…», '
-    '«Этот узел не требует дочерних…», «Исправлено…»).';
-
-const _alphabetRule =
-    '- Используй только кириллицу, латиницу, цифры и обычную пунктуацию. '
-    'Запрещены иероглифы и знаки других письменностей (китайские, японские, корейские).\n'
-    '- Все label, title, one_liner, details — только на русском языке. '
-    'Не используй непереведенные английские термины в текстовых полях.\n'
-    '  Исключение: устоявшиеся аббревиатуры и названия моделей/алгоритмов, '
-    'которые используются на английском в профессиональном сообществе '
-    '(U-Net, DDPM, VAE, CLIP, Stable Diffusion, ControlNet, DALL-E, DiT, '
-    'NeRF, DDIM, LoRA, EMA, BERT, GPT, ResNet, GAN, RAG, Adam, SGD, '
-    'ReLU, softmax и т.п.). Всё остальное переводи:\n'
-    '    "Machine learning" → "Машинное обучение"\n'
-    '    "Neural network" → "Нейронная сеть"\n'
-    '    "Gradient descent" → "Градиентный спуск"\n'
-    '    "Overfitting" → "Переобучение"\n'
-    '    "Convolutional layers" → "Свёрточные слои"\n'
-    '    "Gradient clipping" → "Обрезка градиентов"';
-
-const _promptMilestone = '''
-# Роль
-Ты — навигатор по обучению. Составь карту уровней и направлений для темы.
-
-# Контекст
-Тема: "{{topic}}"
-Текущий уровень: {{current_level}}
-Цель пользователя: {{goal}}
-
-# Задача
-Составь последовательность milestones (уровней освоения) от текущего к более глубоким. Укажи для каждого:
-- title — понятное название уровня
-- description — что пользователь сможет делать
-- capabilities — конкретные умения (2–5)
-- estimated_hours — примерные часы
-- alternative_paths — какие направления развиваются дальше
-
-Базовая шкала уровней (адаптируй под тему):
-awareness → basic_understanding → solid_understanding → practical_application → advanced → expert
-
-# Формат ответа
-Строгий JSON-объект:
-{"milestones":[{"id":"m1","level":"solid_understanding","title":"Твёрдое понимание","description":"...","capabilities":["...","..."],"estimated_hours":2,"alternative_paths":[{"id":"m2","title":"Применение","estimated_hours":4,"description":"..."}]}]}
-
-Отсортируй milestones от текущего к более глубоким. alternative_paths указывают ветвление после данного уровня.
-
-$_noMetaRule
-$_alphabetRule
-
-# Язык
-Отвечай СТРОГО на русском языке. Все текстовые поля — на русском.
-
-Никакого текста вне JSON. Без ```json и без пояснений.''';
 
 // ─── LLM parse types ─────────────────────────────────────────────────────────
 
@@ -164,10 +106,10 @@ class MilestoneEngine {
 
     List<MilestoneResultItem> milestones;
     try {
-      final prompt = _promptMilestone
-          .replaceAll('{{topic}}', topic?.name ?? '')
-          .replaceAll('{{current_level}}', currentLevel.raw)
-          .replaceAll('{{goal}}', topic?.goal.raw ?? '');
+      final prompt = buildMilestonePrompt(
+          topic: topic?.name ?? '',
+          currentLevel: currentLevel.raw,
+          goal: topic?.goal.raw ?? '');
 
       final res = await scheduler.execute<MilestoneLlmResult>(
         'milestone',

@@ -196,9 +196,13 @@ export class LearningSessionEngine {
         content = { one_liner: node.oneLiner, details: node.details, relations: [], sources: [] };
       }
 
+      // Зеркало flutter: пустой details — контент не считается загруженным
+      // (state content_generated не выставляется, возможен повторный запрос).
+      const hasContent = typeof content.details === "string" && content.details.trim().length > 0;
+
       getDb()
         .prepare(
-          `UPDATE knowledge_nodes SET one_liner = ?, details = ?, analogy = ?, relations_json = ?, sources_json = ?, content_loaded = 1, state = 'content_generated' WHERE id = ?`,
+          `UPDATE knowledge_nodes SET one_liner = ?, details = ?, analogy = ?, relations_json = ?, sources_json = ?, content_loaded = ?, state = ? WHERE id = ?`,
         )
         .run(
           content.one_liner,
@@ -206,9 +210,20 @@ export class LearningSessionEngine {
           content.analogy ?? null,
           JSON.stringify(content.relations),
           JSON.stringify(content.sources ?? []),
+          hasContent ? 1 : 0,
+          hasContent ? "content_generated" : String(nodeRow.state ?? "new"),
           nodeId,
         );
-      node = { ...node, oneLiner: content.one_liner, details: content.details, analogy: content.analogy, relations: content.relations as KnowledgeNode["relations"], sources: content.sources };
+      node = {
+        ...node,
+        oneLiner: content.one_liner,
+        details: content.details,
+        analogy: content.analogy,
+        relations: content.relations as KnowledgeNode["relations"],
+        sources: content.sources,
+        contentLoaded: hasContent,
+        state: hasContent ? "content_generated" : ((String(nodeRow.state ?? "new") as KnowledgeNode["state"])),
+      };
       nodeRow = getDb().prepare(`SELECT * FROM knowledge_nodes WHERE id = ?`).get(nodeId) as Record<string, unknown>;
     } else {
       const content = {

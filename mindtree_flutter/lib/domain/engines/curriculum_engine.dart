@@ -1,91 +1,13 @@
-import 'dart:convert';
 import 'dart:math';
 
 import '../models/models.dart';
 import '../../data/llm/scheduler.dart';
 import '../../data/llm/client.dart';
+import '../../data/prompts/prompts.dart';
 import 'package:mindtree_flutter/domain/lib/short_ids.dart';
 
 import '../../data/database/mindtree_repository.dart';
 import 'learner_model_service.dart';
-
-// ─── Prompt constants ─────────────────────────────────────────────────────────
-
-const _noMetaRule =
-    '- В значениях полей пиши только готовый контент по теме. '
-    'Запрещены служебные фразы о своих действиях и решениях '
-    '(«Узел помечен как…», «Переименовал узел…», '
-    '«Этот узел не требует дочерних…», «Исправлено…»).';
-
-const _alphabetRule =
-    '- Используй только кириллицу, латиницу, цифры и обычную пунктуацию. '
-    'Запрещены иероглифы и знаки других письменностей (китайские, японские, корейские).\n'
-    '- Все label, title, one_liner, details — только на русском языке. '
-    'Не используй непереведенные английские термины в текстовых полях.\n'
-    '  Исключение: устоявшиеся аббревиатуры и названия моделей/алгоритмов, '
-    'которые используются на английском в профессиональном сообществе '
-    '(U-Net, DDPM, VAE, CLIP, Stable Diffusion, ControlNet, DALL-E, DiT, '
-    'NeRF, DDIM, LoRA, EMA, BERT, GPT, ResNet, GAN, RAG, Adam, SGD, '
-    'ReLU, softmax и т.п.). Всё остальное переводи:\n'
-    '    "Machine learning" → "Машинное обучение"\n'
-    '    "Neural network" → "Нейронная сеть"\n'
-    '    "Gradient descent" → "Градиентный спуск"\n'
-    '    "Overfitting" → "Переобучение"\n'
-    '    "Convolutional layers" → "Свёрточные слои"\n'
-    '    "Gradient clipping" → "Обрезка градиентов"';
-
-const _promptCurriculum = '''
-# Роль
-Ты — curriculum-инженер. Из полного дерева знаний выбери минимальный достаточный набор понятий, которые приведут пользователя от текущего уровня к целевой цели за заданное время.
-
-# Контекст
-Тема: "{{topic}}"
-Цель пользователя: {{goal}}
-Текущий уровень: {{current_level}}
-Целевой уровень: {{target_level}}
-Доступное время: {{time_budget_minutes}} минут
-
-# Дерево знаний (полный граф)
-{{nodes_json}}
-
-# Задача
-Собери соответствие: из всех понятий дерева выбери минимальный достаточный список для достижения целевого уровня за доступное время.
-
-# Принципы отбора
-- **Minimum sufficient knowledge**: не включай всё дерево — только то, что необходимо для цели.
-- **Just enough prerequisites**: если достаточно краткого упоминания (например, «шум Гаусса») — не включай полный подграф Probability.
-- **Learning gain per minute**: отдавай приоритет понятиям с высокой пользой на единицу времени.
-- Учитывай importance, difficulty и estimated_time_minutes каждого узла.
-- Порядок отбора = порядок изучения (сперва базовые).
-- Если понятия уже знает пользователь (current_level достигнут) — пропусти.
-- Суммарное время не должно превышать время бюджета существенно.
-
-# Формат ответа
-Строгий JSON-объект:
-{
-  "items": [
-    {"node_id": "n3_a1", "order": 1, "estimated_minutes": 10, "why": "Почему это понятие важно для цели"},
-    {"node_id": "n2_b", "order": 2, "estimated_minutes": 15, "why": "..."}
-  ],
-  "total_estimated_minutes": 55,
-  "skipped": [
-    {"node_id": "n4_x", "reason": "why skipped (optional/deferred/advanced)"}
-  ]
-}
-$_noMetaRule
-$_alphabetRule
-
-# Язык
-Отвечай СТРОГО на русском языке. Поля "why" и "reason" — на русском.
-
-Никакого текста вне JSON. Без ```json и без пояснений.
-
-# Проверь перед ответом
-- [ ] Выбрано минимально достаточное число понятий
-- [ ] Порядок изучения от базовых к продвинутым
-- [ ] Не включено лишнее (не всё дерево)
-- [ ] Суммарное время близко к бюджету (не превышает его грубо)
-- [ ] Формат — строго JSON с ключом "items"''';
 
 // ─── Request / result DTOs ────────────────────────────────────────────────────
 
@@ -180,13 +102,18 @@ class CurriculumEngine {
       repairOrder(items, req.nodes);
     }
 
+    // Детерминированный кап по бюджету времени: план не должен обещать
+    // больше минут, чем пользователь выделил (зеркало server fitPlanToBudget).
+    final fitted = fitPlanToBudget(
+        items, req.timeBudgetMinutes > 0 ? req.timeBudgetMinutes : 60);
+
     final sessionId = shortIdWith('curriculum_');
-    final total = items.fold<int>(0, (s, i) => s + i.estimatedMinutes);
+    final total = fitted.fold<int>(0, (s, i) => s + i.estimatedMinutes);
 
     return CurriculumPlanResult(
       curriculum: Curriculum(
         sessionId: sessionId,
-        items: items,
+        items: fitted,
         totalEstimatedMinutes: total,
       ),
       alreadyKnown: alreadyKnown,
@@ -222,10 +149,14 @@ class CurriculumEngine {
     final byId = <String, KnowledgeNode>{for (final n in req.nodes) n.id: n};
     final known = req.knownNodeIds ?? <String>{};
 
+    // Зеркало server: 0/незаданное время трактуется как 5 минут.
+    int estMinutes(KnowledgeNode n) =>
+        n.estimatedTimeMinutes > 0 ? n.estimatedTimeMinutes : 5;
+
     final scored = req.nodes
         .where((n) => n.level >= 2 && !known.contains(n.id))
         .map((n) {
-          final est = max(1, n.estimatedTimeMinutes).toDouble();
+          final est = max(1, estMinutes(n)).toDouble();
           final score = scorePriority(
             goalRelevanceOf(n),
             prerequisiteValueOf(n, [], byId),
@@ -235,13 +166,18 @@ class CurriculumEngine {
           return (n: n, score: score);
         })
         .toList()
-      ..sort((a, b) => b.score.compareTo(a.score));
+      // Tie-break по времени (зеркало server): при равном score сначала
+      // идут более короткие понятия.
+      ..sort((a, b) {
+        final byScore = b.score.compareTo(a.score);
+        if (byScore != 0) return byScore;
+        return estMinutes(a.n).compareTo(estMinutes(b.n));
+      });
 
     final selected = <CurriculumItemResult>[];
     var used = 0;
     for (final entry in scored) {
-      final est = min(entry.n.estimatedTimeMinutes, 20);
-      if (est <= 0) continue;
+      final est = min(estMinutes(entry.n), 20);
       if (used + est > budget * 1.2) break;
       selected.add(CurriculumItemResult(
         nodeId: entry.n.id,
@@ -250,6 +186,18 @@ class CurriculumEngine {
         why: 'Важное понятие с высокой пользой на единицу времени',
       ));
       used += est;
+    }
+
+    // Детерминированный guard (зеркало server): при коротком бюджете падать
+    // до пустого плана нельзя — берём лучший узел.
+    if (selected.isEmpty && scored.isNotEmpty) {
+      final best = scored.first.n;
+      selected.add(CurriculumItemResult(
+        nodeId: best.id,
+        order: 1,
+        estimatedMinutes: min(estMinutes(best), 20),
+        why: 'Базовое понятие — план не может быть пустым',
+      ));
     }
     return selected;
   }
@@ -263,7 +211,7 @@ class CurriculumEngine {
     final byId = <String, KnowledgeNode>{for (final n in req.nodes) n.id: n};
     final allIds = req.nodes.map((n) => n.id).toList();
 
-    final nodesJson = jsonEncode(req.nodes.map((n) => {
+    final nodesList = req.nodes.map((n) => {
       'id': n.id,
       'label': n.label,
       'one_liner': n.oneLiner,
@@ -271,15 +219,16 @@ class CurriculumEngine {
       'difficulty': n.difficulty,
       'estimated_time_minutes': n.estimatedTimeMinutes,
       'prerequisites': prerequisitesOf(n, byId, allIds),
-    }).toList());
+    }).toList();
 
-    final prompt = _promptCurriculum
-        .replaceAll('{{topic}}', req.topicName)
-        .replaceAll('{{goal}}', req.goal)
-        .replaceAll('{{current_level}}', currentLevel)
-        .replaceAll('{{target_level}}', req.targetLevel)
-        .replaceAll('{{time_budget_minutes}}', req.timeBudgetMinutes.toString())
-        .replaceAll('{{nodes_json}}', nodesJson);
+    final prompt = buildCurriculumPrompt(
+      topic: req.topicName,
+      goal: req.goal,
+      currentLevel: currentLevel,
+      targetLevel: req.targetLevel,
+      timeBudgetMinutes: req.timeBudgetMinutes,
+      nodes: nodesList,
+    );
 
     final res = await scheduler.execute<CurriculumLlmResult>(
       'curriculum',
@@ -397,6 +346,25 @@ class CurriculumEngine {
       ..clear()
       ..addAll(ordered);
   }
+}
+
+/// Детерминированно укладывает план в [budgetMinutes]: берёт пункты по порядку,
+/// пока сумма не превысит бюджет. Первый пункт сохраняется всегда, даже если
+/// сам по себе длиннее бюджета (иначе план был бы пустым).
+List<CurriculumItem> fitPlanToBudget(
+    List<CurriculumItem> items, int budgetMinutes) {
+  if (items.isEmpty) return items;
+  final sorted = List<CurriculumItem>.from(items)
+    ..sort((a, b) => a.order.compareTo(b.order));
+  final fitted = <CurriculumItem>[];
+  var sum = 0;
+  for (final it in sorted) {
+    if (fitted.isNotEmpty && sum + it.estimatedMinutes > budgetMinutes) break;
+    fitted.add(it);
+    sum += it.estimatedMinutes;
+  }
+  if (fitted.isEmpty) fitted.add(sorted.first);
+  return fitted;
 }
 
 // ─── Priority model ───────────────────────────────────────────────────────────

@@ -1,10 +1,9 @@
-import 'dart:convert';
-
 import 'package:mindtree_flutter/domain/lib/short_ids.dart';
 
 import '../../data/database/mindtree_repository.dart';
 import '../../data/llm/client.dart';
 import '../../data/llm/scheduler.dart';
+import '../../data/prompts/prompts.dart';
 import '../models/models.dart';
 
 /// A single studied concept used as input for assessment generation.
@@ -27,79 +26,6 @@ class AssessmentItem {
         'oneLiner': oneLiner,
         'details': details,
       };
-}
-
-const String _noMetaRule = '- В значениях полей пиши только готовый контент по теме. Запрещены служебные фразы о своих действиях и решениях («Узел помечен как…», «Переименовал узел…», «Этот узел не требует дочерних…», «Исправлено…»).';
-
-const String _alphabetRule = '- Используй только кириллицу, латиницу, цифры и обычную пунктуацию. Запрещены иероглифы и знаки других письменностей (китайские, японские, корейские).\n- Все label, title, one_liner, details — только на русском языке.';
-
-const String _promptAssessment = '''# Роль
-Ты — экзаменатор. Проверь, действительно ли пользователь достиг заявленного уровня понимания темы.
-
-# Контекст
-Тема: "{{topic}}"
-Цель пользователя: {{goal}}
-Изученные понятия (в рамках сессии):
-{{session_items}}
-
-# Типы вопросов (всего их 6)
-Сгенерируй финальную проверку, используя следующие типы:
-- **recognition** — узнавание: выбери корректный вариант из четырёх (формулировка, а не заучивание)
-- **recall** — припоминание: воспроизведи определение или ключевой факт (multiple choice)
-- **explanation** — объясни механизм своими словами (structure matters; rubric обязателен)
-- **diagnosis** — найди и объясни ошибку/несоответствие в приведённом утверждении (rubric обязателен)
-- **application** — примени знание к новой конкретной ситуации (rubric обязателен)
-- **transfer** — перенеси знание на смежную/нестандартную ситуацию (rubric обязателен)
-
-Всего {{question_count}} вопросов. Обеспечь разнообразие типов: это должен быть честный замер, а не только фактология.
-Для recognition/recall укажи options и correctAnswer (индекс корректного варианта, начиная с 0).
-Для explanation/diagnosis/application/transfer — options=[] и correctAnswer=""; explanation (рубрика) содержит конкретные критерии оценивания: какие элементы должны присутствовать в свободном ответе.
-
-# Формат ответа
-Строгий JSON-объект:
-{"questions":[{"id":"a1","type":"recall","nodeId":"n2_a","question":"...","options":["A","B","C","D"],"correctAnswer":"0","explanation":"..."},{"id":"a2","type":"explanation","nodeId":"n2_b","question":"Объясните своими словами, как работает X (порядок шагов, причинно-следственные связи).","options":[],"correctAnswer":"","explanation":"Ключевые элементы ответа: 1) ..., 2) ..."}]}
-
-# Примечания
-- correctAnswer для recognition/recall — ИНДЕКС правильного варианта (строка "0","1","2","3").
-- Вопросы проверяют глубокое понимание, не поверхностную фактологию.
-
-$_noMetaRule
-$_alphabetRule
-
-# Язык
-Отвечай СТРОГО на русском языке. Вопросы, варианты, рубрики — на русском.
-
-Никакого текста вне JSON. Без ```json и без пояснений.
-
-# Проверь перед ответом
-- [ ] Ровно {{question_count}} вопросов
-- [ ] Есть вопросы с options (recognition/recall) и открытые вопросы (explanation/diagnosis/application/transfer)
-- [ ] У всех открытых вопросов rubric (explanation) содержит конкретные критерии
-- [ ] Вопросы проверяют глубокое понимание, не поверхностную фактологию
-- [ ] Формат — строго JSON с ключом "questions"''';
-
-String _buildAssessmentPrompt({
-  required String topic,
-  required String goal,
-  required List<AssessmentItem> sessionItems,
-  required bool includeApplication,
-  required int questionCount,
-}) {
-  final itemsJson = jsonEncode(sessionItems
-      .map((s) => {
-            'nodeId': s.nodeId,
-            'label': s.label,
-            'oneLiner': s.oneLiner,
-            'details': s.details.length > 400 ? s.details.substring(0, 400) : s.details,
-          })
-      .toList());
-
-  return _promptAssessment
-      .replaceAll('{{topic}}', topic)
-      .replaceAll('{{goal}}', goal)
-      .replaceAll('{{session_items}}', itemsJson)
-      .replaceAll(RegExp(r'\{\{question_count\}\}'), questionCount.toString())
-      .replaceAll('{{include_application}}', includeApplication ? 'true' : 'false');
 }
 
 List<AssessmentQuestion> _parseAssessmentResult(String raw) {
@@ -140,10 +66,10 @@ class AssessmentEngine {
   }) async {
     final topic = await repo.getTopic(topicId);
 
-    final prompt = _buildAssessmentPrompt(
+    final prompt = buildAssessmentPrompt(
       topic: topic?.name ?? '',
       goal: topic?.goal.name ?? '',
-      sessionItems: items,
+      sessionItems: items.map((s) => s.toJson()).toList(),
       includeApplication: includeApplication,
       questionCount: questionCount,
     );

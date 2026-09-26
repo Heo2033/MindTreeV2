@@ -6,6 +6,8 @@ import 'package:mindtree_flutter/data/database/mindtree_db.dart';
 import 'package:mindtree_flutter/data/database/mindtree_repository.dart';
 import 'package:mindtree_flutter/data/llm/client.dart' as llm_client;
 import 'package:mindtree_flutter/data/llm/scheduler.dart';
+import 'package:mindtree_flutter/domain/engines/assessment_engine.dart';
+import 'package:mindtree_flutter/domain/engines/curriculum_engine.dart';
 import 'package:mindtree_flutter/domain/engines/event_bus.dart';
 import 'package:mindtree_flutter/domain/engines/learner_model_service.dart';
 import 'package:mindtree_flutter/domain/engines/learning_activity_service.dart';
@@ -51,6 +53,8 @@ class _ThrowingStudyEngine extends LearningSessionEngine {
     required super.learnerModel,
     required super.reviewScheduler,
     required super.eventBus,
+    required super.curriculumEngine,
+    required super.assessmentEngine,
   });
 
   @override
@@ -69,6 +73,8 @@ class _OkStudyEngine extends LearningSessionEngine {
     required super.learnerModel,
     required super.reviewScheduler,
     required super.eventBus,
+    required super.curriculumEngine,
+    required super.assessmentEngine,
   });
 
   @override
@@ -150,6 +156,8 @@ void main() {
         learnerModel: LearnerModelService(repo),
         reviewScheduler: ReviewScheduler(repo),
         eventBus: EventBus(repo),
+        curriculumEngine: CurriculumEngine(repo: repo, scheduler: scheduler),
+        assessmentEngine: AssessmentEngine(repo: repo, scheduler: scheduler),
       );
       final container = makeContainer(engine);
       final notifier = container.read(sessionStoreProvider.notifier);
@@ -171,6 +179,8 @@ void main() {
         learnerModel: LearnerModelService(repo),
         reviewScheduler: ReviewScheduler(repo),
         eventBus: EventBus(repo),
+        curriculumEngine: CurriculumEngine(repo: repo, scheduler: scheduler),
+        assessmentEngine: AssessmentEngine(repo: repo, scheduler: scheduler),
       );
       final container = makeContainer(engine);
       final notifier = container.read(sessionStoreProvider.notifier);

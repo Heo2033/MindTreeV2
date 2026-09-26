@@ -1,76 +1,11 @@
-import 'dart:convert';
-
 import 'package:mindtree_flutter/domain/lib/short_ids.dart';
 
 import '../../data/database/mindtree_repository.dart';
 import '../../data/llm/client.dart';
 import '../../data/llm/scheduler.dart';
+import '../../data/prompts/prompts.dart';
 import '../models/models.dart';
 import 'learner_model_service.dart';
-
-const String _noMetaRule = '- В значениях полей пиши только готовый контент по теме. Запрещены служебные фразы о своих действиях и решениях («Узел помечен как…», «Переименовал узел…», «Этот узел не требует дочерних…», «Исправлено…»).';
-
-const String _alphabetRule = '- Используй только кириллицу, латиницу, цифры и обычную пунктуацию. Запрещены иероглифы и знаки других письменностей (китайские, японские, корейские).\n- Все label, title, one_liner, details — только на русском языке.';
-
-const String _promptDiagnostic = '''# Роль
-Ты — диагностирующий педагог. Оцени текущий уровень пользователя по теме.
-
-# Контекст
-Тема: "{{topic}}"
-Цель пользователя: {{goal}}
-Целевой уровень: {{target_level}}
-
-# Ключевые понятия темы (ОБЯЗАТЕЛЬНО используй их для вопросов)
-{{nodes_json}}
-
-# Задача
-Составь диагностику из 3–5 вопросов. КАЖДЫЙ вопрос должен:
-1. Быть напрямую связан с конкретным понятием из списка "Ключевые понятия темы"
-2. Использовать название понятия (label) в тексте вопроса или вариантах ответа
-3. Проверять понимание именно этого понятия, а не общей темы
-
-ЗАПРЕЩЕНО задавать общие вопросы вроде "Что вы знаете о теме?" или "Что обычно показывает базовое понимание?".
-Каждый вопрос ДОЛЖЕН содержать имя конкретного понятия из списка (например, "Что такое Аркан?" или "Какова роль Старших Арканов?").
-
-Отбери 3–5 понятий из списка выше (от базовых к продвинутым) и составь по одному вопросу на каждое.
-
-# Формат ответа
-Строгий JSON-объект:
-{"questions":[{"id":"d1","nodeId":"<id из списка понятий>","question":"Вопрос с упоминанием конкретного понятия?","options":["Вариант A","Вариант B","Вариант C","Вариант D"],"correctIndex":0,"explanation":"..."}]}
-
-# После обработки
-На основе ответов диагностики определяется текущий уровень:
-- Если большинство правильных — current_level близок к target
-- Если большинство неправильных — current_level = awareness
-
-$_noMetaRule
-$_alphabetRule
-
-# Язык
-Отвечай СТРОГО на русском языке. Все текстовые поля — на русском.
-
-Никакого текста вне JSON. Без ```json и без пояснений.''';
-
-String _buildDiagnosticPrompt({
-  required String topic,
-  required String goal,
-  required String targetLevel,
-  required List<KnowledgeNode> nodes,
-}) {
-  final nodesJson = jsonEncode(nodes
-      .map((n) => {
-            'id': n.id,
-            'label': n.label,
-            'one_liner': n.oneLiner,
-          })
-      .toList());
-
-  return _promptDiagnostic
-      .replaceAll('{{topic}}', topic)
-      .replaceAll('{{goal}}', goal)
-      .replaceAll('{{target_level}}', targetLevel)
-      .replaceAll('{{nodes_json}}', nodesJson);
-}
 
 /// A single diagnostic question.
 class DiagnosticQuestion {
@@ -159,11 +94,15 @@ class DiagnosticEngine {
         .take(8)
         .toList();
 
-    final prompt = _buildDiagnosticPrompt(
+    final prompt = buildDiagnosticPrompt(
       topic: topic?.name ?? '',
       goal: topic?.goal.name ?? 'выяснить текущий уровень понимания',
       targetLevel: topic?.targetLevel.raw ?? 'basic_understanding',
-      nodes: nodes,
+      nodes: nodes.map((n) => {
+        'id': n.id,
+        'label': n.label,
+        'one_liner': n.oneLiner,
+      }).toList(),
     );
 
     final res = await scheduler.execute<List<DiagnosticQuestion>>(

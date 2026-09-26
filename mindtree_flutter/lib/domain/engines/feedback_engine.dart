@@ -1,6 +1,7 @@
 import '../../data/database/mindtree_repository.dart';
 import '../../data/llm/client.dart';
 import '../../data/llm/scheduler.dart';
+import '../../data/prompts/prompts.dart';
 import '../models/models.dart';
 import 'learner_model_service.dart';
 import 'review_scheduler.dart';
@@ -31,59 +32,6 @@ class RecallStepInput {
   final int? correctIndex;
 
   const RecallStepInput({this.options, this.correctIndex});
-}
-
-const String _noMetaRule = '- В значениях полей пиши только готовый контент по теме. Запрещены служебные фразы о своих действиях и решениях («Узел помечен как…», «Переименовал узел…», «Этот узел не требует дочерних…», «Исправлено…»).';
-
-const String _alphabetRule = '- Используй только кириллицу, латиницу, цифры и обычную пунктуацию. Запрещены иероглифы и знаки других письменностей (китайские, японские, корейские).\n- Все label, title, one_liner, details — только на русском языке.';
-
-const String _promptActivityFeedback = '''# Роль
-Ты — AI-репетитор. Оцениваешь свободный ответ ученика на задание по конкретному понятию.
-
-# Контекст
-Понятие: "{{node_label}}"
-Определение: "{{node_one_liner}}"
-Задание: "{{instruction}}"
-Эталонный ответ: "{{reference_answer}}"
-Ответ ученика: "{{user_answer}}"
-
-# Задача
-Оцени ответ ученика:
-- correct — ответ верен по сути, демонстрирует понимание понятия
-- partial — ответ частично верен: есть верная мысль, но есть ошибки или пропущена ключевая часть
-- incorrect — ответ неверен или не относится к заданию
-
-Для partial и incorrect укажи возможное заблуждение (misconception) одной фразой, если его можно определить (null, если не определяется).
-
-Требования:
-- feedback — 1–3 предложения, по-русски, доброжелательно, конкретно: что верно, чего не хватает.
-- Не раскрывай эталонный ответ целиком в feedback (ученик должен перепроверить сам).
-$_noMetaRule
-$_alphabetRule
-
-# Формат ответа
-Строго JSON без markdown:
-{
-  "assessment": "correct",
-  "feedback": "строка",
-  "misconception": "строка или null"
-}''';
-
-String _buildActivityFeedbackPrompt({
-  required String nodeLabel,
-  required String nodeOneLiner,
-  required String instruction,
-  required String referenceAnswer,
-  required String userAnswer,
-}) {
-  return _promptActivityFeedback
-      .replaceAll('{{node_label}}', nodeLabel)
-      .replaceAll(
-          '{{node_one_liner}}', nodeOneLiner.length > 400 ? nodeOneLiner.substring(0, 400) : nodeOneLiner)
-      .replaceAll('{{instruction}}', instruction.length > 600 ? instruction.substring(0, 600) : instruction)
-      .replaceAll(
-          '{{reference_answer}}', referenceAnswer.length > 800 ? referenceAnswer.substring(0, 800) : referenceAnswer)
-      .replaceAll('{{user_answer}}', userAnswer.length > 1500 ? userAnswer.substring(0, 1500) : userAnswer);
 }
 
 String _sanitizeFeedbackText(Object? v) => (v?.toString() ?? '').trim();
@@ -124,7 +72,7 @@ class FeedbackEngine {
     String referenceAnswer,
     String userAnswer,
   ) async {
-    final prompt = _buildActivityFeedbackPrompt(
+    final prompt = buildActivityFeedbackPrompt(
       nodeLabel: nodeLabel,
       nodeOneLiner: nodeOneLiner,
       instruction: instruction,

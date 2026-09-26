@@ -1,15 +1,17 @@
-import 'dart:async';
 import 'dart:developer' as developer;
 import '../models/models.dart';
 import '../../data/database/mindtree_repository.dart';
 import '../../data/llm/scheduler.dart';
 import '../../data/llm/client.dart';
 import 'package:mindtree_flutter/domain/lib/short_ids.dart';
+import 'package:mindtree_flutter/domain/lib/tree_reading.dart';
 
 import '../../data/prompts/prompts.dart';
 import 'learner_model_service.dart';
 import 'review_scheduler.dart';
 import 'event_bus.dart';
+import 'curriculum_engine.dart';
+import 'assessment_engine.dart';
 
 class CreateSessionInput {
   final String? journeyId;
@@ -33,6 +35,8 @@ class LearningSessionEngine {
   final LearnerModelService learnerModel;
   final ReviewScheduler reviewScheduler;
   final EventBus eventBus;
+  final CurriculumEngine curriculumEngine;
+  final AssessmentEngine assessmentEngine;
 
   LearningSessionEngine({
     required this.repo,
@@ -40,6 +44,8 @@ class LearningSessionEngine {
     required this.learnerModel,
     required this.reviewScheduler,
     required this.eventBus,
+    required this.curriculumEngine,
+    required this.assessmentEngine,
   });
 
   Future<LearningSession> create(CreateSessionInput input) async {
@@ -50,21 +56,24 @@ class LearningSessionEngine {
     }
 
     final nodes = await repo.listNodes(input.topicId);
-    final ordered = _readingOrder(nodes);
+    final ordered = readingOrder(nodes);
     final targetLevel = await _getTargetLevel(input.topicId);
     final topic = await repo.getTopic(input.topicId);
     final topicName = topic?.name ?? '';
     final currentLevel = await learnerModel.getCurrentLevel(input.topicId);
 
-    final curriculum = await _generateCurriculum(
+    // CurriculumEngine строит промпт с реальными prerequisites и сам
+    // применяет fitPlanToBudget в конце (зеркало server LearningSessionEngine).
+    final plan = await curriculumEngine.generate(CurriculumRequest(
       topicId: input.topicId,
       topicName: topicName,
       goal: input.goal,
       targetLevel: targetLevel,
-      currentLevel: currentLevel,
+      currentLevel: currentLevel.raw,
       timeBudgetMinutes: input.timeBudgetMinutes,
       nodes: ordered,
-    );
+    ));
+    final curriculum = plan.curriculum;
 
     final sessionId = shortIdWith('session_');
     final session = LearningSession(
@@ -227,7 +236,11 @@ class LearningSessionEngine {
       for (final it in session.curriculum.items)
         it.id == itemId ? it.copyWith(status: CurriculumItemStatus.completed) : it,
     ];
-    final maxIdx = (items.length - 1).clamp(0, items.length - 1);
+    // Текущий индекс не должен выходить за пределы последнего концепта:
+    // при завершении последнего шага остаёмся на нём (getCurrentItem корректно
+    // вернёт item, а дальнейшую финализацию инициирует сам UI).
+    // maxIdx = 0 на пустом списке (зеркало server: Math.max(0, items.length - 1)).
+    final maxIdx = items.isEmpty ? 0 : items.length - 1;
     final nextIdx = (session.currentIndex + 1).clamp(0, maxIdx);
 
     final updated = session.copyWith(
@@ -270,15 +283,22 @@ class LearningSessionEngine {
         ? [for (final nid in studiedNodeIds) await _nodeBrief(session.topicId, nid)]
         : await _allNodeBriefs(session.topicId);
 
-    final assessmentId = shortIdWith('assess_');
-    final assessment = Assessment(
-      id: assessmentId,
-      sessionId: sessionId,
+    // AssessmentEngine сам создаёт Assessment и пишет его в repo (строка 183
+    // assessment_engine.dart) — двойной create здесь не нужен.
+    final assessment = await assessmentEngine.generate(
+      sessionId,
+      session.topicId,
+      items.map((i) => AssessmentItem(
+            nodeId: i.nodeId,
+            label: i.label,
+            oneLiner: i.oneLiner,
+            details: i.details,
+          )).toList(),
       type: AssessmentType.final_,
-      startedAt: DateTime.now().toIso8601String(),
-      questions: await _generateAssessmentQuestions(session.topicId, items),
+      questionCount: 6,
+      includeApplication: true,
     );
-    await repo.createAssessment(assessment);
+    final assessmentId = assessment.id;
 
     await eventBus.emit(
       sessionId: sessionId,
@@ -291,106 +311,6 @@ class LearningSessionEngine {
   }
 
   // ─── Private helpers ──────────────────────────────────────────────────────
-
-  Future<Curriculum> _generateCurriculum({
-    required String topicId,
-    required String topicName,
-    required String goal,
-    required String targetLevel,
-    required MasteryLevel currentLevel,
-    required int timeBudgetMinutes,
-    required List<KnowledgeNode> nodes,
-  }) async {
-    final nodesData = nodes.take(40).map((n) => <String, dynamic>{
-      'id': n.id,
-      'label': n.label,
-      'one_liner': n.oneLiner,
-      'importance': n.importance,
-      'difficulty': n.difficulty,
-      'estimated_time_minutes': n.estimatedTimeMinutes,
-      'prerequisites': <String>[],
-    }).toList();
-
-    final prompt = buildCurriculumPrompt(
-      topic: topicName,
-      goal: goal,
-      currentLevel: currentLevel.raw,
-      targetLevel: targetLevel,
-      timeBudgetMinutes: timeBudgetMinutes,
-      nodes: nodesData,
-    );
-
-    try {
-      // Таймаут 20с — если LLM медлит, быстро переходим к детерминированному fallback.
-      // Curriculum — не критичный вызов; fallback даёт рабочий план.
-      final res = await scheduler.execute<Map<String, dynamic>>(
-        'curriculum',
-        () => prompt,
-        (raw) => parseLLMJson<Map<String, dynamic>>(raw),
-      ).timeout(
-        const Duration(seconds: 20),
-        onTimeout: () => throw TimeoutException('Curriculum LLM timeout'),
-      );
-      final parsed = parseCurriculumResult(res.result);
-      final nodeById = {for (final n in nodes) n.id: n};
-
-      final itemsRaw = parsed['items'];
-      // Контракт хрупкий: не допускаем TypeError на кривом JSON модели —
-      // отбираем только валидные пункты, остальное отдаётся fallback'у ниже.
-      final items = <CurriculumItem>[];
-      if (itemsRaw is List) {
-        var i = 0;
-        for (final rawItem in itemsRaw) {
-          if (rawItem is! Map<String, dynamic>) continue;
-          final nodeId = rawItem['node_id'];
-          if (nodeId is! String) continue;
-          final node = nodeById[nodeId];
-          items.add(CurriculumItem(
-            id: 'itemId_${i + 1}',
-            nodeId: nodeId,
-            label: node?.label ?? nodeId,
-            order: (rawItem['order'] as num?)?.toInt() ?? (i + 1),
-            type: CurriculumItemType.explain,
-            estimatedMinutes: (rawItem['estimated_minutes'] as num?)?.toInt()
-                ?? node?.estimatedTimeMinutes ?? 5,
-            priority: node?.importance ?? 0.5,
-            status: CurriculumItemStatus.pending,
-            reason: rawItem['why'] as String?,
-          ));
-          i++;
-        }
-      }
-
-      final fitted = fitPlanToBudget(items, timeBudgetMinutes);
-      return Curriculum(
-        sessionId: '',
-        items: fitted,
-        totalEstimatedMinutes: fitted.fold<int>(0, (s, i) => s + i.estimatedMinutes),
-      );
-    } catch (_) {
-      final fallbackNodes = sortFallbackReadingOrder(nodes);
-      final items = fallbackNodes.take(12).toList().asMap().entries.map((e) {
-        final i = e.key;
-        final n = e.value;
-        return CurriculumItem(
-          id: 'itemId_${i + 1}',
-          nodeId: n.id,
-          label: n.label,
-          order: i + 1,
-          type: CurriculumItemType.explain,
-          estimatedMinutes: n.estimatedTimeMinutes,
-          priority: n.importance,
-          status: CurriculumItemStatus.pending,
-        );
-      }).toList();
-      final fitted = fitPlanToBudget(items, timeBudgetMinutes);
-      return Curriculum(
-        sessionId: '',
-        items: fitted,
-        totalEstimatedMinutes: fitted.fold<int>(0, (s, i) => s + i.estimatedMinutes),
-      );
-    }
-  }
 
   Future<({String nodeId, String label, String oneLiner, String details})>
       _nodeBrief(String topicId, String nodeId) async {
@@ -444,71 +364,6 @@ class LearningSessionEngine {
     final topic = await repo.getTopic(topicId);
     return topic?.targetLevel.raw ?? 'basic_understanding';
   }
-
-  Future<List<AssessmentQuestion>> _generateAssessmentQuestions(
-    String topicId,
-    List<({String nodeId, String label, String oneLiner, String details})> items,
-  ) async {
-    final itemsJson = items
-        .map((i) => '{"nodeId":"${i.nodeId}","label":"${i.label}","oneLiner":"${i.oneLiner}"}')
-        .join(',');
-    final prompt = '''# Роль
-Ты — AI-тестолог. Сгенерируй финальную проверку для сессии.
-
-# Узлы:
-[$itemsJson]
-
-# Задача
-Сгенерируй 6 вопросов разного типа (recognition, recall, explanation, application, diagnosis, transfer).
-Каждый вопрос:
-- id: question_N
-- nodeId: id узла
-- type: тип вопроса
-- question: текст вопроса
-- options: 4 варианта ответа
-- correctAnswer: правильный ответ
-- explanation: объяснение
-
-# Формат
-Строго JSON:
-{"questions":[...]}''';
-
-    try {
-      final res = await scheduler.execute<Map<String, dynamic>>(
-        'assessment',
-        () => prompt,
-        (raw) => parseLLMJson<Map<String, dynamic>>(raw),
-      );
-      final questionsRaw = res.result['questions'] as List<dynamic>? ?? [];
-      return questionsRaw
-          .whereType<Map<String, dynamic>>()
-          .map(AssessmentQuestion.fromJson)
-          .toList();
-    } catch (_) {
-      return items.take(3).map((i) => AssessmentQuestion(
-            id: 'q_${i.nodeId}',
-            type: QuestionType.recognition,
-            nodeId: i.nodeId,
-            question: 'Что означает понятие «${i.label}»?',
-            options: [
-              i.oneLiner.isNotEmpty ? i.oneLiner : 'Верный ответ',
-              'Понятие, обратное изучаемому',
-              'Термин из другого раздела',
-              'Нерелевантный ответ',
-            ],
-            correctAnswer: i.oneLiner.isNotEmpty ? i.oneLiner : 'Верный ответ',
-          )).toList();
-    }
-  }
-
-  static List<KnowledgeNode> _readingOrder(List<KnowledgeNode> nodes) {
-    final sorted = List<KnowledgeNode>.from(nodes)
-      ..sort((a, b) {
-        if (a.level != b.level) return a.level.compareTo(b.level);
-        return b.importance.compareTo(a.importance);
-      });
-    return sorted;
-  }
 }
 
 // ─── MasteryLevel → KnowledgeLevel mapping ────────────────────────────────────
@@ -547,36 +402,3 @@ bool _isCriticalDomain(String topicName, List<String> nodePath) {
 
 // Content prompt building is now delegated to prompts.dart via buildContentPrompt.
 // Duplicated constants removed to avoid stack drift.
-
-// ─── Time-budget fitting ───────────────────────────────────────────────────────
-
-/// Порядок для детерминированного fallback-плана: базовые понятия раньше,
-/// затем самые короткие (чтобы план из нескольких пунктов заполнил бюджет).
-List<KnowledgeNode> sortFallbackReadingOrder(List<KnowledgeNode> nodes) {
-  final sorted = List<KnowledgeNode>.from(nodes);
-  sorted.sort((a, b) {
-    if (a.level != b.level) return a.level.compareTo(b.level);
-    final byMinutes = a.estimatedTimeMinutes.compareTo(b.estimatedTimeMinutes);
-    if (byMinutes != 0) return byMinutes;
-    return b.importance.compareTo(a.importance);
-  });
-  return sorted;
-}
-
-/// Детерминированно укладывает план в [budgetMinutes]: берёт пункты по порядку,
-/// пока сумма не превысит бюджет. Первый пункт сохраняется всегда, даже если
-/// сам по себе длиннее бюджета (иначе план был бы пустым).
-List<CurriculumItem> fitPlanToBudget(List<CurriculumItem> items, int budgetMinutes) {
-  if (items.isEmpty) return items;
-  final sorted = List<CurriculumItem>.from(items)
-    ..sort((a, b) => a.order.compareTo(b.order));
-  final fitted = <CurriculumItem>[];
-  var sum = 0;
-  for (final it in sorted) {
-    if (fitted.isNotEmpty && sum + it.estimatedMinutes > budgetMinutes) break;
-    fitted.add(it);
-    sum += it.estimatedMinutes;
-  }
-  if (fitted.isEmpty) fitted.add(sorted.first);
-  return fitted;
-}

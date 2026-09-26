@@ -5,6 +5,7 @@ import '../models/models.dart';
 import '../../data/database/mindtree_repository.dart';
 import '../../data/llm/scheduler.dart';
 import '../../data/llm/client.dart';
+import '../../data/prompts/prompts.dart';
 import 'learning_session_engine.dart';
 
 class LearningActivityService {
@@ -220,11 +221,15 @@ class LearningActivityService {
     try {
       final res = await scheduler.execute<Map<String, dynamic>>(
         'activity',
-        () => _buildActivityPrompt(
+        () => buildActivityPrompt(
           topic: topicLabel,
           goal: session.goal,
           targetLevel: targetLevel,
-          node: nodeData,
+          label: nodeData.label,
+          oneLiner: nodeData.oneLiner,
+          details: nodeData.details,
+          conceptType: nodeData.conceptType,
+          difficulty: nodeData.difficulty,
         ),
         (raw) => parseLLMJson<Map<String, dynamic>>(raw),
         cacheKey: 'activity:${node.id}:${session.goal}:$targetLevel',
@@ -326,7 +331,7 @@ class LearningActivityService {
     try {
       final res = await scheduler.execute<Map<String, dynamic>>(
         'activity',
-        () => _buildActivityFeedbackPrompt(
+        () => buildActivityFeedbackPrompt(
           nodeLabel: nodeLabel,
           nodeOneLiner: nodeOneLiner,
           instruction: instruction,
@@ -604,93 +609,4 @@ int nextPendingIndex(List<ActivityStep> steps) {
   } catch (_) {
     return (itemId: null, steps: <ActivityStep>[]);
   }
-}
-
-// ─── Prompt building (inline) ────────────────────────────────────────────────
-
-const _noMetaRule = 'Не отвечайте на вопрос внутри формулировок.';
-const _alphabetRule = 'Все тексты на русском языке.';
-
-String _buildActivityPrompt({
-  required String topic,
-  required String goal,
-  required String targetLevel,
-  required _NodeContext node,
-}) {
-  return '''# Роль
-Ты — AI-репетитор. Готовишь учебный материал для одного понятия внутри структурированной сессии изучения темы.
-
-# Контекст
-Тема: "$topic"
-Цель сессии: "$goal"
-Целевой уровень усвоения: "$targetLevel"
-Понятие: "${node.label}"
-Определение: "${node.oneLiner.length > 400 ? node.oneLiner.substring(0, 400) : node.oneLiner}"
-Подробное объяснение: "${node.details.length > 1200 ? node.details.substring(0, 1200) : node.details}"
-Тип понятия: "${node.conceptType ?? 'концепция'}"
-Сложность: ${node.difficulty.toStringAsFixed(2)}
-
-# Задача
-Для этого понятия подготовь три элемента учебного цикла:
-1. example — конкретный, узнаваемый пример применения данного понятия (2–4 предложения, простым языком).
-2. recall — вопрос на припоминание (multiple choice) из 4 вариантов. Вопрос проверяет понимание понятия, а не заучивание формулировок.
-3. apply — открытое задание на применение понятия в новой ситуации + эталонный ответ (reference_answer), которым репетитор сверит ответ ученика.
-
-Требования:
-- Все тексты на русском языке, простым языком, по уровню цели ученика.
-- example должен быть конкретным и новым (не из определения).
-- Один из 4 вариантов recall — правильный, остальные правдоподобные, но неверные (типичные ошибки).
-- apply формулируется как практическое микрозадание, решаемое за 1–3 минуты.
-- Не отвечайте на вопрос внутри формулировок.
-$_noMetaRule
-$_alphabetRule
-
-# Формат ответа
-Строго JSON без markdown:
-{
-  "example": "строка",
-  "recall": { "question": "строка", "options": ["а", "б", "в", "г"], "correct_index": 0 },
-  "apply": { "instruction": "строка", "reference_answer": "строка" }
-}''';
-}
-
-String _buildActivityFeedbackPrompt({
-  required String nodeLabel,
-  required String nodeOneLiner,
-  required String instruction,
-  required String referenceAnswer,
-  required String userAnswer,
-}) {
-  String truncate(String s, int max) => s.length > max ? s.substring(0, max) : s;
-  return '''# Роль
-Ты — AI-репетитор. Оцениваешь свободный ответ ученика на задание по конкретному понятию.
-
-# Контекст
-Понятие: "$nodeLabel"
-Определение: "${truncate(nodeOneLiner, 400)}"
-Задание: "${truncate(instruction, 600)}"
-Эталонный ответ: "${truncate(referenceAnswer, 800)}"
-Ответ ученика: "${truncate(userAnswer, 1500)}"
-
-# Задача
-Оцени ответ ученика:
-- correct — ответ верен по сути, демонстрирует понимание понятия
-- partial — ответ частично верен: есть верная мысль, но есть ошибки или пропущена ключевая часть
-- incorrect — ответ неверен или не относится к заданию
-
-Для partial и incorrect укажи возможное заблуждение (misconception) одной фразой, если его можно определить (null, если не определяется).
-
-Требования:
-- feedback — 1–3 предложения, по-русски, доброжелательно, конкретно: что верно, чего не хватает.
-- Не раскрывай эталонный ответ целиком в feedback (ученик должен перепроверить сам).
-$_noMetaRule
-$_alphabetRule
-
-# Формат ответа
-Строго JSON без markdown:
-{
-  "assessment": "correct",
-  "feedback": "строка",
-  "misconception": "строка или null"
-}''';
 }

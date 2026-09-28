@@ -2,33 +2,23 @@
   "name": "mindtree-v2",
   "private": true,
   "workspaces": [
-    "packages/*",
-    "apps/*",
+    "packages/types",
     "server"
   ],
   "scripts": {
     "dev:server": "npm run dev -w server",
     "dev:server:mock": "npm run dev:server:mock -w server",
-    "dev:web": "npm run dev -w @mindtree/web",
-    "dev:desktop": "npm run dev -w @mindtree/desktop",
-    "dev:studio": "npm run dev -w @mindtree/studio",
     "build:types": "npm run build -w @mindtree/types",
-    "build:ui": "npm run build -w @mindtree/ui",
     "build:server": "npm run build -w server",
-    "build:web": "npm run build -w @mindtree/web",
-    "build:desktop": "npm run build -w @mindtree/desktop",
-    "build:desktop:dist": "powershell -ExecutionPolicy Bypass -File scripts/build-desktop.ps1",
-    "build:studio": "npm run build -w @mindtree/studio",
-    "build:all": "npm run build:types && npm run build:ui && npm run build:server && npm run build:web",
-    "typecheck": "npm run typecheck -w @mindtree/types && npm run typecheck -w @mindtree/ui && npm run typecheck -w @mindtree/graph && npm run typecheck -w @mindtree/tauri-common && npm run typecheck -w mindtree-server && npm run typecheck -w @mindtree/web && npm run typecheck -w @mindtree/desktop && npm run typecheck -w @mindtree/studio",
-    "lint": "eslint packages/ apps/ server/src/",
+    "build:all": "npm run build:types && npm run build:server",
+    "typecheck": "npm run typecheck -w @mindtree/types && npm run typecheck -w mindtree-server",
+    "lint": "eslint packages/types/src server/src",
     "test": "vitest run -c server/vitest.config.ts",
-    "test:web": "vitest run -c apps/web/vitest.config.ts",
+    "test:types": "vitest run",
     "test:watch": "vitest -c server/vitest.config.ts"
   },
   "devDependencies": {
     "eslint": "^9.28.0",
-    "eslint-plugin-react-hooks": "^5.2.0",
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.33.0",
     "vitest": "^3.1.0"

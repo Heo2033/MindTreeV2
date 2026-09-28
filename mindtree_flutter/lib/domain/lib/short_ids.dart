@@ -29,3 +29,15 @@ String shortId() {
 /// Готовый уникальный id с префиксом: `ci_`, `ms_`, `session_`, ...
 /// Префикс сохраняется как есть, суффикс — ровно 8 символов base36.
 String shortIdWith(String prefix) => '$prefix${shortId()}';
+
+/// Id темы: `topic_<timestamp36>_<random36>`.
+///
+/// Вынесено из локального `_generateId` в `ui_stores.dart`, потому что id темы
+/// нужен в двух местах: при создании темы вручную и при импорте файла
+/// (`lib/data/io/topic_transfer.dart`). Формат прежний, чтобы старые базы
+/// оставались валидными.
+String topicId() {
+  final ts = DateTime.now().microsecondsSinceEpoch.toRadixString(36);
+  final rand = _random.nextInt(0xFFFFFF).toRadixString(36);
+  return 'topic_${ts}_$rand';
+}

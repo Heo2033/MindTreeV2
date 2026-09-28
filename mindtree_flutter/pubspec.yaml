@@ -44,6 +44,7 @@ dependencies:
 
   # Routing
   go_router: ^14.6.2
+  file_selector: ^1.1.0
 
 dev_dependencies:
   flutter_test:

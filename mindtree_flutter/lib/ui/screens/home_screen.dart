@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import 'package:mindtree_flutter/domain/models/models.dart';
 import 'package:mindtree_flutter/providers/current_topic.dart';
+import 'package:mindtree_flutter/providers/topic_transfer_store.dart';
 import 'package:mindtree_flutter/providers/ui_stores.dart';
 import 'package:mindtree_flutter/ui/labels.dart';
 import 'package:mindtree_flutter/ui/theme/app_theme.dart';
@@ -28,6 +30,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final state = ref.watch(topicStoreProvider);
+    final transfer = ref.watch(topicTransferProvider);
 
     return Scaffold(
       appBar: AppBar(title: const Text('MindTree')),
@@ -53,7 +56,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                       ),
                 ),
                 const SizedBox(height: 20),
-                Row(
+                // `Wrap`, а не `Row`: три кнопки с длинными подписями не
+                // помещались в maxWidth 600 и давали RenderFlex overflow на
+                // узких экранах. Wrap переносит кнопки на следующую строку
+                // вместо обрезки.
+                Wrap(
+                  spacing: 12,
+                  runSpacing: 8,
                   children: [
                     AppButton(
                       'Настройки провайдера',
@@ -61,11 +70,16 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                       icon: Icons.settings_outlined,
                       onPressed: () => context.go('/settings'),
                     ),
-                    const SizedBox(width: 12),
                     AppButton(
                       '+ Новая тема',
                       icon: Icons.add_circle_outline,
                       onPressed: () => context.go('/new'),
+                    ),
+                    AppButton(
+                      transfer.busy ? '…' : 'Импорт',
+                      variant: AppButtonVariant.secondary,
+                      icon: Icons.file_open_outlined,
+                      onPressed: transfer.busy ? null : _importTopic,
                     ),
                   ],
                 ),
@@ -160,6 +174,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                   ),
                                 ),
                                 IconButton(
+                                  tooltip: 'Экспорт в файл',
+                                  icon: const Icon(Icons.save_alt_outlined, size: 20),
+                                  onPressed: transfer.busy
+                                      ? null
+                                      : () => _exportTopic(topic),
+                                ),
+                                IconButton(
                                   icon: const Icon(Icons.delete_outline, size: 20),
                                   onPressed: () => _confirmDelete(context, topic),
                                 ),
@@ -175,6 +196,33 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  Future<void> _importTopic() async {
+    final feedback =
+        await ref.read(topicTransferProvider.notifier).importTopic();
+    if (feedback != null && mounted) _showFeedback(feedback);
+  }
+
+  Future<void> _exportTopic(Topic topic) async {
+    final feedback = await ref
+        .read(topicTransferProvider.notifier)
+        .exportTopic(topic.id, topic.name);
+    if (feedback != null && mounted) _showFeedback(feedback);
+  }
+
+  void _showFeedback(TransferFeedback feedback) {
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.clearSnackBars();
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(feedback.message),
+        backgroundColor:
+            feedback.ok ? null : Theme.of(context).colorScheme.error,
+        duration: Duration(seconds: feedback.ok ? 4 : 8),
+        behavior: SnackBarBehavior.floating,
       ),
     );
   }

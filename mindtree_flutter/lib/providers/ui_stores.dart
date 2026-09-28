@@ -12,6 +12,7 @@ import 'package:mindtree_flutter/domain/engines/learner_model_service.dart';
 import 'package:mindtree_flutter/domain/engines/learning_activity_service.dart';
 import 'package:mindtree_flutter/domain/engines/learning_session_engine.dart';
 import 'package:mindtree_flutter/domain/engines/scoped_ids.dart';
+import 'package:mindtree_flutter/domain/lib/short_ids.dart';
 import 'package:mindtree_flutter/domain/models/models.dart';
 import 'package:mindtree_flutter/providers/app_providers.dart';
 
@@ -93,11 +94,7 @@ class TopicNotifier extends StateNotifier<TopicState> {
     );
   }
 
-  static String _generateId() {
-    final ts = DateTime.now().microsecondsSinceEpoch.toRadixString(36);
-    final rand = Random().nextInt(0xFFFFFF).toRadixString(36);
-    return 'topic_${ts}_$rand';
-  }
+  static String _generateId() => topicId();
 }
 
 final topicStoreProvider = StateNotifierProvider<TopicNotifier, TopicState>(

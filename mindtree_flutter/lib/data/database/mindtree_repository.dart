@@ -38,6 +38,31 @@ class MindtreeRepository {
     await (db.delete(db.topics)..where((t) => t.id.equals(id))).go();
   }
 
+  /// Тема вместе со всем деревом — сырьё для экспорта в файл.
+  Future<TopicWithNodes?> getTopicWithNodes(String topicId) async {
+    final topic = await getTopic(topicId);
+    if (topic == null) return null;
+    return TopicWithNodes(topic: topic, nodes: await listNodes(topicId));
+  }
+
+  /// Атомарная вставка темы со всем деревом: используется импортом файла.
+  ///
+  /// Транзакция обязательна — частично залитый импорт оставил бы тему без
+  /// содержимого (или наоборот) и сломал бы инварианты дерева. При любой
+  /// ошибке (в т.ч. конфликте id) всё откатывается.
+  Future<Topic> insertTopicWithNodes(
+    Topic topic,
+    List<KnowledgeNode> nodes,
+  ) async {
+    await db.transaction(() async {
+      await db.into(db.topics).insert(Mappers.topicToRow(topic));
+      for (final n in nodes) {
+        await db.into(db.knowledgeNodes).insert(Mappers.nodeToRow(n));
+      }
+    });
+    return topic;
+  }
+
   // ---------- Knowledge Nodes ----------
 
   Future<List<KnowledgeNode>> listNodes(String topicId) async {

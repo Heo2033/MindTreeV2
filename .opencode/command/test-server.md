@@ -8,7 +8,7 @@ agent: server
 
 Команды (последовательно, чтобы ранняя остановка указывала на проблему):
 1. `npm run typecheck` — проверка типов всех workspaces
-2. `npm run lint` — ESLint (`packages/ apps/ server/src/`)
+2. `npm run lint` — ESLint (`packages/types/ server/src/`)
 3. `npm run test` — vitest (конфиг `server/vitest.config.ts`); можно передать
    `npm run test -- $ARGUMENTS` для фильтра.
 

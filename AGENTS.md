@@ -15,10 +15,28 @@
 
 - `mindtree_flutter/` — **приоритетное направление разработки**: автономный Flutter/Dart-клиент
   (drift/SQLite, свой LLM-клиент, свои промпты, Riverpod, go_router).
-- `server/` — reference-стек: Node.js + Fastify + better-sqlite3 + Тип стек; зеркалит движок.
-- `apps/{app,desktop,studio,web}/` + `packages/{graph,native,tauri-common,types,ui}/` — старое TS/React-окружение.
+- `server/` — reference-стек: Node.js + Fastify + better-sqlite3. Зеркалит домен и промпты.
+  **UI-клиента у него больше нет** (см. «Статус server» ниже).
+- `packages/types/` — общий тип-контракт TS-стеков, используется `server/` (19 импортов).
 - `docs/`, `final_ai_learning_engine_refactoring_spec.md` — продуктовые спеки.
-- `scripts/build-desktop.ps1` — сборка Tauri-десктопа.
+
+> **Удалено 28.09.2026:** `apps/{app,desktop,studio,web}/`, `packages/{graph,native,tauri-common,ui}/`,
+> `scripts/build-desktop.ps1`, `server/build-sidecar.mjs`. Причина: TS/React-продукт дублировал
+> `mindtree_flutter/` и не имел пользователей; синхронизация трёх стеков съедала ~1/3 коммитов.
+> `docs/exam-prep-plan.md` помечен устаревшим (написан под удалённый web-стек, не реализован).
+
+## Статус `server/` — замороженный reference
+
+`server/` больше не обслуживает ни одного клиента: единственный потребитель API (web/Tauri) удалён.
+Отсюда правило:
+
+- **Новые фичи в `server/` не делаются.** Он нужен как эталон и как место, где независимо
+  проявляются баги зеркала (история это подтверждает: синхронизация находила реальные дефекты —
+> дублей плейсхолдеров в промптах, рассинхрон дедлайна scheduler).
+- **Зеркалится только баг-фикс критичной доменной/промптной логики** — то, что меняет учебное
+  поведение, а не инфраструктуру.
+- Если правка в Flutter намеренно расходится с `server/` — это допустимо, фиксируй в ответе.
+- Решение «дожимать ли `server/` до паритета или удалить» — открытое. Пока не принято, он лежит.
 
 ## Главный инвариант: два параллельных стека
 
@@ -26,7 +44,8 @@
 
 - `mindtree_flutter/lib/data/prompts/prompts.dart` ↔ `server/src/prompts/*.ts` (17 билдеров).
 - `mindtree_flutter/lib/domain/engines/*` ↔ `server/src/domain/*.ts` (17 engines).
-- `mindtree_flutter/lib/providers/ui_stores.dart` ↔ `apps/web/src/stores/*`.
+- `mindtree_flutter/lib/domain/models/models.dart` ↔ `packages/types/src/*` (тип-контракт).
+- UI-слой зеркала **удалён** — синхронизировать UI больше не с чем.
 
 Правила:
 1. Любая правка промпта или доменного движка меняется **синхронно в обоих стеках**, если
@@ -54,7 +73,7 @@
   retries, cooldown, контекст вызова. Не обходи scheduler напрямую без причины.
 - Fallback обязателен: каждый AI-вызов имеет детерминированный запасной вариант
   (fallback-текст, эвристика, mock-режим). Сбой LLM не должен ронять пользовательский сценарий.
-- Офлайн/mock: `LLM_MOCK`/`isMock` — детерминированные заглушки без слать запросов.
+- Офлайн/mock: `LLM_MOCK`/`isMock` — детерминированные заглушки без сетевых запросов.
 - Правки поведения движков не должны полагаться на «удачу модели» — контракты JSON валидируются.
 
 ## Домен обучения (детерминированная логика)
@@ -72,10 +91,44 @@
   содержат API-ключи. **Никогда** не коммитить, не логировать, не выводить в отчёт.
 - Чувствительные данные в код/тесты не встраивать; использовать `tool/gen_config.ps1` и env.
 
+## Инструмент проверки качества: probe
+
+`mindtree_flutter/tool/probe/` — headless-прогон доменного ядра **без UI и без Riverpod**.
+Правило: обвязка движков живёт в `lib/domain/engines/engine_factory.dart`
+(`buildEngines({repo, llmConfig, scheduler})`) — её используют и приложение, и probe,
+и `tool/e2e/llm_smoke_test.dart`. Дублировать ручную обвязку промптов нельзя: smoke-тест
+должен проверять тот же граф, что и приложение.
+
+```powershell
+# детерминированно, без сети и без ключа
+& C:\flutter\bin\cache\dart-sdk\bin\dart.exe run tool\probe\bin\mindtree_probe.dart --mock --out build\probe
+# живой прогон через провайдера (нужен provider-config.json)
+& C:\flutter\bin\cache\dart-sdk\bin\dart.exe run tool\probe\bin\mindtree_probe.dart --query "теорема остановки" --out build\probe-live
+```
+
+Прогон проходит весь цикл (`tree → content → curriculum → diagnostic → session/activity →
+assessment → mastery → milestones`) и кладёт в `--out`:
+
+- `report.md` — самодостаточный артефакт: дерево, контент всех узлов, план, диагностика,
+  шаги activity, ответы и вердикты LLM, мисконцепции, mastery, таблица проверок.
+  Именно его читает агент, чтобы оценить качество выданного материала.
+- `report.json` — то же машинно; детерминирован (побайтово совпадает между прогонами).
+- `run-stats.json` — wall-clock, счётчики вызовов; **не** детерминирован.
+
+Автоматические проверки качества — `tool/probe/quality_checks.dart`:
+`single_root`, `parent_exists`, `no_cycles`, `level_consistent`, `one_liner_max_len`,
+`no_empty_content`, `no_duplicate_labels`, `jargon_free`, `question_wellformed`,
+`recall_wellformed`, `apply_wellformed`, `no_duplicate_activity`, `goal_coverage`,
+`content_coverage`. Exit code `1`, если есть проверки уровня `fail`.
+
+**Обязательно** прогоняй probe в `--mock` после правки промптов, движков и
+`quality_checks` — это дешёвый способ поймать регрессии в учебном материале без UI.
+
 ## Команды валидации
 
 - Flutter: `flutter analyze`, `flutter test`, кодогенерация `dart run build_runner build --delete-conflicting-outputs`.
-- TS-стек: `npm run typecheck -w <pkg>`, `npm run lint`, `npm run test` (vitest), сборка `npm run build:all`.
+- Probe: команда выше, `--mock` достаточно; полный набор команд — `tool/probe/README.md`.
+- TS-стек: `npm run typecheck`, `npm run lint`, `npm run test` (vitest), сборка `npm run build:all`.
 - При правках всегда прогоняй соответствующие тесты (см. `.opencode/command/`).
 
 ## Конвенции реализации

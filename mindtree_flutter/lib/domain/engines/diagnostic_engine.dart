@@ -1,3 +1,5 @@
+import 'dart:developer' as developer;
+
 import 'package:mindtree_flutter/domain/lib/short_ids.dart';
 
 import '../../data/database/mindtree_repository.dart';
@@ -6,6 +8,9 @@ import '../../data/llm/scheduler.dart';
 import '../../data/prompts/prompts.dart';
 import '../models/models.dart';
 import 'learner_model_service.dart';
+// Устойчивый сдвиг вариантов/индекса — общие детерминированные хелперы
+// (без RNG), переиспользуем их, а не дублируем ротацию.
+import 'learning_activity_service.dart' show rotateIndex, rotateOptions;
 
 /// A single diagnostic question.
 class DiagnosticQuestion {
@@ -105,13 +110,83 @@ class DiagnosticEngine {
       }).toList(),
     );
 
-    final res = await scheduler.execute<List<DiagnosticQuestion>>(
-      'diagnostic',
-      () => prompt,
-      _parseDiagnosticResult,
-    );
+    List<DiagnosticQuestion> questions;
+    try {
+      final res = await scheduler.execute<List<DiagnosticQuestion>>(
+        'diagnostic',
+        () => prompt,
+        _parseDiagnosticResult,
+      );
+      questions = res.result;
+    } catch (e, st) {
+      // LLM недоступен (сеть/ключ/лимиты) — отдаём детерминированный набор
+      // вопросов из уже загруженного дерева: экран диагностики не должен падать.
+      developer.log(
+        '[diagnostic] LLM generation failed for $topicId',
+        error: e,
+        stackTrace: st,
+      );
+      questions = _fallbackQuestions(topic?.name ?? '', nodes);
+    }
 
-    return res.result.take(6).toList();
+    return questions.take(6).toList();
+  }
+
+  /// Детерминированный fallback-диагностики без LLM: вопрос на каждый узел
+  /// («что означает понятие X»), варианты — подписи узлов. Без Random и без
+  /// DateTime: и порядок узлов, и сдвиг вариантов задаются индексом узла,
+  /// поэтому один и тот же вход всегда даёт один и тот же набор вопросов.
+  List<DiagnosticQuestion> _fallbackQuestions(
+    String topicName,
+    List<KnowledgeNode> nodes,
+  ) {
+    // Один узел — вопрос в одном варианте бессмыслен, без узлов — тоже.
+    if (nodes.length < 2) return const [];
+
+    // Подпись узла — и вопрос, и варианты; без label берём one_liner.
+    final labels = [
+      for (final n in nodes)
+        n.label.trim().isNotEmpty ? n.label.trim() : n.oneLiner.trim(),
+    ];
+
+    final questions = <DiagnosticQuestion>[];
+    for (var i = 0; i < nodes.length; i++) {
+      final node = nodes[i];
+      final correct = labels[i];
+      if (correct.isEmpty) continue;
+
+      // Дистракторы — подписи следующих по обходу узлов (циклически), без
+      // пустых строк и повторов правильного варианта.
+      final distractors = <String>[];
+      for (var k = 1; distractors.length < 3 && k < nodes.length; k++) {
+        final candidate = labels[(i + k) % nodes.length];
+        if (candidate.isEmpty || candidate == correct) continue;
+        if (distractors.contains(candidate)) continue;
+        distractors.add(candidate);
+      }
+
+      final options = [correct, ...distractors];
+      // Меньше двух вариантов — вопрос без выбора, пропускаем узел.
+      if (options.length < 2) continue;
+
+      // Сдвиг по индексу узла: правильный вариант не всегда первый, но для
+      // одного и того же узла его позиция всегда одна и та же.
+      final shift = i % options.length;
+      final oneLiner = node.oneLiner.trim();
+      questions.add(
+        DiagnosticQuestion(
+          id: shortIdWith('d_'),
+          nodeId: node.id,
+          question: 'Что означает понятие «$correct»?',
+          options: rotateOptions(options, shift),
+          correctIndex: rotateIndex(0, shift, options.length),
+          explanation: oneLiner.isNotEmpty
+              ? oneLiner
+              : 'Понятие «$correct» — часть темы «$topicName».',
+        ),
+      );
+    }
+    return questions;
   }
 
   Future<DiagnosticResult> evaluate(

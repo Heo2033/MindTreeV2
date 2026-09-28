@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:mindtree_flutter/domain/lib/short_ids.dart';
+
 import '../../data/database/mindtree_repository.dart';
 import '../models/models.dart';
 
@@ -7,6 +9,12 @@ import '../models/models.dart';
 /// recent events per topic.
 class EventBus {
   final MindtreeRepository repo;
+
+  /// Отметки начала текущей единицы работы (шаг активности либо пункт
+  /// curriculum) по sessionId. Нужны, чтобы события, закрывающие единицу,
+  /// несли реальную длительность: сумма durationMs по сессии = время изучения,
+  /// на котором считаются ETA и аналитика.
+  final Map<String, int> _unitStarts = {};
 
   EventBus(this.repo);
 
@@ -18,14 +26,36 @@ class EventBus {
     Map<String, dynamic>? payload,
     int durationMs = 0,
   }) async {
-    return repo.insertEvent(LearningEvent(
-      id: '${DateTime.now().microsecondsSinceEpoch}',
+    // id события — через общий генератор коротких id, а не из timestamp.
+    // На timestamp'е два события, эмитнутые в одном тике (например,
+    // `activity_answer` дважды подряд или `session_started` сразу за
+    // `explain`), получали одинаковый id и падали с
+    // `UNIQUE constraint failed: learning_events.id` — событие терялось.
+    final id = shortIdWith('ev_');
+    await repo.insertEvent(LearningEvent(
+      id: id,
       sessionId: sessionId,
       type: LearningEventType.fromString(kind),
       nodeId: nodeId,
       data: payload ?? const {},
       durationMs: durationMs,
     ));
+    return id;
+  }
+
+  /// Запомнить момент старта единицы работы в сессии.
+  void markUnitStart(String sessionId) {
+    _unitStarts[sessionId] = DateTime.now().millisecondsSinceEpoch;
+  }
+
+  /// Закрыть единицу работы: вернуть прошедшие миллисекунды и снять отметку,
+  /// чтобы следующая единица стартовала с текущего момента.
+  /// 0 — если отметки нет или системные часы ушли назад. Без исключений.
+  int closeUnit(String sessionId) {
+    final start = _unitStarts.remove(sessionId);
+    if (start == null) return 0;
+    final elapsed = DateTime.now().millisecondsSinceEpoch - start;
+    return elapsed > 0 ? elapsed : 0;
   }
 
   Future<List<Map<String, dynamic>>> recent(String topicId, List<String> kinds,

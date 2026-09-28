@@ -96,6 +96,8 @@ export class LearningActivityService {
       )
       .run(JSON.stringify({ itemId: current.item.id, steps }), sessionId);
 
+    // Маркер старта шага: длительность 0, открываем границу единицы работы.
+    EventBus.markUnitStart(sessionId);
     EventBus.emit({
       sessionId,
       topicId: session.topicId,
@@ -134,13 +136,17 @@ export class LearningActivityService {
       step.userAnswer = answer;
       step.correct = res.correct;
       step.feedback = res.feedback;
+      // Закрываем шаг: несём длительность и сразу открываем следующий.
+      const recallMs = EventBus.closeUnit(sessionId);
       EventBus.emit({
         sessionId,
         topicId: session.topicId,
         kind: "activity_answer",
         nodeId: activity.nodeId,
         payload: { step: "recall", correct: res.correct, score: res.score },
+        durationMs: recallMs,
       });
+      EventBus.markUnitStart(sessionId);
     } else if (step.type === "apply") {
       const res = await this.feedback.evaluateApply(
         session.topicId,
@@ -156,24 +162,30 @@ export class LearningActivityService {
       step.userAnswer = answer;
       step.correct = res.correct;
       step.feedback = res.feedback;
+      const applyMs = EventBus.closeUnit(sessionId);
       EventBus.emit({
         sessionId,
         topicId: session.topicId,
         kind: "activity_answer",
         nodeId: activity.nodeId,
         payload: { step: "apply", correct: res.correct, score: res.score },
+        durationMs: applyMs,
       });
+      EventBus.markUnitStart(sessionId);
     } else {
       // explain / example — не требуют ответа ученика
       step.status = "answered";
       step.userAnswer = answer || "";
+      const readMs = EventBus.closeUnit(sessionId);
       EventBus.emit({
         sessionId,
         topicId: session.topicId,
         kind: "activity_step_done",
         nodeId: activity.nodeId,
         payload: { step: step.type },
+        durationMs: readMs,
       });
+      EventBus.markUnitStart(sessionId);
     }
 
     this.persistSteps(sessionId, activity.itemId, activity.steps);

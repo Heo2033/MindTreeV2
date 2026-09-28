@@ -86,6 +86,8 @@ export class LearningSessionEngine {
         0,
       );
 
+    // Маркер старта сессии: длительность 0, открываем границу единицы работы.
+    EventBus.markUnitStart(sessionId);
     EventBus.emit({
       sessionId,
       topicId: input.topicId,
@@ -232,6 +234,8 @@ export class LearningSessionEngine {
         analogy: node.analogy,
         sources: node.sources,
       };
+      // Маркер чтения: таймер единицы не расходуется и не сбрасывается,
+      // иначе время чтения либо терялось бы, либо считалось дважды.
       EventBus.emit({
         sessionId,
         topicId: session.topicId,
@@ -287,13 +291,18 @@ export class LearningSessionEngine {
       this.reviewScheduler.onAnswered(session.topicId, nodeId, quality);
     }
 
+    // Закрываем единицу работы: несём реальную длительность и сразу открываем
+    // следующую, чтобы сумма duration_ms по сессии была временем изучения.
+    const spentMs = EventBus.closeUnit(sessionId);
     EventBus.emit({
       sessionId,
       topicId: session.topicId,
       kind: "item_completed",
       nodeId,
       payload: { itemId, progress },
+      durationMs: spentMs,
     });
+    EventBus.markUnitStart(sessionId);
   }
 
   /**
@@ -322,6 +331,8 @@ export class LearningSessionEngine {
       true,
     );
 
+    // Таймер единицы не трогаем: оценка не должна ни закрыть, ни открыть
+    // границу — время на неё уже учтено предыдущим закрывающим событием.
     EventBus.emit({
       sessionId,
       topicId: session.topicId,

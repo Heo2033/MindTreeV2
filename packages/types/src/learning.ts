@@ -41,11 +41,38 @@ export interface LearningSession {
   currentIndex: number;
 }
 
+/**
+ * Тип события обучения.
+ *
+ * Делится на две группы:
+ * - фазы обучения: `explain`, `recall`, `apply`, `assessment`, `synthesis`,
+ *   `tutor_chat` — что именно осваивает пользователь;
+ * - события жизненного цикла: `session_started`, `item_completed`,
+ *   `activity_started`, `activity_answer`, `activity_step_done` — что произошло
+ *   в сессии или активности.
+ *
+ * Зеркало `mindtree_flutter/lib/domain/models/learning.dart` (`LearningEventType`).
+ * Раньше здесь были только фазы, из-за чего Flutter сводил к `explain` все
+ * события жизненного цикла при записи в `learning_events`.
+ */
+export type LearningEventType =
+  | "explain"
+  | "recall"
+  | "apply"
+  | "assessment"
+  | "synthesis"
+  | "tutor_chat"
+  | "session_started"
+  | "item_completed"
+  | "activity_started"
+  | "activity_answer"
+  | "activity_step_done";
+
 export interface LearningEvent {
   id: string;
   sessionId: string;
   timestamp: string;
-  type: "explain" | "recall" | "apply" | "assessment" | "synthesis" | "tutor_chat";
+  type: LearningEventType;
   nodeId: string | null;
   data: Record<string, unknown>;
   durationMs: number;

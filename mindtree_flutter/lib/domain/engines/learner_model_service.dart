@@ -89,9 +89,16 @@ class LearnerModelService {
     return created;
   }
 
+  /// Отдаёт список мастери, который вызывающий код может свободно менять
+  /// (`_findOrCreate`/`_replace` делают list.add). `const []` немодифицируемый,
+  /// поэтому при отсутствии строки learner_model отдаём growable-копию —
+  /// иначе первое же обновление мастери падало бы с
+  /// «Cannot add to an unmodifiable list».
   Future<List<ConceptMastery>> _masteriesOf(String topicId) async {
     final m = await repo.getLearnerModel(topicId);
-    return m?.conceptMasteries ?? const [];
+    return List<ConceptMastery>.from(
+      m?.conceptMasteries ?? const <ConceptMastery>[],
+    );
   }
 
   Future<void> _saveMasteries(String topicId, List<ConceptMastery> masteries) async {

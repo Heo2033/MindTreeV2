@@ -94,6 +94,9 @@ class LearningSessionEngine {
     );
 
     await repo.createSession(session);
+    // Открываем границу времени: событие, закрывающее единицу работы
+    // (activity_answer/step_done/item_completed), принесёт реальную длительность.
+    eventBus.markUnitStart(sessionId);
     await eventBus.emit(
       sessionId: sessionId,
       topicId: input.topicId,
@@ -193,6 +196,8 @@ class LearningSessionEngine {
       );
       await repo.updateNode(updatedNode);
 
+      // Событие-маркер чтения: таймер единицы не расходуем и не сбрасываем —
+      // время чтения придёт в событии, закрывающем шаг активности.
       await eventBus.emit(
         sessionId: sessionId,
         topicId: session.topicId,
@@ -204,6 +209,7 @@ class LearningSessionEngine {
       final fetched = await repo.getNode(nodeId) ?? updatedNode;
       return (content: content, node: fetched);
     } else {
+      // Маркер чтения: длительность 0, граница времени не трогается.
       await eventBus.emit(
         sessionId: sessionId,
         topicId: session.topicId,
@@ -261,13 +267,18 @@ class LearningSessionEngine {
 
     final completedCount = items.where((i) => i.status == CurriculumItemStatus.completed).length;
     final progress = items.isNotEmpty ? completedCount / items.length : 0.0;
+    // Единица работы закрыта: пишем в событие реальные миллисекунды и сразу
+    // открываем границу для следующего пункта.
+    final spentMs = eventBus.closeUnit(sessionId);
     await eventBus.emit(
       sessionId: sessionId,
       topicId: session.topicId,
       kind: 'item_completed',
       nodeId: nodeId,
       payload: {'itemId': itemId, 'progress': progress},
+      durationMs: spentMs,
     );
+    eventBus.markUnitStart(sessionId);
   }
 
   Future<String> generateFinalAssessment(String sessionId) async {
@@ -300,6 +311,8 @@ class LearningSessionEngine {
     );
     final assessmentId = assessment.id;
 
+    // Оценка — не единица работы: таймер не расходуем и не сбрасываем,
+    // длительность остаётся 0.
     await eventBus.emit(
       sessionId: sessionId,
       topicId: session.topicId,

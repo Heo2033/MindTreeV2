@@ -72,6 +72,8 @@ class LearningActivityService {
     );
     await repo.updateSession(updated);
 
+    // Открываем границу времени на работу с текущим узлом.
+    engine.eventBus.markUnitStart(sessionId);
     await engine.eventBus.emit(
       sessionId: sessionId,
       topicId: session.topicId,
@@ -137,13 +139,18 @@ class LearningActivityService {
         feedback: result.feedback,
       );
       await _persistSteps(sessionId, activity.itemId, updatedSteps);
+      // Шаг закрыт: длительность времени на него уходит в событие,
+      // следующий шаг стартует с новой границы.
+      final spentMs = engine.eventBus.closeUnit(sessionId);
       await engine.eventBus.emit(
         sessionId: sessionId,
         topicId: session.topicId,
         kind: 'activity_answer',
         nodeId: activity.nodeId,
         payload: {'step': 'recall', 'correct': result.correct, 'score': result.score},
+        durationMs: spentMs,
       );
+      engine.eventBus.markUnitStart(sessionId);
     } else if (step.type == 'apply') {
       final topic = await repo.getTopic(session.topicId);
       final topicName = topic?.name ?? '';
@@ -165,13 +172,16 @@ class LearningActivityService {
         feedback: res.feedback,
       );
       await _persistSteps(sessionId, activity.itemId, updatedSteps);
+      final spentMs = engine.eventBus.closeUnit(sessionId);
       await engine.eventBus.emit(
         sessionId: sessionId,
         topicId: session.topicId,
         kind: 'activity_answer',
         nodeId: activity.nodeId,
         payload: {'step': 'apply', 'correct': res.correct, 'score': res.score},
+        durationMs: spentMs,
       );
+      engine.eventBus.markUnitStart(sessionId);
     } else {
       final updatedSteps = List<ActivityStep>.from(activity.steps);
       updatedSteps[stepIndex] = ActivityStep(
@@ -187,13 +197,16 @@ class LearningActivityService {
         userAnswer: answer.isEmpty ? '' : answer,
       );
       await _persistSteps(sessionId, activity.itemId, updatedSteps);
+      final spentMs = engine.eventBus.closeUnit(sessionId);
       await engine.eventBus.emit(
         sessionId: sessionId,
         topicId: session.topicId,
         kind: 'activity_step_done',
         nodeId: activity.nodeId,
         payload: {'step': step.type},
+        durationMs: spentMs,
       );
+      engine.eventBus.markUnitStart(sessionId);
     }
 
     return (await getActivity(sessionId))!;

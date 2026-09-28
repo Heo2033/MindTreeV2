@@ -229,32 +229,51 @@ class LearningSession {
 }
 
 /// Type of a learning event.
+///
+/// Значения делятся на две группы:
+/// - фазы обучения ([explain], [recall], [apply], [assessment], [synthesis],
+///   [tutorChat]) — что именно осваивает пользователь;
+/// - события жизненного цикла ([sessionStarted], [itemCompleted],
+///   [activityStarted], [activityAnswer], [activityStepDone]) — что произошло
+///   в сессии или активности.
+///
+/// Раньше здесь были только фазы, и `fromString` молча приравнивал к [explain]
+/// всё, что не входило в список: пять видов событий (`session_started`,
+/// `item_completed`, `activity_*`) записывались в `learning_events.type` как
+/// `explain`. Из-за этого `EventBus.recent(topic, ['explain'])` возвращал смесь
+/// реальных explain-событий с событиями жизненного цикла, а запрос за
+/// `session_started` не возвращал ничего. Теперь список полный, а разбор идёт
+/// по [wire] — рассинхрон между ними структурно невозможен.
 enum LearningEventType {
+  // Фазы обучения.
   explain,
   recall,
   apply,
   assessment,
   synthesis,
-  tutorChat;
+  tutorChat,
 
+  // События жизненного цикла сессии.
+  sessionStarted,
+  itemCompleted,
+
+  // События активности.
+  activityStarted,
+  activityAnswer,
+  activityStepDone;
+
+  /// Разбор wire-строки. Неизвестное значение трактуем как [explain] (emit
+  /// не вызывается пользователем) — так исторические строки в базе остаются
+  /// валидными, а не падают на чтении.
   static LearningEventType fromString(String? v) {
-    switch (v) {
-      case 'explain':
-        return LearningEventType.explain;
-      case 'recall':
-        return LearningEventType.recall;
-      case 'apply':
-        return LearningEventType.apply;
-      case 'assessment':
-        return LearningEventType.assessment;
-      case 'synthesis':
-        return LearningEventType.synthesis;
-      case 'tutor_chat':
-        return LearningEventType.tutorChat;
-      default:
-        return LearningEventType.explain;
+    for (final t in values) {
+      if (t.wire == v) return t;
     }
+    return LearningEventType.explain;
   }
+
+  /// Все допустимые wire-значения — список из [values] не отдельно.
+  static List<String> get kinds => [for (final t in values) t.wire];
 
   String get wire {
     switch (this) {
@@ -270,6 +289,16 @@ enum LearningEventType {
         return 'synthesis';
       case LearningEventType.tutorChat:
         return 'tutor_chat';
+      case LearningEventType.sessionStarted:
+        return 'session_started';
+      case LearningEventType.itemCompleted:
+        return 'item_completed';
+      case LearningEventType.activityStarted:
+        return 'activity_started';
+      case LearningEventType.activityAnswer:
+        return 'activity_answer';
+      case LearningEventType.activityStepDone:
+        return 'activity_step_done';
     }
   }
 }

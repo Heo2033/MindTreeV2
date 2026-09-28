@@ -1,6 +1,9 @@
 // ignore_for_file: lines_longer_than_80_chars
 import 'dart:convert';
 
+import 'package:mindtree_flutter/domain/engines/knowledge_graph_engine.dart'
+    show oneLinerMaxChars;
+
 // ─── Shared constants (from rules.ts) ────────────────────────────────────────
 
 const String noMetaRule =
@@ -2015,6 +2018,49 @@ String buildRepairPrompt({
   var result = _replaceOnce(promptRepair, '{{audience_block}}', audienceBlock);
   result = _replaceOnce(result, '{{problem_nodes}}', nodesStr);
   result = _replaceOnce(result, '{{issues}}', issuesStr);
+  return result;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// oneline.ts
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const String promptOnelineRewrite = '# Роль\n'
+    'Ты — редактор учебных материалов. Ты сокращаешь слишком длинное однострочное '
+    'описание понятия (one_liner), сохраняя точность и ключевую идею.\n'
+    '\n'
+    '# Задача\n'
+    'Дано понятие и его слишком длинное однострочное описание. Перепиши описание так, '
+    'чтобы оно занимало не более {{limit}} символов.\n'
+    '\n'
+    '# Контекст\n'
+    'Понятие: "{{label}}"\n'
+    'Текущее описание (длинное): {{one_liner}}\n'
+    '\n'
+    '# Правила\n'
+    '- Новая версия должна быть не длиннее {{limit}} символов (длина строки).\n'
+    '- Сохрани ключевую идею; не добавляй новых фактов и не меняй смысл.\n'
+    '- Это одно короткое предложение или фраза, а не статья.\n'
+    '- Не используй жаргон и канцелярит; пиши просто и понятно.\n'
+    '$noMetaRule\n'
+    '$alphabetRule\n'
+    '\n'
+    '# Формат ответа\n'
+    'Только валидный JSON-объект:\n'
+    '{"one_liner": "сокращённое описание"}\n'
+    '\n'
+    'Никакого текста вне JSON. Без ```json и без пояснений.\n'
+    '\n'
+    '# Язык\n'
+    'Ответ строго на русском языке.\n';
+
+String buildOnelineRewritePrompt({
+  required String label,
+  required String currentOneLiner,
+}) {
+  var result = _replaceOnce(promptOnelineRewrite, '{{limit}}', '$oneLinerMaxChars');
+  result = _replaceOnce(result, '{{label}}', label);
+  result = _replaceOnce(result, '{{one_liner}}', currentOneLiner);
   return result;
 }
 

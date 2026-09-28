@@ -42,7 +42,7 @@
 
 Движок и промпты **продублированы 1:1** между Flutter и TS-стеком:
 
-- `mindtree_flutter/lib/data/prompts/prompts.dart` ↔ `server/src/prompts/*.ts` (17 билдеров).
+- `mindtree_flutter/lib/data/prompts/prompts.dart` ↔ `server/src/prompts/*.ts` (18 билдеров).
 - `mindtree_flutter/lib/domain/engines/*` ↔ `server/src/domain/*.ts` (17 engines).
 - `mindtree_flutter/lib/domain/models/models.dart` ↔ `packages/types/src/*` (тип-контракт).
 - UI-слой зеркала **удалён** — синхронизировать UI больше не с чем.

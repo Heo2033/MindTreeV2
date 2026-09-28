@@ -297,6 +297,11 @@ class NodeContentContext {
 
 const int _maxDepth = 5;
 
+/// Максимальная длина `one_liner` — инвариант AGENTS.md. Единственный источник
+/// истины: лимит используется движком (переспрос/триммация), промптами
+/// (`prompts.dart`) и проверкой качества probe (`jargon.dart`).
+const int oneLinerMaxChars = 120;
+
 /// Orchestrates knowledge-tree generation: structure -> expand ->
 /// validate/repair -> content, backed by the repository for persistence and
 /// the [TreeScheduler] for LLM calls. Prompt builders are injected as pure
@@ -326,6 +331,12 @@ class KnowledgeGraphEngine {
   final GeneratorFn<ValidatePromptContext> generateValidate;
   final GeneratorFn<RepairPromptContext> generateRepair;
   final GeneratorFn<ContentPromptContext> generateContent;
+
+  /// Переспрос для слишком длинного `one_liner` (операция `oneline-rewrite`).
+  final String Function({
+    required String label,
+    required String currentOneLiner,
+  }) generateOnelineRewrite;
   final bool Function(String rootTopic, List<String> nodePath) isCriticalDomain;
 
   const KnowledgeGraphEngine({
@@ -338,6 +349,7 @@ class KnowledgeGraphEngine {
     required this.generateValidate,
     required this.generateRepair,
     required this.generateContent,
+    required this.generateOnelineRewrite,
     this.isCriticalDomain = _isCriticalDomainDefault,
   });
 
@@ -625,7 +637,12 @@ class KnowledgeGraphEngine {
     final exec = await scheduler.execute<List<dynamic>>(
       'expand',
       () => prompt,
-      (raw) => parseLLMJson<List<dynamic>>(raw),
+      // Контракт промпта (и сервера): JSON-объект {"nodes": [...]}.
+      (raw) {
+        final data = parseLLMJson<Map<String, dynamic>>(raw);
+        final nodes = data['nodes'];
+        return nodes is List ? nodes : <dynamic>[];
+      },
     );
 
     final added = <NodeDraft>[];
@@ -806,8 +823,13 @@ class KnowledgeGraphEngine {
     );
     final result = exec.result;
 
+    final oneLiner = await _withinOneLinerLimit(
+      label: node.title,
+      draft: '${result['one_liner'] ?? node.title}',
+    );
+
     return NodeContentResult(
-      oneLiner: '${result['one_liner'] ?? node.title}',
+      oneLiner: oneLiner,
       details: '${result['details'] ?? ''}',
       analogy: result['analogy'] is String && (result['analogy'] as String).isNotEmpty
           ? result['analogy'] as String
@@ -815,6 +837,46 @@ class KnowledgeGraphEngine {
       relations: _contentRelations(result['relations'], node.id),
       sources: _stringList(result['sources']),
     );
+  }
+
+  /// Гарантирует инвариант `one_liner <= 120` (AGENTS.md).
+  ///
+  /// Если черновик длиннее лимита — переспрашиваем модель (fast-тир): просим
+  /// сократить без потери смысла. Если переспрос не дал короткий вариант,
+  /// применяем детерминированную триммацию (fallback обязателен, «удача модели»
+  /// не должна влиять на инвариант).
+  Future<String> _withinOneLinerLimit({
+    required String label,
+    required String draft,
+  }) async {
+    final trimmed = draft.trim();
+    if (trimmed.isEmpty || trimmed.length <= oneLinerMaxChars) return draft;
+    try {
+      final exec = await scheduler.execute<Map<String, dynamic>>(
+        'oneline-rewrite',
+        () => generateOnelineRewrite(label: label, currentOneLiner: trimmed),
+        (raw) => parseLLMJson<Map<String, dynamic>>(raw),
+      );
+      final candidate = '${exec.result['one_liner'] ?? ''}'.trim();
+      if (candidate.isNotEmpty && candidate.length <= oneLinerMaxChars) {
+        return candidate;
+      }
+    } catch (_) {
+      // Сбой переспроса не роняет сценарий — ниже детерминированный fallback.
+    }
+    return _truncateOneLiner(trimmed);
+  }
+
+  /// Детерминированная обрезка до лимита: режем по границе слова, не оставляя
+  /// хвостовой пунктуации. Результат всегда <= [oneLinerMaxChars].
+  String _truncateOneLiner(String s) {
+    if (s.length <= oneLinerMaxChars) return s;
+    var cut = s.substring(0, oneLinerMaxChars);
+    final lastSpace = cut.lastIndexOf(' ');
+    if (lastSpace > oneLinerMaxChars * 0.6) {
+      cut = cut.substring(0, lastSpace);
+    }
+    return cut.trimRight();
   }
 
   /// Deepens the branch of a node from the DB: reads the node and its
@@ -870,32 +932,39 @@ class KnowledgeGraphEngine {
 
     final childLevel = nodeLevel + 1;
     final leaf = childLevel >= _maxDepth;
-    final nodesToInsert = scoped
-        .map((c) => KnowledgeNode(
-              id: c.id,
-              topicId: topicId,
-              parentId: nodeId,
-              level: childLevel,
-              label: c.title.trim(),
-              oneLiner: c.canonicalDefinition ?? '',
-              details: '',
-              conceptType: ConceptType.fromString(c.conceptType),
-              importance: c.importance ?? 0.5,
-              difficulty: c.difficulty ?? 0.5,
-              estimatedTimeMinutes: c.estimatedMinutes ?? 5,
-              relations: (c.relations ?? [])
-                  .map((r) => Relation(
-                        from: r.from,
-                        to: r.to,
-                        type: RelationType.fromString(r.type),
-                        label: r.label,
-                      ))
-                  .toList(),
-              state: NodeState.structureGenerated,
-              contentLoaded: false,
-              leaf: leaf,
-            ))
-        .toList();
+    final nodesToInsert = <KnowledgeNode>[];
+    for (final c in scoped) {
+      final oneLinerDraft = c.canonicalDefinition ?? '';
+      nodesToInsert.add(KnowledgeNode(
+        id: c.id,
+        topicId: topicId,
+        parentId: nodeId,
+        level: childLevel,
+        label: c.title.trim(),
+        // canonical_definition используется как черновик one_liner: инвариант
+        // 120 символов обеспечиваем здесь, а не в репозитории.
+        oneLiner: await _withinOneLinerLimit(
+          label: c.title,
+          draft: oneLinerDraft,
+        ),
+        details: '',
+        conceptType: ConceptType.fromString(c.conceptType),
+        importance: c.importance ?? 0.5,
+        difficulty: c.difficulty ?? 0.5,
+        estimatedTimeMinutes: c.estimatedMinutes ?? 5,
+        relations: (c.relations ?? [])
+            .map((r) => Relation(
+                  from: r.from,
+                  to: r.to,
+                  type: RelationType.fromString(r.type),
+                  label: r.label,
+                ))
+            .toList(),
+        state: NodeState.structureGenerated,
+        contentLoaded: false,
+        leaf: leaf,
+      ));
+    }
 
     await repo.insertOrReplaceNodes(nodesToInsert);
 

@@ -29,7 +29,7 @@ class UnknownPromptKind implements Exception {
 
 /// Все виды промптов, которые умеет обслуживать [classifyPrompt].
 ///
-/// 17 основных билдеров + `L1_EDIT` (тот же шаблон L1 с уточнением корня).
+/// 18 основных билдеров + `L1_EDIT` (тот же шаблон L1 с уточнением корня).
 enum PromptKind {
   l1('L1', 'structure'),
   l1Edit('L1_EDIT', 'structure'),
@@ -38,6 +38,7 @@ enum PromptKind {
   expand('expand', 'expand'),
   validate('validate', 'validate'),
   repair('repair', 'repair'),
+  onelineRewrite('oneline-rewrite', 'oneline-rewrite'),
   content('content', 'content'),
   explain('explain', 'explain'),
   activity('activity', 'activity'),
@@ -72,6 +73,7 @@ const Map<PromptKind, String> _roleMarkers = {
   PromptKind.expand: 'Ты — педагог, расширяешь дерево знаний. Для каждого указанного узла построй следующий уровень иерархии.',
   PromptKind.validate: 'Ты — эксперт по структуре знаний. Твоя задача — найти проблемы в дереве понятий.',
   PromptKind.repair: 'Ты — эксперт по структуре знаний. Твоя задача — исправить конкретные проблемы в узлах дерева.',
+  PromptKind.onelineRewrite: 'Ты — редактор учебных материалов. Ты сокращаешь слишком длинное однострочное',
   PromptKind.content: 'Ты — эксперт-энциклопедист. Дай точное, краткое описание понятия.',
   PromptKind.explain: 'Ты — помощник-педагог. Объясняешь непонятный термин из текста простыми словами, в контексте темы.',
   PromptKind.activity: 'Ты — AI-репетитор. Готовишь учебный материал для одного понятия внутри структурированной сессии изучения темы.',
@@ -158,6 +160,7 @@ class FakeLlm {
         PromptKind.expand => _expand(prompt),
         PromptKind.validate => _validate(),
         PromptKind.repair => _repair(),
+        PromptKind.onelineRewrite => _onelineRewrite(prompt),
         PromptKind.content => _content(prompt),
         PromptKind.explain => _explain(prompt),
         PromptKind.activity => _activity(prompt),
@@ -498,6 +501,14 @@ String _validate() => jsonEncode({
 
 /// Repair: пустой массив — исправлять нечего.
 String _repair() => jsonEncode(<Map<String, dynamic>>[]);
+
+/// Переспрос one_liner: детерминированный короткий вариант для понятия.
+String _onelineRewrite(String prompt) {
+  final label = _quotedAfter(prompt, 'Понятие:');
+  return jsonEncode({
+    'one_liner': _clip('Краткое описание понятия «$label»: суть и назначение.', 119),
+  });
+}
 
 /// Контент узла (one_liner / details / analogy / relations / claims).
 String _content(String prompt) {

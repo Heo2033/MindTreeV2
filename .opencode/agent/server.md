@@ -15,9 +15,9 @@ model: opencode-go/deepseek-v4-flash
 
 ## Владение
 
-- `server/src/prompts/*.ts` — 17 билдеров промптов (content, structure, expand, explain,
+- `server/src/prompts/*.ts` — 18 билдеров промптов (content, structure, expand, explain,
   generateL2, generateL3, validate, repair, quiz, assessment, diagnostic, mastery, milestone,
-  curriculum, activity, tutor, rules) — **зеркало** `mindtree_flutter/lib/data/prompts/prompts.dart`.
+  curriculum, activity, tutor, rules, oneline) — **зеркало** `mindtree_flutter/lib/data/prompts/prompts.dart`.
 - `server/src/domain/*.ts` — ~17 движков (AdaptiveLearningEngine, AssessmentEngine,
   CurriculumEngine, DiagnosticEngine, FeedbackEngine, KnowledgeGraphEngine,
   LearnerModelService, LearningActivityService, LearningSessionEngine, MasteryEngine,

@@ -7,6 +7,9 @@
 // Словоформы склеиваются по падежам: словарь хранит основу, а совпадение
 // ищется по префиксу. Это детерминированно и не требует морфологии.
 
+import 'package:mindtree_flutter/domain/engines/knowledge_graph_engine.dart'
+    show oneLinerMaxChars;
+
 /// Разделители слов: всё, что НЕ является буквой русского или латинского
 /// алфавита. Дефис и апостроф тоже считаются разделителями — иначе
 /// `well-known` не матчился бы по `well`.
@@ -199,8 +202,9 @@ List<String> findJargon(String text, int level) {
   return found;
 }
 
-/// Порог длины `one_liner` из инвариантов дерева знаний.
-const int kOneLinerMaxLength = 120;
+/// Порог длины `one_liner` из инвариантов дерева знаний (единый источник —
+/// `knowledge_graph_engine.dart`).
+const int kOneLinerMaxLength = oneLinerMaxChars;
 
 /// Порог длины `details` — согласован с промптами контента.
 const int kDetailsMaxLength = 500;

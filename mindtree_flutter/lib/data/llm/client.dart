@@ -131,7 +131,7 @@ const _strongOps = {
 /// (например, `feedback` — дешёвая оценка ответа шага, не LLM-мастерство)
 /// и защищает от случайного переноса операции в strong.
 const _fastOps = {
-  'feedback', 'activity', 'content', 'expand',
+  'feedback', 'activity', 'content', 'expand', 'oneline-rewrite',
 };
 
 ModelTier tierForOperation(String op) {

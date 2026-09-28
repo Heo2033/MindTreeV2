@@ -22,6 +22,7 @@ import {
   buildRepairPrompt,
   type ProblemNode,
 } from "../prompts/repair.js";
+import { ONELINER_MAX_CHARS } from "../prompts/oneline.js";
 
 export interface NodeDraft {
   id: string;
@@ -577,12 +578,56 @@ export class KnowledgeGraphEngine {
     );
 
     return {
-      one_liner: String(result.one_liner ?? node.title),
+      one_liner: await this._withinOneLinerLimit(
+        node.title,
+        String(result.one_liner ?? node.title),
+      ),
       details: String(result.details ?? ""),
       analogy: typeof result.analogy === "string" && result.analogy !== "" ? result.analogy : undefined,
       relations: Array.isArray(result.relations) ? result.relations : [],
       sources: Array.isArray(result.sources) ? result.sources.map(String) : [],
     };
+  }
+
+  /**
+   * Гарантирует инвариант `one_liner <= 120` (AGENTS.md).
+   *
+   * Если черновик длиннее лимита — переспрашиваем модель (fast-тир,
+   * операция `oneline-rewrite`): просим сократить без потери смысла.
+   * Если переспрос не дал короткий вариант — детерминированная триммация
+   * (fallback обязателен; «удача модели» не должна влиять на инвариант).
+   * Зеркало: `_withinOneLinerLimit` в Flutter-движке.
+   */
+  private async _withinOneLinerLimit(label: string, draft: string): Promise<string> {
+    const trimmed = draft.trim();
+    if (trimmed === "" || trimmed.length <= ONELINER_MAX_CHARS) return draft;
+    try {
+      const scheduler = getScheduler();
+      const { buildOnelineRewritePrompt } = await import("../prompts/oneline.js");
+      const { result } = await scheduler.execute(
+        "oneline-rewrite",
+        () => buildOnelineRewritePrompt({ label, currentOneLiner: trimmed }),
+        (raw) => parseLLMJson<{ one_liner?: string }>(raw),
+      );
+      const candidate = String(result?.one_liner ?? "").trim();
+      if (candidate !== "" && candidate.length <= ONELINER_MAX_CHARS) {
+        return candidate;
+      }
+    } catch {
+      // Сбой переспроса не роняет сценарий — ниже детерминированный fallback.
+    }
+    return this._truncateOneLiner(trimmed);
+  }
+
+  /** Детерминированная обрезка до лимита по границе слова (результат <= 120). */
+  private _truncateOneLiner(s: string): string {
+    if (s.length <= ONELINER_MAX_CHARS) return s;
+    let cut = s.substring(0, ONELINER_MAX_CHARS);
+    const lastSpace = cut.lastIndexOf(" ");
+    if (lastSpace > ONELINER_MAX_CHARS * 0.6) {
+      cut = cut.substring(0, lastSpace);
+    }
+    return cut.trimEnd();
   }
 
   /**
@@ -666,6 +711,16 @@ export class KnowledgeGraphEngine {
       }
     }
 
+    // Инвариант one_liner <= 120: переспрашиваем ДО транзакции (внутри sync
+    // транзакции LLM-вызов невозможен).
+    const oneLinerEntries = await Promise.all(
+      scoped.map(async (c) => [
+        c.id,
+        await this._withinOneLinerLimit(c.title, c.canonical_definition ?? ""),
+      ] as const),
+    );
+    const oneLinerByChildId = new Map<string, string>(oneLinerEntries);
+
     const tx = db.transaction((items: NodeDraft[]) => {
       for (const c of items) {
         const childLevel = nodeLevel + 1;
@@ -676,7 +731,9 @@ export class KnowledgeGraphEngine {
           topicId,
           nodeId,
           c.title.trim(),
-          c.canonical_definition ?? "",
+          // canonical_definition используется как черновик one_liner: инвариант
+          // 120 символов обеспечиваем здесь, а не на уровне SQL.
+          oneLinerByChildId.get(c.id) ?? "",
           c.conceptType ? String(c.conceptType) : null,
           c.importance ?? 0.5,
           c.difficulty ?? 0.5,

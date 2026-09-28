@@ -209,6 +209,7 @@ MindtreeEngines buildEngines({
         'forbidden_interpretations': ctx.ontologyContext.forbiddenInterpretations,
       },
     ),
+    generateOnelineRewrite: buildOnelineRewritePrompt,
   );
 
   final curriculum = CurriculumEngine(

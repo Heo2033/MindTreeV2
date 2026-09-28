@@ -18,7 +18,7 @@ description: Используй когда меняешь общую логик�
 
 | Flutter (приоритет) | TS / Node (reference) |
 |---|---|
-| `mindtree_flutter/lib/data/prompts/prompts.dart` (17 билдеров) | `server/src/prompts/*.ts` (17 файлов) |
+| `mindtree_flutter/lib/data/prompts/prompts.dart` (18 билдеров) | `server/src/prompts/*.ts` (18 файлов) |
 | `mindtree_flutter/lib/domain/engines/*` (17 engines) | `server/src/domain/*.ts` |
 | `mindtree_flutter/lib/data/llm/{client,scheduler,cache,telemetry}.dart` | `server/src/llm/{client,scheduler,cache,telemetry}.ts` |
 | доменные контракты моделей (`models.dart`) | `packages/types/src/*` (тип-контракт TS) |

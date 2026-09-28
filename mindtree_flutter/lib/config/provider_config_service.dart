@@ -3,60 +3,13 @@ import 'dart:convert';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'effective_config.dart';
 import 'provider_env.dart';
 
-/// Effective LLM config used by the runtime.
-class EffectiveConfig {
-  final String baseUrl;
-  final String? apiKey;
-  final String model;
-  final String modelStrong;
-  final String modelStrongFallback;
-  final String modelFast;
-  final String provider; // auto | openai | ollama
-  final double temperature;
-  final int numCtx;
-  final bool runtimeConfigured;
-
-  const EffectiveConfig({
-    required this.baseUrl,
-    this.apiKey,
-    required this.model,
-    required this.modelStrong,
-    this.modelStrongFallback = '',
-    required this.modelFast,
-    this.provider = 'auto',
-    this.temperature = 0.7,
-    this.numCtx = 8192,
-    this.runtimeConfigured = false,
-  });
-
-  factory EffectiveConfig.fromJson(Map<String, dynamic> json) => EffectiveConfig(
-        baseUrl: json['baseUrl'] as String? ?? '',
-        apiKey: json['apiKey'] as String?,
-        model: json['model'] as String? ?? '',
-        modelStrong: json['modelStrong'] as String? ?? '',
-        modelStrongFallback: json['modelStrongFallback'] as String? ?? '',
-        modelFast: json['modelFast'] as String? ?? '',
-        provider: json['provider'] as String? ?? 'auto',
-        temperature: (json['temperature'] as num? ?? 0.7).toDouble(),
-        numCtx: (json['numCtx'] as num? ?? 8192).toInt(),
-        runtimeConfigured: json['runtimeConfigured'] as bool? ?? false,
-      );
-
-  Map<String, dynamic> toJson() => {
-        'baseUrl': baseUrl,
-        if (apiKey != null) 'apiKey': apiKey,
-        'model': model,
-        'modelStrong': modelStrong,
-        'modelStrongFallback': modelStrongFallback,
-        'modelFast': modelFast,
-        'provider': provider,
-        'temperature': temperature,
-        'numCtx': numCtx,
-        'runtimeConfigured': runtimeConfigured,
-      };
-}
+// `EffectiveConfig` живёт в чистом файле без Flutter-зависимостей, чтобы его
+// мог импортировать слой данных (`data/llm/client.dart`). Реэкспорт сохраняет
+// прежние импорты: `EffectiveConfig` по-прежнему доступен отсюда.
+export 'effective_config.dart';
 
 /// Runtime config body (what the user enters in settings).
 class RuntimeConfigBody {

@@ -3,7 +3,10 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
-import '../../config/provider_config_service.dart';
+// Импортируем ЧИСТЫЙ файл конфига, а не `provider_config_service.dart`:
+// сервис тянет `flutter_secure_storage` → `dart:ui`, из-за чего весь граф
+// `data/llm` перестаёт запускаться в pure-Dart (headless probe, dart-скрипты).
+import '../../config/effective_config.dart';
 
 // ─── Error types ──────────────────────────────────────────────────────────────
 

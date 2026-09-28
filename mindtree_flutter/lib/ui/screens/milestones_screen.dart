@@ -141,7 +141,7 @@ class _MilestonesScreenState extends ConsumerState<MilestonesScreen> {
     await session.startStudy('');
     if (!mounted) return;
     setState(() => _starting = false);
-    context.go('/topic/session');
+    context.go('/topic/learn/session');
   }
 
   @override
@@ -182,7 +182,7 @@ class _MilestonesScreenState extends ConsumerState<MilestonesScreen> {
           children: [
             _Header(
               topicName: graph.topicName ?? widget.topicId,
-              onBack: () => context.go('/topic/graph'),
+              onBack: () => context.go('/topic/learn/graph'),
             ),
             Expanded(
               child: ListView(

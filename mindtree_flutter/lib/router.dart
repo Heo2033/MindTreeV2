@@ -3,21 +3,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import 'package:mindtree_flutter/providers/current_topic.dart';
-import 'ui/screens/analytics_screen.dart';
-import 'ui/screens/diagnostic_screen.dart';
-import 'ui/screens/final_assessment_screen.dart';
-import 'ui/screens/focus_screen.dart';
-import 'ui/screens/graph_screen.dart';
+import 'package:mindtree_flutter/ui/nav/topic_nav.dart';
 import 'ui/screens/home_screen.dart';
-import 'ui/screens/learner_model_screen.dart';
-import 'ui/screens/milestones_screen.dart';
+import 'ui/screens/more_screen.dart';
 import 'ui/screens/new_topic_screen.dart';
 import 'ui/screens/provider_config_screen.dart';
-import 'ui/screens/quiz_screen.dart';
-import 'ui/screens/review_screen.dart';
-import 'ui/screens/session_screen.dart';
 import 'ui/screens/topic_shell.dart';
-import 'ui/screens/tutor_screen.dart';
 
 /// Builds a screen widget passing the currently-open topic id from
 /// [currentTopicIdProvider] into its `topicId` constructor parameter.
@@ -42,110 +33,41 @@ final appRouter = GoRouter(
       path: '/settings',
       builder: (context, state) => const ProviderConfigScreen(),
     ),
+
+    // Пути предыдущей версии навигации: оставляем рабочими редиректами,
+    // чтобы не сломать deep links и сохранённые закладки.
+    for (final entry in kLegacyTopicRedirects.entries)
+      GoRoute(
+        path: entry.key,
+        redirect: (context, state) => entry.value,
+      ),
+
     StatefulShellRoute.indexedStack(
       builder: (context, state, navigationShell) => _topicTab(
         (topicId) => TopicShell(
           navigationShell: navigationShell,
           topicId: topicId,
+          location: state.uri.path,
         ),
       ),
       branches: [
+        // Разделы темы: по одной ветке на раздел, пункты — вложенные маршруты.
+        for (final section in kTopicSections)
+          StatefulShellBranch(
+            routes: [
+              for (final item in section.items)
+                GoRoute(
+                  path: item.path,
+                  builder: (context, state) =>
+                      _topicTab((topicId) => item.builder(topicId)),
+                ),
+            ],
+          ),
         StatefulShellBranch(
           routes: [
             GoRoute(
-              path: '/topic/graph',
-              builder: (context, state) =>
-                  _topicTab((topicId) => GraphScreen(topicId: topicId)),
-            ),
-          ],
-        ),
-        StatefulShellBranch(
-          routes: [
-            GoRoute(
-              path: '/topic/focus',
-              builder: (context, state) =>
-                  _topicTab((topicId) => FocusScreen(topicId: topicId)),
-            ),
-          ],
-        ),
-        StatefulShellBranch(
-          routes: [
-            GoRoute(
-              path: '/topic/session',
-              builder: (context, state) =>
-                  _topicTab((topicId) => SessionScreen(topicId: topicId)),
-            ),
-          ],
-        ),
-        StatefulShellBranch(
-          routes: [
-            GoRoute(
-              path: '/topic/quiz',
-              builder: (context, state) =>
-                  _topicTab((topicId) => QuizScreen(topicId: topicId)),
-            ),
-          ],
-        ),
-        StatefulShellBranch(
-          routes: [
-            GoRoute(
-              path: '/topic/tutor',
-              builder: (context, state) =>
-                  _topicTab((topicId) => TutorScreen(topicId: topicId)),
-            ),
-          ],
-        ),
-        StatefulShellBranch(
-          routes: [
-            GoRoute(
-              path: '/topic/learner',
-              builder: (context, state) =>
-                  _topicTab((topicId) => LearnerModelScreen(topicId: topicId)),
-            ),
-          ],
-        ),
-        StatefulShellBranch(
-          routes: [
-            GoRoute(
-              path: '/topic/diagnostic',
-              builder: (context, state) =>
-                  _topicTab((topicId) => DiagnosticScreen(topicId: topicId)),
-            ),
-          ],
-        ),
-        StatefulShellBranch(
-          routes: [
-            GoRoute(
-              path: '/topic/milestones',
-              builder: (context, state) =>
-                  _topicTab((topicId) => MilestonesScreen(topicId: topicId)),
-            ),
-          ],
-        ),
-        StatefulShellBranch(
-          routes: [
-            GoRoute(
-              path: '/topic/review',
-              builder: (context, state) =>
-                  _topicTab((topicId) => ReviewScreen(topicId: topicId)),
-            ),
-          ],
-        ),
-        StatefulShellBranch(
-          routes: [
-            GoRoute(
-              path: '/topic/analytics',
-              builder: (context, state) =>
-                  _topicTab((topicId) => AnalyticsScreen(topicId: topicId)),
-            ),
-          ],
-        ),
-        StatefulShellBranch(
-          routes: [
-            GoRoute(
-              path: '/topic/final',
-              builder: (context, state) =>
-                  _topicTab((topicId) => FinalAssessmentScreen(topicId: topicId)),
+              path: kMorePath,
+              builder: (context, state) => const MoreScreen(),
             ),
           ],
         ),

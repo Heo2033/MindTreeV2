@@ -318,7 +318,7 @@ class _LearnerModelScreenState extends ConsumerState<LearnerModelScreen> {
               icon: Icons.replay,
               variant: AppButtonVariant.secondary,
               onPressed: () =>
-                  context.go('/topic/review'),
+                  context.go('/topic/progress/review'),
             ),
           ],
         ),

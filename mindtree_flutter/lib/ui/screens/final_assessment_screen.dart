@@ -284,7 +284,7 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
         title: Text('Итоговый тест · ${graph.topicName ?? widget.topicId}'),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
-          onPressed: () => context.go('/topic/graph'),
+          onPressed: () => context.go('/topic/learn/graph'),
         ),
       ),
       body: Center(
@@ -367,7 +367,7 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
                 variant: AppButtonVariant.secondary,
                 icon: Icons.play_circle_outline,
                 onPressed: () =>
-                    context.go('/topic/session'),
+                    context.go('/topic/learn/session'),
               ),
           ],
         ),
@@ -710,7 +710,7 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
                   variant: AppButtonVariant.secondary,
                   onPressed: () {
                     ref.read(graphStoreProvider.notifier).autoExpandVisible();
-                    context.go('/topic/graph');
+                    context.go('/topic/learn/graph');
                   },
                 ),
               if (reachedTarget && _totalQuestions > 0) const SizedBox(height: 8),
@@ -727,7 +727,7 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
                 variant: AppButtonVariant.secondary,
                 icon: Icons.account_tree_outlined,
                 onPressed: () =>
-                    context.go('/topic/graph'),
+                    context.go('/topic/learn/graph'),
               ),
             ],
           ),

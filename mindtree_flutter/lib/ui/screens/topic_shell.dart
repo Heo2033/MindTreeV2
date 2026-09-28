@@ -3,17 +3,23 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import 'package:mindtree_flutter/providers/ui_stores.dart';
+import 'package:mindtree_flutter/ui/nav/topic_nav.dart';
 import 'package:mindtree_flutter/ui/widgets/badge.dart';
+import 'package:mindtree_flutter/ui/widgets/branch_switcher.dart';
 import 'package:mindtree_flutter/ui/widgets/spinner.dart';
 
 class TopicShell extends ConsumerStatefulWidget {
   final StatefulNavigationShell navigationShell;
   final String topicId;
 
+  /// Текущий путь внутри shell — для подсветки активного пункта раздела.
+  final String location;
+
   const TopicShell({
     super.key,
     required this.navigationShell,
     required this.topicId,
+    required this.location,
   });
 
   @override
@@ -31,20 +37,6 @@ class _TopicShellState extends ConsumerState<TopicShell> {
       }
     });
   }
-
-  static const _destinations = <({IconData icon, IconData selectedIcon, String label})>[
-    (icon: Icons.account_tree_outlined, selectedIcon: Icons.account_tree, label: 'Граф'),
-    (icon: Icons.center_focus_weak_outlined, selectedIcon: Icons.center_focus_strong, label: 'Фокус'),
-    (icon: Icons.play_circle_outline, selectedIcon: Icons.play_circle, label: 'Сессия'),
-    (icon: Icons.quiz_outlined, selectedIcon: Icons.quiz, label: 'Тест'),
-    (icon: Icons.support_agent, selectedIcon: Icons.support_agent, label: 'Репетитор'),
-    (icon: Icons.person_outline, selectedIcon: Icons.person, label: 'Модель'),
-    (icon: Icons.fact_check_outlined, selectedIcon: Icons.fact_check, label: 'Диагностика'),
-    (icon: Icons.flag_outlined, selectedIcon: Icons.flag, label: 'Путь'),
-    (icon: Icons.replay, selectedIcon: Icons.replay, label: 'Повторение'),
-    (icon: Icons.insights_outlined, selectedIcon: Icons.insights, label: 'Метрики'),
-    (icon: Icons.task_alt, selectedIcon: Icons.task_alt, label: 'Итоговый тест'),
-  ];
 
   @override
   Widget build(BuildContext context) {
@@ -71,6 +63,7 @@ class _TopicShellState extends ConsumerState<TopicShell> {
     final graphState = ref.watch(graphStoreProvider);
     final topicName = graphState.topicName;
     final nodeCount = graphState.nodes.length;
+    final section = sectionForIndex(index);
 
     return Scaffold(
       appBar: AppBar(
@@ -89,7 +82,12 @@ class _TopicShellState extends ConsumerState<TopicShell> {
             if (graphState.loading && topicName == null)
               const Loader(size: LoaderSize.sm)
             else ...[
-              Text(topicName ?? widget.topicId),
+              Flexible(
+                child: Text(
+                  topicName ?? widget.topicId,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
               if (nodeCount > 0) ...[
                 const SizedBox(width: 8),
                 StatusBadge('$nodeCount узлов', variant: BadgeVariant.muted),
@@ -97,6 +95,15 @@ class _TopicShellState extends ConsumerState<TopicShell> {
             ],
           ],
         ),
+        bottom: section != null && section.hasSubNav
+            ? PreferredSize(
+                preferredSize: const Size.fromHeight(52),
+                child: BranchSwitcher(
+                  section: section,
+                  currentLocation: widget.location,
+                ),
+              )
+            : null,
       ),
       body: Row(
         children: [
@@ -104,9 +111,8 @@ class _TopicShellState extends ConsumerState<TopicShell> {
             selectedIndex: index,
             onDestinationSelected: (i) => widget.navigationShell.goBranch(i),
             labelType: NavigationRailLabelType.all,
-            scrollable: true,
             destinations: [
-              for (final d in _destinations)
+              for (final d in kTopicSectionsWithMore)
                 NavigationRailDestination(
                   icon: Icon(d.icon),
                   selectedIcon: Icon(d.selectedIcon),

@@ -224,7 +224,7 @@ class _QuizScreenState extends ConsumerState<QuizScreen> {
         title: Text('Тест · ${graph.topicName ?? widget.topicId}'),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
-          onPressed: () => context.go('/topic/graph'),
+          onPressed: () => context.go('/topic/learn/graph'),
         ),
       ),
       body: Center(
@@ -534,7 +534,7 @@ class _QuizScreenState extends ConsumerState<QuizScreen> {
                 fullWidth: true,
                 variant: AppButtonVariant.secondary,
                 icon: Icons.account_tree_outlined,
-                onPressed: () => context.go('/topic/graph'),
+                onPressed: () => context.go('/topic/learn/graph'),
               ),
             ],
           ),

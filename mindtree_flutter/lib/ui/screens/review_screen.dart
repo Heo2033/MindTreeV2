@@ -140,8 +140,8 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
     if (_cards.isEmpty) {
       return _EmptyView(
         topicName: graph.topicName ?? widget.topicId,
-        onGoToGraph: () => context.go('/topic/graph'),
-        onGoBack: () => context.go('/topic/graph'),
+        onGoToGraph: () => context.go('/topic/learn/graph'),
+        onGoBack: () => context.go('/topic/learn/graph'),
       );
     }
 
@@ -154,7 +154,7 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
         children: [
           _ReviewHeader(
             topicName: graph.topicName ?? widget.topicId,
-            onBack: () => context.go('/topic/graph'),
+            onBack: () => context.go('/topic/learn/graph'),
           ),
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
@@ -174,7 +174,7 @@ class _ReviewScreenState extends ConsumerState<ReviewScreen> {
                     topicName: graph.topicName ?? widget.topicId,
                     total: total,
                     onGoToGraph: () =>
-                        context.go('/topic/graph'),
+                        context.go('/topic/learn/graph'),
                   ),
           ),
           if (_hasMore)

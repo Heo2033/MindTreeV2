@@ -132,7 +132,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                           borderRadius: BorderRadius.circular(16),
                           onTap: () {
                             ref.read(currentTopicIdProvider.notifier).state = topic.id;
-                            context.go('/topic/graph');
+                            // Возврат в существующую тему — это «продолжить
+                            // учиться», а не повторная диагностика.
+                            context.go('/topic/learn/focus');
                           },
                           child: Padding(
                             padding: const EdgeInsets.all(16),

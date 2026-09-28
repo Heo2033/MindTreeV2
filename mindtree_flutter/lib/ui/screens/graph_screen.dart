@@ -175,7 +175,7 @@ class _GraphScreenState extends ConsumerState<GraphScreen> {
                 onNodeExpand: _onExpand,
                 onNodeDeepen: _onExpand,
                 onNodeLongPress: (id) {
-                  context.go('/topic/focus');
+                  context.go('/topic/learn/focus');
                 },
               ),
               // Controls: zoom in/out/fit (как web Controls)
@@ -288,7 +288,7 @@ class _GraphScreenState extends ConsumerState<GraphScreen> {
             onExpand: () => _onExpand(selected.id),
             onGenerate: () => _onGenerate(selected.id),
             onOpenFocus: () =>
-                context.go('/topic/focus'),
+                context.go('/topic/learn/focus'),
             onClose: () => setState(() => _selectedId = null),
           ),
         if (selected != null) const SizedBox(height: 8),

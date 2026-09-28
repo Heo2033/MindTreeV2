@@ -775,7 +775,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     final assessmentId = await _session.finalize();
     if (!mounted) return;
     if (assessmentId != null) {
-      context.go('/topic/final');
+      context.go('/topic/check/final');
     }
   }
 }

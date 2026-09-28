@@ -646,6 +646,28 @@ class SessionNotifier extends StateNotifier<SessionState> {
     }
   }
 
+  /// Read-шаг («объяснение»/«пример») ответа не требует: одно нажатие
+  /// «Продолжить» засчитывает шаг и сразу показывает следующий. Раньше UI
+  /// показывал экран «Прочитано» с отдельной кнопкой «Далее» — лишнее
+  /// нажатие на пустом месте. После answer шага currentStep уже указывает на
+  /// следующий незакрытый шаг (или -1, если всё пройдено), поэтому достаточно
+  /// сбросить answeredStepView.
+  Future<void> completeReadStep(int stepIndex) async {
+    final sessionId = state.session?.id;
+    if (sessionId == null) return;
+    state = state.copyWith(loading: true, error: null);
+    try {
+      final activity = await _activityService.answer(sessionId, stepIndex, '');
+      state = state.copyWith(
+        activity: activity,
+        answeredStepView: () => null,
+        loading: false,
+      );
+    } catch (e) {
+      state = state.copyWith(loading: false, error: '$e');
+    }
+  }
+
   Future<void> completeConcept(String itemId, {String? nodeId, String quality = 'correct'}) async {
     final sessionId = state.session?.id;
     if (sessionId == null) return;

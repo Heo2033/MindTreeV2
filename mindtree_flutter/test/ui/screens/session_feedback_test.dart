@@ -63,6 +63,35 @@ class _StatefulSessionNotifier extends SessionNotifier {
     state = state.copyWith(answeredStepView: () => null);
   }
 
+  /// Read-шаг: одно нажатие — шаг засчитан и сразу открыт следующий,
+  /// без экрана «Прочитано».
+  @override
+  Future<void> completeReadStep(int stepIndex) async {
+    final activity = state.activity;
+    if (activity == null) return;
+    if (stepIndex < 0 || stepIndex >= activity.steps.length) return;
+    final step = activity.steps[stepIndex];
+
+    final updated = ActivityStep(
+      type: step.type,
+      title: step.title,
+      body: step.body,
+      instruction: step.instruction,
+      options: step.options,
+      correctIndex: step.correctIndex,
+      bestAnswer: step.bestAnswer,
+      placeholder: step.placeholder,
+      status: 'answered',
+    );
+    final steps = List<ActivityStep>.from(activity.steps);
+    steps[stepIndex] = updated;
+    final next = steps.indexWhere((s) => !s.isAnswered);
+    state = state.copyWith(
+      activity: activity.copyWith(steps: steps, currentStep: next < 0 ? steps.length : next),
+      answeredStepView: () => null,
+    );
+  }
+
   @override
   Future<void> resume() async {}
 
@@ -278,22 +307,54 @@ void main() {
     });
   });
 
-  group('кнопка «Далее»', () {
-    testWidgets('«Далее» на read-шаге переводит к следующему не-отвеченному',
+  group('read-шаг: одно нажатие', () {
+    testWidgets('«Продолжить» на explain сразу открывает «Разбираем пример»',
         (tester) async {
-      final activity = _activity(_fourSteps);
+      // Первый шаг ещё не отвечен — это и есть неотвеченный read-шаг.
+      final activity = _activity(const [
+        ActivityStep(type: 'explain', title: 'Изучаем понятие'),
+        ActivityStep(type: 'example', title: 'Разбираем пример'),
+        ActivityStep(type: 'recall', title: 'Проверка'),
+        ActivityStep(type: 'apply', title: 'Применение'),
+      ]);
+      await _pumpSession(tester, activity: activity);
+
+      expect(find.text('Изучаем понятие'), findsOneWidget);
+      expect(find.text('Продолжить'), findsOneWidget);
+      expect(find.text('Прочитано'), findsNothing);
+
+      await tester.tap(find.text('Продолжить'));
+      await tester.pump();
+
+      // Одно нажатие: ни пустого экрана «Прочитано», ни второй кнопки.
+      expect(find.text('Разбираем пример'), findsOneWidget);
+      expect(find.text('Прочитано'), findsNothing);
+      expect(find.text('Далее'), findsNothing);
+    });
+  });
+
+  group('кнопка «Далее»', () {
+    testWidgets('«Далее» на answered-шаге переводит к следующему не-отвеченному',
+        (tester) async {
+      final steps = [
+        _answered(_fourSteps[0]),
+        _fourSteps[1],
+        _fourSteps[2],
+        _fourSteps[3],
+      ];
+      final activity = _activity(steps);
       await _pumpSession(tester, activity: activity, answeredStepView: 0);
 
-      // Сейчас фидбек первого шага с кнопкой «Далее».
+      // На answered-шаге вердикт и кнопка «Далее».
       expect(find.text('Прочитано'), findsOneWidget);
       expect(find.text('Далее'), findsOneWidget);
 
-      // Нажимаем: первый не-отвеченный — example (read) → answerStep(1, '').
+      // Нажимаем: UI возвращается к первому не-отвеченному — example.
       await tester.tap(find.text('Далее'));
       await tester.pump();
 
-      expect(find.text('Прочитано'), findsOneWidget);
       expect(find.text('Разбираем пример'), findsOneWidget);
+      expect(find.text('Прочитано'), findsNothing);
     });
 
     testWidgets('«Далее» с recall переходит к apply (пропускает answered)',

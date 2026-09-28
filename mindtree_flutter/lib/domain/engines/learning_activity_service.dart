@@ -261,7 +261,7 @@ class LearningActivityService {
     final rawExample = generated.example.trim().isNotEmpty
         ? generated.example
         : fallbackExample(node);
-    final exampleBody = ensureDistinctExample(node, explainText, rawExample);
+    final exampleBody = sanitizeExample(node, explainText, rawExample);
     final recall = _buildRecall(node, generated, order, relatedLabels);
     final apply = _buildApply(node, generated);
 
@@ -500,15 +500,21 @@ class _ApplyGen {
 ) {
   final gen = generated.apply;
   if (gen != null && gen.instruction.trim().isNotEmpty) {
-    return (instruction: gen.instruction, referenceAnswer: gen.referenceAnswer);
+    final ref = gen.referenceAnswer.trim();
+    // Задание спрашивает про применение, поэтому «образец» обязан отвечать
+    // про применение. Пересказ определения тут врёт: ученика просят назвать
+    // применение, а сверяют с определением — и он получает «Есть ошибки».
+    if (isUsableReferenceAnswer(ref, node)) {
+      return (instruction: gen.instruction.trim(), referenceAnswer: ref);
+    }
   }
   return _fallbackApply(node);
 }
 
 /// Защита от дубля «пример повторяет объяснение»: если LLM/fallback вернул
 /// для примера тот же текст, что в шаге «объяснение», подменяем его на
-/// fallback-пример (аналогия либо нейтральная инструкция) — иначе пользователь
-/// видит одинаковые шаги подряд.
+/// fallback-пример (аналогия либо нейтральная иллюстрация) — иначе
+/// пользователь видит одинаковые шаги подряд.
 String ensureDistinctExample(KnowledgeNode node, String explainBody, String example) {
   final a = example.trim();
   final b = explainBody.trim();
@@ -519,14 +525,93 @@ String ensureDistinctExample(KnowledgeNode node, String explainBody, String exam
   return a;
 }
 
-/// Fallback «пример»: НЕ повторяет определение (one_liner) — иначе пример
-/// дублирует шаг «объяснение». Используем аналогию либо нейтральную инструкцию.
-String fallbackExample(KnowledgeNode node) {
-  if (node.analogy != null && node.analogy!.isNotEmpty) {
-    return '\u0410\u043d\u0430\u043b\u043e\u0433\u0438\u044f: ${node.analogy}';
+/// Шаг «Разбираем пример» обязан содержать пример, а не задание ученику.
+///
+/// Модель регулярно кладёт в `example` императив («Приведите пример…»,
+/// «Рассмотрите, как…»), и тогда ученик на шаге «пример» не получает
+/// примера вовсе. Такие тексты заменяем на fallback.
+String sanitizeExample(KnowledgeNode node, String explainBody, String example) {
+  final distinct = ensureDistinctExample(node, explainBody, example);
+  if (looksLikeLearnerTask(distinct)) return fallbackExample(node);
+  return distinct;
+}
+
+/// Маркеры задания, адресованного ученику (2-е лицо, императив).
+const _taskMarkers = <String>[
+  'приведите', 'приведи', 'рассмотрите', 'рассмотри', 'представь', 'представьте',
+  'опишите', 'введите', 'разберите', 'разбери', 'объясните', 'перечислите',
+  'сравните', 'проанализируйте', 'придумайте', 'назовите', 'укажите', 'выберите',
+  'подумайте', 'попробуйте', 'сформулируйте', 'ответьте', 'задайте вопрос',
+];
+
+/// True, если текст — это задание ученику, а не готовый пример.
+bool looksLikeLearnerTask(String text) {
+  final t = text.trim().toLowerCase();
+  if (t.isEmpty) return true;
+  if (t.endsWith('?')) return true;
+  for (final marker in _taskMarkers) {
+    if (t.startsWith(marker)) return true;
   }
-  return '\u0420\u0430\u0441\u0441\u043c\u043e\u0442\u0440\u0438\u0442\u0435, \u043a\u0430\u043a \u043f\u043e\u043d\u044f\u0442\u0438\u0435 \u00ab${node.label}\u00bb \u043f\u0440\u043e\u044f\u0432\u043b\u044f\u0435\u0442\u0441\u044f \u0432\u043e\u043a\u0440\u0443\u0433: \u0432 \u0436\u0438\u0437\u043d\u0438, \u0440\u0430\u0431\u043e\u0442\u0435 \u0438\u043b\u0438 \u0443\u0447\u0451\u0431\u0435. '
-      '\u041f\u0440\u0438\u0432\u0435\u0434\u0438\u0442\u0435 \u043e\u0434\u0438\u043d \u043f\u0440\u043e\u0441\u0442\u043e\u0439 \u043f\u0440\u0438\u043c\u0435\u0440, \u0433\u0434\u0435 \u043e\u043d\u043e \u043f\u0440\u0438\u043c\u0435\u043d\u0438\u043c\u043e, \u0438 \u0440\u0430\u0437\u0431\u0435\u0440\u0438\u0442\u0435 \u0435\u0433\u043e.';
+  return false;
+}
+
+/// Эталонный ответ пригоден, если это развёрнутый ответ по существу и он
+/// не является пересказом определения.
+bool isUsableReferenceAnswer(String reference, KnowledgeNode node) {
+  final r = reference.trim();
+  if (r.length < 40) return false;
+  return !repeatsDefinition(r, node);
+}
+
+/// Определение, на которое опирается понятие; пустая строка — если нет.
+String _definitionOf(KnowledgeNode node) =>
+    node.oneLiner.trim().isNotEmpty ? node.oneLiner.trim() : node.details.trim();
+
+bool repeatsDefinition(String text, KnowledgeNode node) {
+  final t = text.toLowerCase();
+  for (final candidate in [node.oneLiner, node.details]) {
+    final d = candidate.trim();
+    if (d.length < 20) continue;
+    if (t.contains(d.toLowerCase())) return true;
+    final first = _firstSentence(d);
+    if (first.length >= 40 && t.contains(first.toLowerCase())) return true;
+  }
+  return false;
+}
+
+String _firstSentence(String text) {
+  for (final terminator in ['. ', '! ', '? ']) {
+    final i = text.indexOf(terminator);
+    if (i > 0) return text.substring(0, i + 1);
+  }
+  return text;
+}
+
+String _shorten(String text, int max) =>
+    text.length <= max ? text : '${text.substring(0, max).trimRight()}…';
+
+/// Fallback «пример». Принципиально НЕ задание ученику: шаг называется
+/// «Разбираем пример», и раньше здесь возвращалась инструкция
+/// «Приведите один простой пример…» — ученик вместо примера получал задачу.
+/// Определение тоже не дублируем (иначе шаг повторяет «объяснение»).
+String fallbackExample(KnowledgeNode node) {
+  final analogy = node.analogy?.trim() ?? '';
+  if (analogy.isNotEmpty) return 'Аналогия: $analogy';
+  // Выдуманный «реальный случай» был бы враньём: показываем, где понятие
+  // стоит в теме, и честно отправляем за разбором в шаг «Применение».
+  final anchors = <String>[];
+  for (final r in node.relations) {
+    final label = r.label?.trim() ?? '';
+    if (label.isNotEmpty && !anchors.contains(label)) anchors.add(label);
+    if (anchors.length >= 2) break;
+  }
+  if (anchors.isEmpty) {
+    return 'Для «${node.label}» отдельного разбора в теме нет: это опорное '
+        'понятие, от которого отталкиваются остальные. Свой пример вы '
+        'разберёте в шаге «Применение».';
+  }
+  return '«${node.label}» связывает понятия: ${anchors.join(', ')}. '
+      'Разбор конкретного примера — в шаге «Применение».';
 }
 
 ({String question, List<String> options, int correctIndex}) _fallbackRecall(
@@ -565,11 +650,22 @@ String fallbackExample(KnowledgeNode node) {
   );
 }
 
+/// Fallback-задание «Применение». Задание и эталон обязаны быть согласованы.
+/// Раньше ученика просили только назвать применение, а сверяли с определением —
+/// любой честный ответ получал «Есть ошибки». Поэтому fallback спрашивает и о
+/// смысле понятия, и о применении, а эталон отвечает на оба пункта.
 ({String instruction, String referenceAnswer}) _fallbackApply(KnowledgeNode node) {
+  final definition = _shorten(_definitionOf(node), 180);
+  final analogy = node.analogy?.trim() ?? '';
+  final applied = analogy.isNotEmpty
+      ? 'Понять это проще всего через аналогию: $analogy'
+      : '«${node.label}» нужно там, где без него не обойтись, и именно оно '
+          'объясняет, почему задача решается так: $definition';
   return (
     instruction:
-        '\u041e\u0431\u044a\u044f\u0441\u043d\u0438\u0442\u0435 \u0441\u0432\u043e\u0438\u043c\u0438 \u0441\u043b\u043e\u0432\u0430\u043c\u0438, \u043a\u0430\u043a \u043f\u043e\u043d\u044f\u0442\u0438\u0435 \u00ab${node.label}\u00bb \u043f\u0440\u0438\u043c\u0435\u043d\u044f\u0435\u0442\u0441\u044f \u043d\u0430 \u043f\u0440\u0430\u043a\u0442\u0438\u043a\u0435. \u041f\u0440\u0438\u0432\u0435\u0434\u0438\u0442\u0435 \u043e\u0434\u0438\u043d \u0441\u043e\u0431\u0441\u0442\u0432\u0435\u043d\u043d\u044b\u0439 \u043f\u0440\u0438\u043c\u0435\u0440 \u0438\u0437 \u0440\u0435\u0430\u043b\u044c\u043d\u043e\u0439 \u0436\u0438\u0437\u043d\u0438 \u0438\u043b\u0438 \u0437\u0430\u0434\u0430\u0447\u0438.',
-    referenceAnswer: node.oneLiner.isNotEmpty ? node.oneLiner : node.details,
+        'Своими словами объясните, что такое «${node.label}» и зачем это понятие '
+        'нужно в вашей теме. Назовите одну задачу, где оно пригодится.',
+    referenceAnswer: '$definition $applied',
   );
 }
 

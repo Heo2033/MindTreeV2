@@ -458,6 +458,41 @@ String renderMarkdown(ProbeResult result) {
       }
     }
 
+    final act = o.activity;
+    if (act != null && act.steps.isNotEmpty) {
+      b.writeln('### Активность (${act.nodeLabel})');
+      b.writeln();
+      b.writeln('Шагов: ${act.steps.length}, текущий: '
+          '${act.currentStep < 0 ? '—' : act.currentStep}, завершена: ${act.isComplete ? 'да' : 'нет'}.');
+      b.writeln();
+      for (final s in act.steps) {
+        b.writeln('#### ${s.type} — ${_md(s.title)} '
+            '(${s.status}${s.correct == null ? '' : (s.correct! ? ', верно' : ', ошибка')})');
+        if (s.body != null && s.body!.trim().isNotEmpty) {
+          b.writeln('- body: ${_clip(s.body!, 300)}');
+        }
+        if (s.instruction != null && s.instruction!.trim().isNotEmpty) {
+          b.writeln('- instruction: ${_clip(s.instruction!, 300)}');
+        }
+        if (s.options != null && s.options!.isNotEmpty) {
+          for (var i = 0; i < s.options!.length; i++) {
+            final mark = i == s.correctIndex ? '✓' : ' ';
+            b.writeln('  $mark ${_clip(s.options![i], 90)}');
+          }
+        }
+        if (s.userAnswer != null && s.userAnswer!.isNotEmpty) {
+          b.writeln('- ответ ученика: ${_clip(s.userAnswer!, 200)}');
+        }
+        if (s.bestAnswer != null && s.bestAnswer!.isNotEmpty) {
+          b.writeln('- образец ответа: ${_clip(s.bestAnswer!, 300)}');
+        }
+        if (s.feedback != null && s.feedback!.isNotEmpty) {
+          b.writeln('- фидбек: ${_clip(s.feedback!, 200)}');
+        }
+        b.writeln();
+      }
+    }
+
     if (o.answers.isNotEmpty) {
       b.writeln('### Ответы пользователя');
       b.writeln();

@@ -8,6 +8,9 @@ import {
   fallbackExample,
   explainBody,
   ensureDistinctExample,
+  isUsableReferenceAnswer,
+  looksLikeLearnerTask,
+  sanitizeExample,
   type ActivityStep,
 } from "../LearningActivityService.js";
 
@@ -134,6 +137,80 @@ describe("LearningActivityService helpers", () => {
       expect(ensureDistinctExample(node, "Объяснение", "Пример про жизнь")).toBe(
         "Пример про жизнь",
       );
+    });
+  });
+
+  describe("sanitizeExample: шаг «пример» не отдаёт ученику задание (зеркало flutter)", () => {
+    const node = {
+      id: "n1",
+      label: "Понятие X",
+      one_liner: "Определение понятия X",
+      details: "Подробное объяснение",
+      analogy: "Это как рецепт блюда",
+      difficulty: 0.5,
+      parent_id: null,
+    };
+
+    it("императив из LLM заменяется на fallback-пример", () => {
+      // Раньше такой текст уезжал в UI как есть: вместо примера — задача.
+      const body = sanitizeExample(node, "Объяснение", "Приведите один простой пример.");
+      expect(body).toContain("Аналогия: Это как рецепт блюда");
+      expect(body).not.toContain("Приведите");
+    });
+
+    it("вопрос вместо примера заменяется на fallback", () => {
+      const body = sanitizeExample({ ...node, analogy: null }, "Объяснение", "А как это работает?");
+      expect(body.endsWith("?")).toBe(false);
+    });
+
+    it("нормальный пример от LLM сохраняется", () => {
+      const example = "В фотографии кадры собирают постепенно, шум уходит.";
+      expect(sanitizeExample(node, "Объяснение", example)).toBe(example);
+    });
+
+    it("fallback-пример никогда не выглядит как задание ученику", () => {
+      for (const text of [fallbackExample(node), fallbackExample({ ...node, analogy: null })]) {
+        expect(looksLikeLearnerTask(text)).toBe(false);
+      }
+    });
+  });
+
+  describe("apply.reference_answer отвечает на задание про применение (зеркало flutter)", () => {
+    const node = {
+      id: "n1",
+      label: "Понятие X",
+      one_liner: "Определение понятия X",
+      details: "Подробное объяснение",
+      analogy: null,
+      difficulty: 0.5,
+      parent_id: null,
+    };
+
+    it("пересказ определения не принимается за образец ответа", () => {
+      expect(isUsableReferenceAnswer("Определение понятия X", node)).toBe(false);
+      expect(
+        isUsableReferenceAnswer(
+          "В задаче о прогнозе погоды это понятие применяют так: сначала " +
+            "собирают частные признаки, потом усредняют их в один вывод.",
+          node,
+        ),
+      ).toBe(true);
+    });
+
+    it("короткий или пустой образец отбрасывается", () => {
+      expect(isUsableReferenceAnswer("", node)).toBe(false);
+      expect(isUsableReferenceAnswer("Применяется в жизни", node)).toBe(false);
+    });
+
+    it("образец, дословно повторяющий details, отбрасывается", () => {
+      expect(isUsableReferenceAnswer("Подробное объяснение", node)).toBe(false);
+      expect(
+        isUsableReferenceAnswer(
+          "Это нужно там, где решают задачи прогноза: сначала собирают " +
+            "признаки по отдельности, потом сводят их в один вывод.",
+          node,
+        ),
+      ).toBe(true);
     });
   });
 });

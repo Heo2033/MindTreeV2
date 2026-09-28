@@ -573,7 +573,8 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
       'Продолжить',
       fullWidth: true,
       busy: _sessionState.loading,
-      onPressed: () => _session.answerStep(stepIndex, ''),
+      // Одно нажатие: шаг засчитывается и сразу открывается следующий.
+      onPressed: () => _session.completeReadStep(stepIndex),
     );
   }
 
@@ -726,23 +727,11 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     final activity = _sessionState.activity;
     if (activity == null) return;
 
-    // Ищем первый не-отвеченный шаг (pending/current).
-    final pending = activity.steps.indexWhere((s) => !s.isAnswered);
-    if (pending == -1) {
-      // Все шаги отвечены — показываем экран завершения концепта.
-      _session.resetAnsweredView();
-      return;
-    }
-
-    final next = activity.steps[pending];
-    // Для recall и apply пользователь должен сам выбрать вариант или ввести текст.
-    // Сбрасываем answeredStepView, чтобы UI показал pending шаг.
-    if (next.type == 'recall' || next.type == 'apply') {
-      _session.resetAnsweredView();
-      return;
-    }
-
-    _session.answerStep(pending, '');
+    // activity.currentStep уже указывает на первый незакрытый шаг
+    // (nextPendingIndex), поэтому достаточно вернуть UI к нему. Раньше здесь
+    // был auto-answer следующего read-шага — из-за этого ученик получал
+    // пустой экран «Прочитано» и лишнее нажатие.
+    _session.resetAnsweredView();
   }
 
   Future<void> _completeCurrentConcept(SessionState ss) async {

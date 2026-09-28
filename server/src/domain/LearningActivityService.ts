@@ -234,7 +234,7 @@ export class LearningActivityService {
     const rawExample = generated.example?.trim()
       ? generated.example
       : fallbackExample(node);
-    const exampleBody = ensureDistinctExample(node, explainBodyText, rawExample);
+    const exampleBody = sanitizeExample(node, explainBodyText, rawExample);
     const recall = generated.recall && generated.recall.options.length >= 2
       ? { question: generated.recall.question, options: generated.recall.options, correct_index: generated.recall.correct_index }
       : fallbackRecall(node, siblingLabels);
@@ -242,9 +242,14 @@ export class LearningActivityService {
     const rotated = rotateOptions(recall.options, rotation);
     const correctIndex = rotateIndex(recall.correct_index, rotation, recall.options.length);
 
-    const apply = generated.apply && generated.apply.instruction.trim()
-      ? { instruction: generated.apply.instruction, reference_answer: generated.apply.reference_answer }
-      : fallbackApply(node);
+    // Задание спрашивает про применение, поэтому «образец» обязан отвечать
+    // про применение. Пересказ определения тут врёт: ученика просят назвать
+    // применение, а сверяют с определением — и он получает «Есть ошибки».
+    const genRef = generated.apply?.reference_answer?.trim() ?? "";
+    const apply =
+      generated.apply && generated.apply.instruction.trim() && isUsableReferenceAnswer(genRef, node)
+        ? { instruction: generated.apply.instruction.trim(), reference_answer: genRef }
+        : fallbackApply(node);
 
     const steps: ActivityStep[] = [
       {
@@ -341,11 +346,20 @@ export function rotateIndex(index: number, shift: number, length: number): numbe
   return ((index - ((shift % length) + length) % length) + length) % length;
 }
 
+/**
+ * Fallback «пример». Принципиально НЕ задание ученику: шаг называется
+ * «Разбираем пример», и раньше здесь возвращалась инструкция
+ * «Приведите один простой пример…» — ученик вместо примера получал задачу.
+ * Выдуманный «реальный случай» был бы враньём, поэтому показываем, где
+ * понятие стоит в теме, и отправляем за разбором в шаг «Применение».
+ */
 export function fallbackExample(node: KnowledgeNodeRow): string {
-  if (node.analogy) {
-    return `Аналогия: ${node.analogy}`;
-  }
-  return `Рассмотрите, как понятие «${node.label}» проявляется вокруг: в жизни, работе или учёбе. Приведите один простой пример, где оно применимо, и разберите его.`;
+  const analogy = (node.analogy ?? "").trim();
+  if (analogy) return `Аналогия: ${analogy}`;
+
+  return `Для «${node.label}» отдельного разбора в теме нет: это опорное ` +
+    `понятие, от которого отталкиваются остальные. Свой пример вы ` +
+    `разберёте в шаге «Применение».`;
 }
 
 /**
@@ -380,6 +394,73 @@ export function ensureDistinctExample(
     return fallbackExample(node);
   }
   return a;
+}
+
+/**
+ * Шаг «Разбираем пример» обязан содержать пример, а не задание ученику.
+ * Модель регулярно кладёт в `example` императив («Приведите пример…»,
+ * «Рассмотрите, как…»), и тогда ученик на шаге «пример» не получает примера
+ * вовсе. Такие тексты заменяем на fallback. (зеркало sanitizeExample flutter).
+ */
+export function sanitizeExample(
+  node: KnowledgeNodeRow,
+  explainBodyText: string,
+  example: string,
+): string {
+  const distinct = ensureDistinctExample(node, explainBodyText, example);
+  if (looksLikeLearnerTask(distinct)) return fallbackExample(node);
+  return distinct;
+}
+
+/** Маркеры задания, адресованного ученику (2-е лицо, императив). */
+const TASK_MARKERS = [
+  "приведите", "приведи", "рассмотрите", "рассмотри", "представь", "представьте",
+  "опишите", "введите", "разберите", "разбери", "объясните", "перечислите",
+  "сравните", "проанализируйте", "придумайте", "назовите", "укажите", "выберите",
+  "подумайте", "попробуйте", "сформулируйте", "ответьте", "задайте вопрос",
+];
+
+/** true, если текст — это задание ученику, а не готовый пример. */
+export function looksLikeLearnerTask(text: string): boolean {
+  const t = text.trim().toLowerCase();
+  if (!t) return true;
+  if (t.endsWith("?")) return true;
+  return TASK_MARKERS.some((marker) => t.startsWith(marker));
+}
+
+/** Определение, на которое опирается понятие; пустая строка — если нет. */
+function definitionOf(node: KnowledgeNodeRow): string {
+  return node.one_liner.trim() || node.details.trim();
+}
+
+export function isUsableReferenceAnswer(reference: string, node: KnowledgeNodeRow): boolean {
+  const r = reference.trim();
+  if (r.length < 40) return false;
+  return !repeatsDefinition(r, node);
+}
+
+export function repeatsDefinition(text: string, node: KnowledgeNodeRow): boolean {
+  const t = text.toLowerCase();
+  for (const candidate of [node.one_liner, node.details]) {
+    const d = candidate.trim();
+    if (d.length < 20) continue;
+    if (t.includes(d.toLowerCase())) return true;
+    const first = firstSentence(d);
+    if (first.length >= 40 && t.includes(first.toLowerCase())) return true;
+  }
+  return false;
+}
+
+function firstSentence(text: string): string {
+  for (const terminator of [". ", "! ", "? "]) {
+    const i = text.indexOf(terminator);
+    if (i > 0) return text.slice(0, i + 1);
+  }
+  return text;
+}
+
+function shorten(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max).trimEnd()}…`;
 }
 
 /**
@@ -424,10 +505,26 @@ function siblingOneLiners(node: KnowledgeNodeRow & { parent_id: string | null })
   return rows.map((r) => r.one_liner);
 }
 
+/**
+ * Fallback-задание «Применение». Задание и эталон обязаны быть согласованы.
+ * Раньше ученика просили только назвать применение, а сверяли с определением —
+ * любой честный ответ получал «Есть ошибки». Поэтому fallback спрашивает и о
+ * смысле понятия, и о применении, а эталон отвечает на оба пункта.
+ * (зеркало _fallbackApply flutter).
+ */
 function fallbackApply(node: KnowledgeNodeRow): { instruction: string; reference_answer: string } {
+  const definition = shorten(definitionOf(node), 180);
+  const analogy = (node.analogy ?? "").trim();
+  const applied = analogy
+    ? `Понять это проще всего через аналогию: ${analogy}`
+    : `«${node.label}» нужно там, где без него не обойтись, и именно оно ` +
+      `объясняет, почему задача решается так: ${definition}`;
+
   return {
-    instruction: `Объясните своими словами, как понятие «${node.label}» применяется на практике. Приведите один собственный пример из реальной жизни или задачи.`,
-    reference_answer: node.one_liner || node.details,
+    instruction:
+      `Своими словами объясните, что такое «${node.label}» и зачем это понятие ` +
+      `нужно в вашей теме. Назовите одну задачу, где оно пригодится.`,
+    reference_answer: `${definition} ${applied}`,
   };
 }
 

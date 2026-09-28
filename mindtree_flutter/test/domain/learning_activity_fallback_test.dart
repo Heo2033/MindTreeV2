@@ -63,4 +63,91 @@ void main() {
       expect(distinct, 'Пример про жизнь');
     });
   });
+
+  group('sanitizeExample: шаг «пример» не отдаёт ученику задание', () {
+    test('императив из LLM заменяется на fallback-пример', () {
+      final node = _node(analogy: 'Это как рецепт блюда');
+
+      // Раньше такой текст уезжал в UI как есть: вместо примера — задача.
+      final body =
+          sanitizeExample(node, 'Объяснение', 'Приведите один простой пример.');
+
+      expect(body, contains('Аналогия: Это как рецепт блюда'));
+      expect(body, isNot(contains('Приведите')));
+    });
+
+    test('вопрос вместо примера заменяется на fallback', () {
+      final body = sanitizeExample(_node(), 'Объяснение', 'А как это работает?');
+
+      expect(body, isNot(endsWith('?')));
+    });
+
+    test('нормальный пример от LLM сохраняется', () {
+      const example = 'В фотографии кадры собирают постепенно, шум уходит.';
+
+      expect(sanitizeExample(_node(), 'Объяснение', example), example);
+    });
+
+    test('fallback-пример никогда не выглядит как задание ученику', () {
+      for (final text in [
+        fallbackExample(_node()),
+        fallbackExample(_node(analogy: 'Это как рецепт блюда')),
+      ]) {
+        expect(looksLikeLearnerTask(text), isFalse,
+            reason: 'шаг «Разбираем пример» не должен содержать задание: $text');
+      }
+    });
+  });
+
+  group('apply.reference_answer отвечает на задание про применение', () {
+    test('пересказ определения не принимается за образец ответа', () {
+      final node = _node();
+
+      // Раньше такое значение показывалось как «Образец ответа» к заданию
+      // «где применяется» — ученик получал ложное «Есть ошибки».
+      expect(isUsableReferenceAnswer('Определение понятия X', node), isFalse);
+      expect(
+        isUsableReferenceAnswer(
+          'В задаче о прогнозе погоды это понятие применяют так: сначала '
+          'собирают частные признаки, потом усредняют их в один вывод.',
+          node,
+        ),
+        isTrue,
+      );
+    });
+
+    test('короткий или пустой образец отбрасывается', () {
+      final node = _node();
+
+      expect(isUsableReferenceAnswer('', node), isFalse);
+      expect(isUsableReferenceAnswer('Применяется в жизни', node), isFalse);
+    });
+
+    test('образец, дословно повторяющий определение, отбрасывается', () {
+      final node = _node(details: 'Подробное объяснение понятия. Идёт деталь.');
+
+      // Ответ про применение без дословного пересказа определения — нормально.
+      expect(
+        isUsableReferenceAnswer(
+          'Это нужно там, где решают задачи прогноза: сначала собирают '
+          'признаки по отдельности, потом сводят их в один вывод.',
+          node,
+        ),
+        isTrue,
+      );
+      // Дословный пересказ details — нет.
+      expect(
+        isUsableReferenceAnswer('Подробное объяснение понятия. Идёт деталь.', node),
+        isFalse,
+      );
+      // Дословный пересказ one_liner — тоже нет.
+      expect(
+        isUsableReferenceAnswer(
+          'Определение понятия X, и всё.',
+          node,
+        ),
+        isFalse,
+      );
+    });
+  });
 }

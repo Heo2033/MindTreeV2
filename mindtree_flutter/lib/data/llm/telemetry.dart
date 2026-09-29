@@ -1,12 +1,27 @@
 /// In-memory telemetry log for LLM operations.
 class LLMTelemetry {
   final List<OperationTelemetry> _ops = [];
+  final List<CallTiming> _timings = [];
   static const int _maxEntries = 10000;
 
   void track(OperationTelemetry op) {
     _ops.add(op);
     if (_ops.length > _maxEntries) _ops.removeAt(0);
   }
+
+  /// Записывает длительность ОДНОЙ транспортной попытки — включая неуспешные.
+  ///
+  /// [OperationTelemetry] пишется только после успеха, поэтому по нему
+  /// нельзя понять, сколько времени ушло на проваленные попытки: их вклад в
+  /// латентность просто исчезал. Именно поэтому в `run-stats.json` было
+  /// `retries: 0` при фактических трёх попытках.
+  void trackTiming(CallTiming timing) {
+    _timings.add(timing);
+    if (_timings.length > _maxEntries) _timings.removeAt(0);
+  }
+
+  /// Длительности всех транспортных попыток, в порядке поступления.
+  List<CallTiming> callTimings() => List.unmodifiable(_timings);
 
   AggregateStats aggregateStats() {
     if (_ops.isEmpty) {
@@ -73,8 +88,32 @@ class OperationTelemetry {
       };
 }
 
-class AggregateStats {
-  final int count;
+/// Длительность одной транспортной попытки `callLLM` (одна операция scheduler
+/// может сделать несколько попыток: модели, retry, варианты тела запроса).
+///
+/// [ok] = `false` — попытка завершилась ошибкой (таймаут, битый JSON, 5xx).
+class CallTiming {
+  final String operation;
+  final String model;
+  final int durationMs;
+  final bool ok;
+
+  const CallTiming({
+    required this.operation,
+    required this.model,
+    required this.durationMs,
+    required this.ok,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'operation': operation,
+        'model': model,
+        'duration_ms': durationMs,
+        'ok': ok,
+      };
+}
+
+class AggregateStats {  final int count;
   final double totalCost;
   final int totalInput;
   final int totalOutput;

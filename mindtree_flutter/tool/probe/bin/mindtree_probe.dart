@@ -44,6 +44,9 @@ MindTree probe — headless прогон доменных движков.
   --minutes <N>        Бюджет времени, минут. По умолчанию 30.
   --out <каталог>      Куда положить отчёты. По умолчанию build/probe.
   --mock               Детерминированный прогон без сети (fake LLM).
+  --concurrency <N>    maxConcurrency scheduler для живого прогона.
+                       По умолчанию 2; для замера ускорения можно поднять
+                       до 4–5 (RPM=10 это допускает).
   --max-nodes <N>      Ограничить число узлов дерева. 0 — без лимита.
   --skip-content       Не генерировать контент узлов.
   --skip-session       Не проходить учебную сессию и всё, что после неё.
@@ -101,10 +104,12 @@ Future<void> main(List<String> args) async {
             maxRPD: 100000,
             maxConcurrency: 1,
           )
-        : const SchedulerConfig(
+        : SchedulerConfig(
             maxRPM: 10,
             maxRPD: 500,
-            maxConcurrency: 2,
+            // Живой прогон: параллельность можно поднять флагом --concurrency
+            // (RPM=10 это допускает; контент-пул и L3-ветви уже конкурентные).
+            maxConcurrency: opts.concurrency > 0 ? opts.concurrency : 2,
             maxRetries: 2,
             opDeadlineMs: 300000,
           ),
@@ -146,7 +151,15 @@ Future<void> main(List<String> args) async {
   runStats.writeAsStringSync(renderRunStats(RunStats(
     totalCalls: fake?.calls.length ?? result.llm.calls,
     wallClockMs: sw.elapsedMilliseconds,
-    callDurationsMs: const [],
+    // Длительности транспортных попыток из телеметрии scheduler: в том числе
+    // проваленных — без них не видно, сколько времени съели повторы.
+    callDurationsMs: [
+      for (final t in engines.scheduler.telemetry.callTimings()) t.durationMs,
+    ],
+    // Счётчики попыток: успешных вызовов меньше, чем попыток, когда
+    // провайдер отвечает битым JSON / пустым телом.
+    transportAttempts: engines.scheduler.stats()['transportAttempts'] as int,
+    failedAttempts: engines.scheduler.stats()['failedAttempts'] as int,
   )));
 
   final summary = result.summary;
@@ -175,6 +188,7 @@ class _Args {
   final int minutes;
   final String out;
   final bool mock;
+  final int concurrency;
   final int maxNodes;
   final bool skipContent;
   final bool skipSession;
@@ -188,6 +202,7 @@ class _Args {
     required this.minutes,
     required this.out,
     required this.mock,
+    required this.concurrency,
     required this.maxNodes,
     required this.skipContent,
     required this.skipSession,
@@ -203,6 +218,7 @@ _Args? _parseArgs(List<String> argv) {
   var minutes = 30;
   var out = 'build/probe';
   var mock = false;
+  var concurrency = 0;
   var maxNodes = 0;
   var skipContent = false;
   var skipSession = false;
@@ -265,6 +281,14 @@ _Args? _parseArgs(List<String> argv) {
         i++;
       case '--mock':
         mock = true;
+      case '--concurrency':
+        final v = valueFor('--concurrency');
+        if (v == null || int.tryParse(v) == null) {
+          stderr.writeln('--concurrency должно быть числом.');
+          return null;
+        }
+        concurrency = int.parse(v);
+        i++;
       case '--skip-content':
         skipContent = true;
       case '--skip-session':
@@ -290,6 +314,7 @@ _Args? _parseArgs(List<String> argv) {
     minutes: minutes,
     out: out,
     mock: mock,
+    concurrency: concurrency,
     maxNodes: maxNodes,
     skipContent: skipContent,
     skipSession: skipSession,

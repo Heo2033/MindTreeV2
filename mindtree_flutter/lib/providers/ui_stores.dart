@@ -358,31 +358,44 @@ class GraphNotifier extends StateNotifier<GraphState> {
       return;
     }
     state = state.copyWith(contentFilling: true);
-    int filled = 0;
+    var filled = 0;
     try {
       final all = await repo.listNodes(topicId);
       final targets = all.where((n) => !n.contentLoaded).toList()
         ..sort((a, b) => a.level.compareTo(b.level));
-      for (final node in targets) {
-        if (state.topicId != topicId) return;
-        try {
-          await engine.generateNodeContentFromDb(topicId, node.id);
-          filled++;
-        } catch (_) {
-          // После ошибки — пауза, чтобы scheduler успел восстановить cooldown.
-          await Future<void>.delayed(const Duration(seconds: 3));
-          continue;
-        }
-        if (state.topicId != topicId) return;
-        // Обновляем состояние каждые несколько узлов, а не после каждого,
-        // чтобы не перегружать Riverpod.
-        if (filled % 3 == 0) {
-          state = state.copyWith(nodes: await repo.listNodes(topicId));
-        }
-        // Пауза между вызовами (как LLM_BACKGROUND_INTERVAL_MS в server/pipeline.ts),
-        // чтобы не упереться в RPM/RPD лимиты.
-        await Future<void>.delayed(const Duration(seconds: 2));
-      }
+      // Противоположность последовательному циклу: контент узлов независим,
+      // поэтому генерируем его пулом из постоянных воркеров. Реальные лимиты
+      // (RPM/RPD/таймауты) по-прежнему держит TreeScheduler — он выстраивает
+      // запросы в очередь и сам делает паузы при исчерпании лимита, поэтому
+      // ручной «сон на 2 секунды между узлами» больше не нужен.
+      const concurrency = 4;
+      var next = 0;
+      int takeNext() => next < targets.length ? next++ : -1;
+      await Future.wait([
+        for (var w = 0; w < concurrency; w++)
+          () async {
+            while (true) {
+              final i = takeNext();
+              if (i < 0) return;
+              final node = targets[i];
+              if (state.topicId != topicId) return;
+              try {
+                await engine.generateNodeContentFromDb(topicId, node.id);
+                filled++;
+              } catch (_) {
+                // После ошибки — пауза, чтобы scheduler успел восстановить
+                // cooldown и не сыпался ретраями в одну и ту же дыру.
+                await Future<void>.delayed(const Duration(seconds: 3));
+                continue;
+              }
+              // Обновляем состояние каждые несколько узлов, а не после каждого,
+              // чтобы не перегружать Riverpod.
+              if (filled % 3 == 0) {
+                state = state.copyWith(nodes: await repo.listNodes(topicId));
+              }
+            }
+          }(),
+      ]);
     } finally {
       _contentFillInFlight.remove(topicId);
       state = state.copyWith(contentFilling: false);
@@ -431,7 +444,9 @@ class GraphNotifier extends StateNotifier<GraphState> {
       parentId: d.parentId,
       level: childLevel,
       label: d.title.trim(),
-      oneLiner: d.canonicalDefinition ?? '',
+      // Инвариант one_liner <= 120: черновик от структуры/repair клампится
+      // детерминированно (движок может вернуть длинный canonicalDefinition).
+      oneLiner: enforceOneLinerLimit(d.canonicalDefinition),
       details: '',
       conceptType: ConceptType.fromString(d.conceptType),
       importance: d.importance ?? 0.5,

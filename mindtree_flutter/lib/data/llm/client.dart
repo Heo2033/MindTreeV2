@@ -114,6 +114,15 @@ LLMConfig configFromEffective(EffectiveConfig ec) {
 /// дефолтным капом (часто 256–512), и `details` обрывается на полуслове.
 const int _defaultMaxOutputTokens = 4096;
 
+/// Жёсткий кап числа HTTP-запросов на один логический вызов `callLLM`.
+///
+/// Провайдер может отвергнуть конкретное тело запроса (нет `response_format`,
+/// не принимает `system`), и раньше на каждый вариант приходилось пробовать ещё
+/// и стриминг — до 8 запросов по `timeoutMs` каждый. Смысл капа: не дать одному
+/// сломанному провайдеру раздуть латентность в разы. Дальше решает
+/// `TreeScheduler` — у него свои retry и fallback на другую модель.
+const int _maxTransportAttempts = 3;
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 typedef ModelTier = String;
@@ -388,7 +397,123 @@ T parseLLMJson<T>(String raw) {
     }
   }
 
+  // Обрезанный ответ (например, упёрся в `max_tokens`): вместо полного
+  // повтора запроса на медленной модели отбрасываем недописанный хвост.
+  final salvaged = _salvageTruncatedJson(trimmed);
+  if (salvaged != null) {
+    try {
+      return jsonDecode(salvaged) as T;
+    } catch (_) {}
+  }
+
   throw Exception('AI returned invalid JSON');
+}
+
+/// Чинит JSON, оборванный на середине (обрезка по `max_tokens`).
+///
+/// Возвращает `null`, если чинить нечего: верхний уровень уже закрыт, границ
+/// элементов нет, или результат всё равно не парсится. Сознательно НЕ
+/// подставляет значения полей и заглушки — только отбрасывает недописанный
+/// хвост и закрывает скобки, поэтому результат остаётся подмножеством того,
+/// что реально вернула модель. Детерминированная чистая функция ответа.
+String? _salvageTruncatedJson(String s) {
+  final start = s.indexOf(RegExp(r'[\[{]'));
+  if (start == -1) return null;
+  final body = s.substring(start);
+
+  // Границы завершённых элементов верхнего уровня и незакрытые скобки.
+  // Цикл стартует с 0: так сам верхний `[`/`{` попадает в [openStack], и
+  // запятая на глубине 1 (openStack.length == 1) корректно считается границей.
+  var lastBoundary = -1;
+  var closedTopLevel = false;
+  final openStack = <String>[];
+  var inString = false;
+  var escaped = false;
+
+  for (var i = 0; i < body.length; i++) {
+    final ch = body[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch == r'\') {
+        escaped = true;
+      } else if (ch == '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch == '"') {
+      inString = true;
+    } else if (ch == '[' || ch == '{') {
+      openStack.add(ch);
+    } else if (ch == ']' || ch == '}') {
+      if (openStack.isEmpty) return null; // лишняя закрывающая — не чинится
+      openStack.removeLast();
+      if (openStack.isEmpty) {
+        // Верхний уровень закрыт: ответ целиком, ремонт не нужен.
+        closedTopLevel = true;
+      }
+    } else if (ch == ',' && openStack.length == 1) {
+      // Запятая на глубине 1 отделяет завершённый элемент/значение.
+      lastBoundary = i;
+    }
+  }
+
+  if (closedTopLevel) return null;
+
+  // Предпочитаем срез по последней границе: так недописанный элемент
+  // отбрасывается целиком. Если границ нет, пытаемся просто закрыть скобки.
+  for (final candidate in <String?>[
+    if (lastBoundary > 0) body.substring(0, lastBoundary),
+    body,
+  ]) {
+    if (candidate == null) continue;
+    final closed = _closeJson(candidate);
+    if (closed == null) continue;
+    try {
+      jsonDecode(closed);
+      return closed;
+    } catch (_) {
+      // Следующий кандидат.
+    }
+  }
+  return null;
+}
+
+/// Закрывает незавершённую строку и все незакрытые скобки в порядке вложенности.
+String? _closeJson(String body) {
+  final open = <String>[];
+  var inString = false;
+  var escaped = false;
+
+  for (var i = 0; i < body.length; i++) {
+    final ch = body[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch == r'\') {
+        escaped = true;
+      } else if (ch == '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch == '"') {
+      inString = true;
+    } else if (ch == '[' || ch == '{') {
+      open.add(ch);
+    } else if (ch == ']' || ch == '}') {
+      if (open.isEmpty) return null;
+      open.removeLast();
+    }
+  }
+
+  final tail = StringBuffer();
+  if (inString) tail.write('"'); // недописанное значение отбрасываем
+  for (var i = open.length - 1; i >= 0; i--) {
+    tail.write(open[i] == '[' ? ']' : '}');
+  }
+  return '$body$tail';
 }
 
 // ─── Ollama call ──────────────────────────────────────────────────────────────
@@ -567,30 +692,57 @@ Future<LLMResult> callLLM(
   final url = '${cfg.baseUrl}/chat/completions';
   final promptChars = systemPrompt.length;
 
-  // Build candidate request bodies.
+  // Build candidate request bodies, most likely to succeed FIRST.
+  //
+  // Порядок важен для латентности: типичный успешный путь — один запрос с
+  // `response_format: json_object`, а варианты ниже пробуются только если
+  // предыдущие отвергнуты провайдером. Раньше стриминг пробовался первым, из-за
+  // чего один логический вызов разворачивался в 4 тела × 2 режима = до 8
+  // HTTP-запросов, каждый потенциально по `timeoutMs` (180 с) — на
+  // таймаут-тяжёлом провайдере это и давало минуты на один вызов.
   final baseBody = <String, dynamic>{
     'model': useModel,
     'messages': [{'role': 'system', 'content': systemPrompt}],
     'temperature': temp,
     'max_tokens': _defaultMaxOutputTokens,
   };
-  final candidates = <Map<String, dynamic>>[];
-  if (seed != null) {
-    candidates.add({...baseBody, 'seed': seed, 'response_format': {'type': 'json_object'}});
-  }
-  candidates.add({...baseBody, 'response_format': {'type': 'json_object'}});
-  candidates.add({...baseBody});
-  candidates.add({
-    'model': useModel,
-    'messages': [{'role': 'user', 'content': systemPrompt}],
-    'temperature': temp,
-    'max_tokens': _defaultMaxOutputTokens,
-  });
+  final jsonBody = {...baseBody, 'response_format': {'type': 'json_object'}};
+  final candidates = <Map<String, dynamic>>[
+    if (seed != null) {...jsonBody, 'seed': seed},
+    jsonBody,
+    baseBody,
+    {
+      'model': useModel,
+      'messages': [{'role': 'user', 'content': systemPrompt}],
+      'temperature': temp,
+      'max_tokens': _defaultMaxOutputTokens,
+    },
+  ];
 
-  // Try streaming first, then non-streaming, for each candidate.
+  // Try each candidate non-streaming first, then streaming; hard cap on the
+  // total number of HTTP attempts so a broken provider cannot multiply
+  // latency. Exhaustion throws the last error: the scheduler applies its own
+  // retry/fallback-across-models policy on top.
   var streamRejected = false;
+  var attempts = 0;
   Exception? lastError;
+  outer:
   for (final body in candidates) {
+    try {
+      final result = await _chatCompletionsOnce(cfg, url, body, false, cfg.timeoutMs, promptChars);
+      if (result != null) return result;
+    } on LLMRateLimitException {
+      rethrow;
+    } catch (e) {
+      lastError = e is Exception ? e : Exception(e.toString());
+      attempts++;
+      if (attempts >= _maxTransportAttempts) break outer;
+      continue;
+    }
+    attempts++;
+    if (attempts >= _maxTransportAttempts) break outer;
+
+    // Стрим — запасной путь для провайдеров, которые не отдают обычный ответ.
     if (!streamRejected) {
       try {
         final result = await _chatCompletionsOnce(cfg, url, body, true, cfg.timeoutMs, promptChars);
@@ -601,19 +753,10 @@ Future<LLMResult> callLLM(
         lastError = e is Exception ? e : Exception(e.toString());
         if (e.toString().contains('400') || e.toString().contains('stream')) {
           streamRejected = true;
-        } else {
-          continue;
         }
+        attempts++;
+        if (attempts >= _maxTransportAttempts) break outer;
       }
-    }
-
-    try {
-      final result = await _chatCompletionsOnce(cfg, url, body, false, cfg.timeoutMs, promptChars);
-      if (result != null) return result;
-    } on LLMRateLimitException {
-      rethrow;
-    } catch (e) {
-      lastError = e is Exception ? e : Exception(e.toString());
     }
   }
 

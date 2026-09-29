@@ -257,14 +257,30 @@ Future<ProbeResult> runPipeline(
     if (opts.skipContent) {
       notes.add('Контент пропущен (--skip-content)');
     } else {
-      for (final node in sortNodesForReport(limited.kept)) {
-        progress('[$i] контент: ${node.label}');
-        try {
-          await engines.graph.generateNodeContentFromDb(topic.id, node.id);
-        } catch (err) {
-          notes.add('Контент для «${node.label}» не получен: $err');
-        }
-      }
+      final targets = sortNodesForReport(limited.kept);
+      // Контент узлов независим — генерируем пулом воркеров, как это делает
+      // приложение (`_fillContentBackground`). Сортировка в отчёте всё равно
+      // детерминированная (`sortNodesForReport`), поэтому порядок завершения
+      // вызовов на report.json не влияет.
+      const concurrency = 4;
+      var next = 0;
+      int takeNext() => next < targets.length ? next++ : -1;
+      await Future.wait([
+        for (var w = 0; w < concurrency; w++)
+          () async {
+            while (true) {
+              final i = takeNext();
+              if (i < 0) return;
+              final node = targets[i];
+              progress('[$i] контент: ${node.label}');
+              try {
+                await engines.graph.generateNodeContentFromDb(topic.id, node.id);
+              } catch (err) {
+                notes.add('Контент для «${node.label}» не получен: $err');
+              }
+            }
+          }(),
+      ]);
     }
     final loaded = sortNodesForReport(await engines.repo.listNodes(topic.id));
 

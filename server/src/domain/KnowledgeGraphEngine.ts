@@ -44,6 +44,12 @@ export interface NodeDraft {
 export interface TreeBuildResult {
   nodes: NodeDraft[];
   warnings: string[];
+  /**
+   * Id узлов, собранных по запасному (деградированному) пути: их структура
+   * ненастоящая и помечена в `warnings`. Пусто в нормальном прогоне.
+   * Зеркалит mindtree_flutter/lib/domain/engines/knowledge_graph_engine.dart.
+   */
+  degradedNodeIds: string[];
 }
 
 export interface ProgressCallback {
@@ -70,6 +76,94 @@ function maxGenerationLevel(level?: string): number {
   }
 }
 
+/**
+ * Сколько L3-ветвей движок держит «в полёте» одновременно.
+ *
+ * Ветви независимы (каждый `structure-l3` смотрит только на свой L2-родитель и
+ * соседей), поэтому их можно гнать конкурентно. Реальные лимиты (RPM/RPD/
+ * `maxConcurrency`) держит scheduler — он выстроит запросы в очередь сам; эта
+ * константа нужна, чтобы не держать в памяти десятки pending-промптов.
+ * Зеркалит `_l3BranchConcurrency` в knowledge_graph_engine.dart.
+ */
+const L3_BRANCH_CONCURRENCY = 4;
+
+/**
+ * Жёсткий бюджет вызовов `repair` на одну генерацию дерева.
+ *
+ * Без него «валидация → ремонт» повторяется на каждой L3-ветке и при плохом
+ * ответе валидатора превращается в каскад из дорогих вызовов. Исчерпание
+ * бюджета — не ошибка: дерево принимается в best-effort виде, в `warnings`
+ * попадает пометка, пайплайн не падает.
+ * Зеркалит `_maxRepairCallsPerTree` в knowledge_graph_engine.dart.
+ */
+const MAX_REPAIR_CALLS_PER_TREE = 2;
+
+/**
+ * Бюджет ремонта на одну генерацию дерева.
+ *
+ * Счётчик общий на всё дерево, а проверка и списание выполняются синхронно
+ * (между ними нет `await`), поэтому конкурентные ветки не могут превысить
+ * лимит: JS-рантайм однопоточный, синхронный участок — критическая секция.
+ */
+class RepairBudget {
+  private left: number;
+  private warned = false;
+
+  constructor(private readonly limit: number) {
+    this.left = limit;
+  }
+
+  /** Сколько попыток ремонта уже израсходовано. */
+  get used(): number {
+    return this.limit - this.left;
+  }
+
+  /** Резервирует одну попытку; при исчерпании добавляет ровно один warning. */
+  tryConsume(warnings: string[]): boolean {
+    if (this.left <= 0) {
+      if (!this.warned) {
+        this.warned = true;
+        warnings.push(`Ремонт исчерпан: ${this.used} попыток, часть узлов оставлена как есть.`);
+      }
+      return false;
+    }
+    this.left--;
+    return true;
+  }
+}
+
+/** Результат одной L3-ветки: либо дети, либо ошибка этой ветки. */
+type L3Branch = { parent: NodeDraft; children: NodeDraft[]; error?: unknown };
+
+/**
+ * Прогоняет `action` по `items` конкурентно, но не шире `limit` задач сразу.
+ *
+ * Результаты собираются **по позиции** в `items`, поэтому итоговый список не
+ * зависит от того, в каком порядке отработали вызовы (детерминизм доменной
+ * логики). `action` не должна бросать: сбой ветки разбирает вызывающий.
+ * Зеркалит `_mapBounded` в knowledge_graph_engine.dart.
+ */
+async function mapBounded<E, T>(
+  limit: number,
+  items: E[],
+  action: (item: E) => Promise<T>,
+): Promise<T[]> {
+  if (items.length === 0) return [];
+  const width = Math.max(1, Math.min(limit, items.length));
+  const slots: (T | undefined)[] = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    for (;;) {
+      // Синхронное резервирование индекса: гонок нет.
+      const i = next++;
+      if (i >= items.length) return;
+      slots[i] = await action(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: width }, () => worker()));
+  return slots as T[];
+}
+
 export class KnowledgeGraphEngine {
   /**
    * Полный конвейер: structure → expand → validate → repair → content.
@@ -82,6 +176,11 @@ export class KnowledgeGraphEngine {
     onBatch?: (added: NodeDraft[]) => Promise<void>,
   ): Promise<TreeBuildResult> {
     const warnings: string[] = [];
+    // Узлы, собранные по запасному пути: их структура ненастоящая, и об этом
+    // должны знать и probe, и пользователь.
+    const degraded: string[] = [];
+    // Бюджет ремонта на всё дерево (общий для всех валидаций, в т.ч. L3).
+    const repairBudget = new RepairBudget(MAX_REPAIR_CALLS_PER_TREE);
     const opts: IStructurePromptOptions = {
       goal: options.goal as IStructurePromptOptions["goal"],
       level: options.level as IStructurePromptOptions["level"],
@@ -144,7 +243,13 @@ export class KnowledgeGraphEngine {
       l2 = await this.generateL2FromRoot(query, nodes, opts);
       nodes = nodes.concat(l2);
     } catch (err) {
+      // Сбой L2 не «съедает» уровень: без разделов тема остаётся с одним
+      // корнем, а план обучения и проверки качества (`content_coverage`,
+      // `goal_coverage`) вырождаются. Переключаемся на запасной путь.
       warnings.push(`Генерация разделов не завершена: ${err instanceof Error ? err.message : String(err)}`);
+      l2 = await this.recoverL2(query, nodes, opts, warnings);
+      degraded.push(...l2.map((n) => n.id));
+      nodes = nodes.concat(l2);
     }
 
     if (onBatch && l2.length > 0) {
@@ -160,7 +265,7 @@ export class KnowledgeGraphEngine {
     }
 
     // Валидация L1+L2 (и ремонт при необходимости).
-    nodes = await this.validateAndRepair(nodes, opts, onProgress, warnings, "validate");
+    nodes = await this.validateAndRepair(nodes, opts, onProgress, warnings, repairBudget, "validate");
 
     // Шаг 3: подразделы (L3) — отдельный запрос на каждый L2-раздел,
     // чтобы LLM видел контекст конкретной ветви и не создавал противоречий.
@@ -168,36 +273,51 @@ export class KnowledgeGraphEngine {
     if (maxGenLevel >= 3) {
       onProgress?.("structure", "Генерация подразделов (уровень 3)...");
       const l2Nodes = nodes.filter((n) => n.level === 2);
-      for (const l2 of l2Nodes) {
-        try {
-          const l3 = await this.generateL3ForNode(query, l2, nodes, opts);
-          if (l3.length > 0) {
-            nodes = nodes.concat(l3);
-            // Валидация только что созданных L3-детей этой ветви.
-            const focusIds = l3.map((n) => n.id);
-            nodes = await this.validateAndRepair(
-              nodes,
-              opts,
-              onProgress,
-              warnings,
-              `validate-l3-${l2.id}`,
-              focusIds,
+      if (l2Nodes.length > 0) {
+        // Ветви независимы, поэтому `structure-l3` идут конкурентно (см.
+        // L3_BRANCH_CONCURRENCY), а `nodes` на этом шаге — замороженный
+        // снимок: L3-узлы не влияют на контекст соседних ветвей (root и
+        // siblings берутся с уровней 1–2), а значит порядок ответа не может
+        // изменить результат.
+        const branches = await mapBounded(
+          L3_BRANCH_CONCURRENCY,
+          l2Nodes,
+          (l2Node) => this.generateL3Branch(query, l2Node, nodes, opts),
+        );
+
+        // Дальше — строго в порядке L2-узлов: так итоговый `nodes` совпадает
+        // с последовательным прогоном, а validate/repair видят ровно ту же
+        // окрестность, что и раньше (parentId детей уже в дереве — сирот нет).
+        for (const branch of branches) {
+          if (branch.error !== undefined) {
+            warnings.push(
+              `Подразделы для «${branch.parent.title}» не завершены: ${branch.error instanceof Error ? branch.error.message : String(branch.error)}`,
             );
-            // Инкрементальный персист L3-ветви: ветка появляется у пользователя
-            // по мере завершения, а не только в конце всей генерации.
-            if (onBatch) {
-              nodes = dedupeNodeIds(nodes);
-              const kept = nodes.filter((n) => n.parentId === l2.id && n.level === 3);
-              if (kept.length > 0) {
-                console.log(`[engine] onBatch L3 (ветка «${l2.title}»): ${kept.length} узлов`);
-                await onBatch(kept);
-              }
+            continue;
+          }
+          if (branch.children.length === 0) continue;
+          nodes = nodes.concat(branch.children);
+          // Валидация только что созданных L3-детей этой ветви.
+          const focusIds = branch.children.map((n) => n.id);
+          nodes = await this.validateAndRepair(
+            nodes,
+            opts,
+            onProgress,
+            warnings,
+            repairBudget,
+            `validate-l3-${branch.parent.id}`,
+            focusIds,
+          );
+          // Инкрементальный персист L3-ветви: ветка появляется у пользователя
+          // по мере завершения, а не только в конце всей генерации.
+          if (onBatch) {
+            nodes = dedupeNodeIds(nodes);
+            const kept = nodes.filter((n) => n.parentId === branch.parent.id && n.level === 3);
+            if (kept.length > 0) {
+              console.log(`[engine] onBatch L3 (ветка «${branch.parent.title}»): ${kept.length} узлов`);
+              await onBatch(kept);
             }
           }
-        } catch (err) {
-          warnings.push(
-            `Подразделы для «${l2.title}» не завершены: ${err instanceof Error ? err.message : String(err)}`,
-          );
         }
       }
     } else {
@@ -223,7 +343,7 @@ export class KnowledgeGraphEngine {
     };
     onProgress?.("done", "Дерево готово", stats);
 
-    return { nodes, warnings };
+    return { nodes, warnings, degradedNodeIds: degraded };
   }
 
   /** Генерирует корневой узел (L1) отдельным запросом. */
@@ -311,12 +431,103 @@ export class KnowledgeGraphEngine {
     return normalizeDrafts(result).filter((n) => n.level === 3 && n.parentId === parent.id);
   }
 
-  /** Валидирует (и ремонтирует) дерево, фокусно — на указанных узлах. */
+  /**
+   * Генерирует подразделы (L3) для одного L2-узла, не бросая наружу.
+   *
+   * Ошибка ветки не должна ронять остальные и не должна вылетать из
+   * конкурентного `mapBounded` (иначе Promise.all потерял бы результаты уже
+   * завершившихся ветвей).
+   */
+  private async generateL3Branch(
+    query: string,
+    parent: NodeDraft,
+    current: NodeDraft[],
+    opts: IStructurePromptOptions,
+  ): Promise<L3Branch> {
+    try {
+      const children = await this.generateL3ForNode(query, parent, current, opts);
+      return { parent, children };
+    } catch (err) {
+      return { parent, children: [], error: err };
+    }
+  }
+
+  /**
+   * Запасной путь для уровня 2 после сбоя `structure-l2`.
+   *
+   * L2 — несущий уровень дерева: потеряв его, тема остаётся с одним корнем,
+   * а план обучения и проверки качества вырождаются. Поэтому сбой
+   * переключает генерацию на `expand` от корня: промпт `expand` — fast-тир,
+   * он дешевле и заметно устойчивее к JSON-трашену, чем `structure-l2`.
+   * Последний рубеж — детерминированный `fallbackStructure`.
+   *
+   * Инварианты дерева соблюдаются на обоих путях: корень уже есть в
+   * `current`, все новые узлы — его дети (`parentId` = id корня, `level` = 2),
+   * циклов быть не может. `consistencyCheckAgainstTree` отсекает коллизии id и
+   * дубли заголовков, которые могли бы остаться от предыдущих попыток.
+   */
+  private async recoverL2(
+    query: string,
+    current: NodeDraft[],
+    opts: IStructurePromptOptions,
+    warnings: string[],
+  ): Promise<NodeDraft[]> {
+    const root = current.find((n) => n.level === 1 && !n.parentId);
+    if (!root) {
+      warnings.push("Разделы темы не восстановлены: нет корня для уровня 2.");
+      return [];
+    }
+
+    // 1. `expand` от корня: fast-тир, дешевле и устойчивее к битому JSON.
+    let fromExpand: NodeDraft[] = [];
+    try {
+      const expanded = await this.expandNodes(query, current, [root], undefined, opts);
+      fromExpand = consistencyCheckAgainstTree(
+        current,
+        expanded.filter((n) => n.parentId === root.id && n.level === 2),
+      ).nodes;
+    } catch (err) {
+      warnings.push(
+        `Восстановление разделов через «expand» не удалось: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (fromExpand.length > 0) {
+      warnings.push(
+        `Уровень 2 восстановлен через «expand»: ${fromExpand.length} разделов (структура деградирована).`,
+      );
+      return fromExpand;
+    }
+
+    // 2. Детерминированный скелет — лучше демо-дерево, чем тема без разделов.
+    const demo = consistencyCheckAgainstTree(
+      current,
+      fallbackStructure(query)
+        .filter((n) => n.level === 2 && n.parentId)
+        .map((n) => ({ ...n, parentId: root.id, level: 2 })),
+    ).nodes;
+    if (demo.length === 0) {
+      warnings.push("Разделы темы не восстановлены: структура уровня 2 отсутствует.");
+    } else {
+      warnings.push(
+        `Уровень 2 восстановлен демо-структурой: ${demo.length} разделов (структура ненастоящая).`,
+      );
+    }
+    return demo;
+  }
+
+  /**
+   * Валидирует (и ремонтирует) дерево, фокусно — на указанных узлах.
+   *
+   * `repairBudget` общий на всё дерево: когда он исчерпан, дерево принимается
+   * в best-effort виде (с пометкой в `warnings`) — ремонт не превращается в
+   * каскад дорогих вызовов, а пайплайн не падает.
+   */
   private async validateAndRepair(
     nodes: NodeDraft[],
     opts: IStructurePromptOptions,
     onProgress: ProgressCallback | undefined,
     warnings: string[],
+    repairBudget: RepairBudget,
     phase: string,
     focusIds?: string[],
   ): Promise<NodeDraft[]> {
@@ -325,6 +536,9 @@ export class KnowledgeGraphEngine {
     try {
       const validation = await this.validate(nodes, focusIds);
       if (!validation.valid) {
+        if (!repairBudget.tryConsume(warnings)) {
+          return nodes;
+        }
         onProgress?.("repair", "Исправление проблем дерева...");
         const repaired = await this.repair(validation.issues, nodes, opts);
         if (repaired.repairedNodes.length > 0) {
@@ -509,7 +723,9 @@ export class KnowledgeGraphEngine {
           parentId: rec.parentId !== null && rec.parentId !== undefined ? String(rec.parentId) : null,
           level: typeof rec.level === "number" ? rec.level : 1,
           canonical_definition:
-            typeof rec.canonical_definition === "string" ? rec.canonical_definition : undefined,
+            typeof rec.canonical_definition === "string"
+              ? enforceOneLinerLimit(rec.canonical_definition)
+              : undefined,
           semantic_axis: typeof rec.semantic_axis === "string" ? rec.semantic_axis : undefined,
           conceptType: typeof rec.conceptType === "string" ? rec.conceptType : undefined,
           forbidden_interpretations: Array.isArray(rec.forbidden_interpretations)
@@ -621,13 +837,7 @@ export class KnowledgeGraphEngine {
 
   /** Детерминированная обрезка до лимита по границе слова (результат <= 120). */
   private _truncateOneLiner(s: string): string {
-    if (s.length <= ONELINER_MAX_CHARS) return s;
-    let cut = s.substring(0, ONELINER_MAX_CHARS);
-    const lastSpace = cut.lastIndexOf(" ");
-    if (lastSpace > ONELINER_MAX_CHARS * 0.6) {
-      cut = cut.substring(0, lastSpace);
-    }
-    return cut.trimEnd();
+    return truncateOneLiner(s);
   }
 
   /**
@@ -850,6 +1060,29 @@ export class KnowledgeGraphEngine {
   }
 }
 
+/** Детерминированный кламп черновика one_liner до лимита (инвариант AGENTS.md).
+ *
+ * Зеркало: `enforceOneLinerLimit` в Flutter-движке. Применяется на путях записи
+ * дерева, где LLM-переспрос нецелесообразен (repair, драфты L1/L2/L3);
+ * для контента по-прежнему работает `_withinOneLinerLimit` (переспрос + кламп).
+ */
+function enforceOneLinerLimit(draft: string | undefined, maxChars: number = ONELINER_MAX_CHARS): string {
+  const trimmed = (draft ?? "").trim();
+  if (trimmed === "" || trimmed.length <= maxChars) return trimmed;
+  return truncateOneLiner(trimmed, maxChars);
+}
+
+/** Детерминированная обрезка до лимита по границе слова (результат <= maxChars). */
+function truncateOneLiner(s: string, maxChars: number = ONELINER_MAX_CHARS): string {
+  if (s.length <= maxChars) return s;
+  let cut = s.substring(0, maxChars);
+  const lastSpace = cut.lastIndexOf(" ");
+  if (lastSpace > maxChars * 0.6) {
+    cut = cut.substring(0, lastSpace);
+  }
+  return cut.trimEnd();
+}
+
 function normalizeDrafts(raw: unknown[]): NodeDraft[] {
   const drafts: NodeDraft[] = raw.map((r) => {
     const rec = r as Record<string, unknown>;
@@ -858,8 +1091,12 @@ function normalizeDrafts(raw: unknown[]): NodeDraft[] {
       title: String(rec.title ?? rec.label ?? ""),
       parentId: rec.parentId !== null && rec.parentId !== undefined ? String(rec.parentId) : null,
       level: typeof rec.level === "number" ? rec.level : guessLevel(rec),
+      // Инвариант one_liner <= 120: черновики структуры/repair клампим
+      // детерминированно (LLM может вернуть сколь угодно длинный текст).
       canonical_definition:
-        typeof rec.canonical_definition === "string" ? rec.canonical_definition : undefined,
+        typeof rec.canonical_definition === "string"
+          ? enforceOneLinerLimit(rec.canonical_definition)
+          : undefined,
       semantic_axis: typeof rec.semantic_axis === "string" ? rec.semantic_axis : undefined,
       conceptType: typeof rec.conceptType === "string" ? rec.conceptType : undefined,
       forbidden_interpretations: Array.isArray(rec.forbidden_interpretations)

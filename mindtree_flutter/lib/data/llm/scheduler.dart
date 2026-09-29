@@ -83,6 +83,12 @@ class TreeScheduler {
   final _rpdTracker = _RateTracker(windowMs: 86400000);
   int _running = 0;
 
+  /// FIFO-очередь ожидающих слот. Без неё слот достаётся тому, кто чаще
+  /// пере-поллит, а не тому, кто ждал дольше: при параллельных воркерах один
+  /// быстрый воркер мог монополизировать `maxConcurrency=1` и морить остальных
+  /// (реальный дедлок в probe при пуле контента 4×1).
+  final _waitQueue = <Object>[];
+
   TreeScheduler({
     required LLMConfig Function() configProvider,
     SchedulerConfig? config,
@@ -122,18 +128,36 @@ class TreeScheduler {
   }
 
   Future<void> _waitForSlot([DateTime? deadline]) async {
-    while (!_canExecute()) {
-      if (deadline != null && DateTime.now().isAfter(deadline)) {
-        throw Exception('Timed out waiting for LLM scheduler slot');
+    // Свободный слот и пустая очередь — берём без ожидания.
+    if (_canExecute() && _waitQueue.isEmpty) return;
+
+    // Встаём в очередь. Разбудить нас может только собственная пере-проверка
+    // после паузы (поллинг остаётся), но выход из цикла разрешён лишь тому,
+    // кто стоит первым в очереди: слот отдаётся в порядке ожидания, а не
+    // «кто быстрее поллит».
+    final token = Object();
+    _waitQueue.add(token);
+    try {
+      while (!_canExecute() || _waitQueue.first != token) {
+        if (deadline != null && !DateTime.now().isBefore(deadline)) {
+          throw Exception('Timed out waiting for LLM scheduler slot');
+        }
+        final wait = _timeToNextSlotMs();
+        if (wait > 0) await Future.delayed(Duration(milliseconds: wait));
       }
-      final wait = _timeToNextSlotMs();
-      if (wait > 0) await Future.delayed(Duration(milliseconds: wait));
+    } finally {
+      _waitQueue.remove(token);
     }
   }
 
   int _timeToNextSlotMs() {
     var wait = 50;
     for (final tracker in [_rpmTracker, _rpdTracker]) {
+      // Лимит блокирует только когда трекер полон. `waitMs` — время, через
+      // которое старейший вызов покинет окно; для неполного трекера это
+      // бессмысленные 60 с / 24 ч, и спать столько нельзя (реальный дедлок:
+      // первый же воркер в очереди уходил в сон на сутки).
+      if (!tracker.isFull) continue;
       final remaining = tracker.waitMs;
       if (remaining > wait) wait = remaining;
     }
@@ -206,9 +230,18 @@ class TreeScheduler {
           // если провайдер отвечает медленно, но успешно (L2/L3-структура),
           // вызов должен завершиться. Жёсткая граница «висящего» запроса —
           // клиентский LLMConfig.timeoutMs (по умолчанию 180 с).
+          final attemptStart = DateTime.now().millisecondsSinceEpoch;
           final llmResult = await _invokeLLM(cfg, prompt, model: m);
+          final attemptMs = DateTime.now().millisecondsSinceEpoch - attemptStart;
           final result = parseFn(llmResult.text);
           attemptsMade = attempt + 1;
+
+          telemetry.trackTiming(CallTiming(
+            operation: operation,
+            model: m,
+            durationMs: attemptMs,
+            ok: true,
+          ));
 
           if (key != null) cache.set(key, result);
 
@@ -230,6 +263,16 @@ class TreeScheduler {
           _release();
           lastError = e;
           attemptsMade = attempt + 1;
+
+          // Проваленная попытка тоже стоила времени (таймаут, 5xx, битый
+          // JSON) — пишем её длительность, иначе вклад ошибок в латентность
+          // не виден в метриках.
+          telemetry.trackTiming(CallTiming(
+            operation: operation,
+            model: m,
+            durationMs: DateTime.now().millisecondsSinceEpoch - startTime,
+            ok: false,
+          ));
 
           if (shouldRetry(e, attempt, config.maxRetries)) {
             final delay = retryDelayMs(e, attempt);
@@ -334,11 +377,17 @@ class TreeScheduler {
   Map<String, dynamic> stats() {
     _rpmTracker.cleanup();
     _rpdTracker.cleanup();
+    final timings = telemetry.callTimings();
     return {
       'rpm': _rpmTracker.timestamps.length,
       'rpd': _rpdTracker.timestamps.length,
       'running': _running,
       'cache': cache.stats(),
+      // Проваленные попытки раньше нигде не учитывались: телеметрия писалась
+      // только после успеха, и по ней нельзя было отличить «долго, но верно»
+      // от «долго, потому что трижды упало».
+      'transportAttempts': timings.length,
+      'failedAttempts': timings.where((t) => !t.ok).length,
     };
   }
 }

@@ -189,6 +189,12 @@ class RunStats {
   final List<String> failuresDetail;
   final int retries;
 
+  /// Сколько попыток транспорта реально было сделано (включая проваленные).
+  final int transportAttempts;
+
+  /// Сколько попыток транспорта завершилось ошибкой (до ретрая/фолбэка).
+  final int failedAttempts;
+
   /// Длительности в миллисекундах — зависят от машины и сети.
   final int wallClockMs;
   final List<int> callDurationsMs;
@@ -198,6 +204,8 @@ class RunStats {
     this.failures = 0,
     this.failuresDetail = const [],
     this.retries = 0,
+    this.transportAttempts = 0,
+    this.failedAttempts = 0,
     this.wallClockMs = 0,
     this.callDurationsMs = const [],
   });
@@ -207,6 +215,8 @@ class RunStats {
         'failures': failures,
         'failuresDetail': failuresDetail,
         'retries': retries,
+        'transportAttempts': transportAttempts,
+        'failedAttempts': failedAttempts,
         'wallClockMs': wallClockMs,
         'callDurationsMs': callDurationsMs,
       };

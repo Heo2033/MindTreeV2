@@ -6,6 +6,8 @@
 // править `_draftToNode` — иначе отчёт probe покажет не то дерево, которое
 // сохранит приложение.
 
+import 'package:mindtree_flutter/domain/engines/knowledge_graph_engine.dart'
+    show enforceOneLinerLimit;
 import 'package:mindtree_flutter/domain/engines/scoped_ids.dart';
 import 'package:mindtree_flutter/domain/models/knowledge_node.dart';
 import 'package:mindtree_flutter/domain/models/primitives.dart';
@@ -13,7 +15,9 @@ import 'package:mindtree_flutter/domain/models/primitives.dart';
 /// Черновик узла → доменный узел, готовый к сохранению.
 ///
 /// `canonicalDefinition` становится `oneLiner`, `details` на этом этапе пустой
-/// (контент генерируется отдельным вызовом LLM).
+/// (контент генерируется отдельным вызовом LLM). Черновик клампится до лимита:
+/// движок и repair могут вернуть длинный `canonicalDefinition`, а инвариант
+/// one_liner <= 120 обязателен на всех путях записи.
 KnowledgeNode draftToNode(NodeDraft d, String topicId) {
   return KnowledgeNode(
     id: d.id,
@@ -21,7 +25,7 @@ KnowledgeNode draftToNode(NodeDraft d, String topicId) {
     parentId: d.parentId,
     level: d.level,
     label: d.title.trim(),
-    oneLiner: d.canonicalDefinition ?? '',
+    oneLiner: enforceOneLinerLimit(d.canonicalDefinition),
     details: '',
     conceptType: ConceptType.fromString(d.conceptType),
     importance: d.importance ?? 0.5,

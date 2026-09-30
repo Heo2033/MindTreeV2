@@ -573,8 +573,11 @@ class KnowledgeGraphEngine {
             _generateL3Branch(query, l2Node, nodes, opts));
 
         // Дальше — строго в порядке L2-узлов: так итоговый `nodes` совпадает
-        // с последовательным прогоном, а validate/repair видят ровно ту же
-        // окрестность, что и раньше (parentId детей уже в дереве — сирот нет).
+        // с последовательным прогоном, а валидация видит ровно ту же окрестность
+        // (parentId детей уже в дереве — сирот нет).
+        //
+        // Инкрементальность UI не теряется: каждая готовая ветка публикуется
+        // в onBatch сразу, не дожидаясь общего ремонта.
         for (final branch in branches) {
           if (branch.error != null) {
             warnings.add('Подразделы для «${branch.parent.title}» не завершены: '
@@ -583,16 +586,6 @@ class KnowledgeGraphEngine {
           }
           if (branch.children.isEmpty) continue;
           nodes = [...nodes, ...branch.children];
-          final focusIds = branch.children.map((n) => n.id).toList();
-          nodes = await _validateAndRepair(
-            nodes,
-            opts,
-            onProgress,
-            warnings,
-            repairBudget,
-            'validate-l3-${branch.parent.id}',
-            focusIds,
-          );
           if (onBatch != null) {
             nodes = dedupeNodeIds(nodes);
             final kept = nodes
@@ -606,6 +599,28 @@ class KnowledgeGraphEngine {
               }
             }
           }
+        }
+
+        // ОДИН validate/repair на весь уровень 3 вместо вызова на каждую
+        // ветку: при 5–7 разделах это было 5–7 вызовов сильной модели вместо
+        // одного. Качество не ниже — модель видит все ветки разом, а
+        // `validationNeighborhood` по всем новым L3-id отдаёт ей их L2-родителей
+        // и сиблингов, то есть весь уровень 2–3 целиком. Наложения (OVERLAP)
+        // между ветками, которые по отдельности не были видны, теперь ищутся.
+        final l3Ids = [
+          for (final n in nodes)
+            if (n.level == 3) n.id,
+        ];
+        if (l3Ids.isNotEmpty) {
+          nodes = await _validateAndRepair(
+            nodes,
+            opts,
+            onProgress,
+            warnings,
+            repairBudget,
+            'validate-l3',
+            l3Ids,
+          );
         }
       }
     } else {
@@ -801,6 +816,14 @@ class KnowledgeGraphEngine {
 
   /// Validates (and repairs) the tree, focused on the given node ids.
   ///
+  /// Сначала отрабатывает детерминированный пре-пасс ([deterministicValidate]):
+  /// формальные дефекты (exact-дубликаты подписей) считаются кодом и не
+  /// требуют ни вызова сильной модели, ни её «удачи». Его `hardIssues`
+  /// добавляются к issues LLM-валидации — `repair` этот тип правила умеет.
+  /// Информационные находки пре-пасса (типы 14–16, которые LLM по контракту
+  /// проверять не может — в промпт не подаются `relations`/`prerequisites`/
+  /// `estimatedMinutes`) уходят в [warnings] как есть, без повторов.
+  ///
   /// [repairBudget] общий на всё дерево: когда он исчерпан, дерево принимается
   /// в best-effort виде (с пометкой в [warnings]) — ремонт не превращается в
   /// каскад дорогих вызовов, а пайплайн не падает.
@@ -816,13 +839,23 @@ class KnowledgeGraphEngine {
     if (nodes.isEmpty) return nodes;
     onProgress?.call(phase, 'Проверка структуры на дубли и логические ошибки...');
     try {
+      final deterministic = deterministicValidate(nodes);
+      for (final note in deterministic.notes) {
+        // Пре-пасс прогоняется на каждой точке пайплайна, поэтому один и тот же
+        // дефект всплывает повторно — в warnings кладём по одному вхождению.
+        if (!warnings.contains(note)) warnings.add(note);
+      }
       final validation = await _validate(nodes, focusIds);
-      if (!validation.valid) {
+      if (!validation.valid || deterministic.hardIssues.isNotEmpty) {
+        final allIssues = <ValidationIssue>[
+          ...deterministic.hardIssues,
+          ...validation.issues,
+        ];
         if (!repairBudget.tryConsume(warnings)) {
           return nodes;
         }
         onProgress?.call('repair', 'Исправление проблем дерева...');
-        final repaired = await _repair(validation.issues, nodes, opts);
+        final repaired = await _repair(allIssues, nodes, opts);
         if (repaired.repairedNodes.isNotEmpty) {
           nodes = mergeRepairs(nodes, repaired.repairedNodes);
         }
@@ -1499,6 +1532,158 @@ List<String> buildPath(List<NodeDraft> nodes, String nodeId) {
 
 String _normalizeTitle(String title) =>
     title.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
+
+// ─── Детерминированный пре-пасс валидации ─────────────────────────────────────
+
+/// Результат детерминированной (кодовой) валидации структуры дерева.
+typedef DeterministicValidation =
+    ({List<ValidationIssue> hardIssues, List<String> notes});
+
+/// Типы `relations`, образующие граф зависимостей.
+///
+/// Только они участвуют в поиске цикла (тип 15 в промпте `validate`): связь
+/// `related`/`contrasts_with`/`example_of` цикла по смыслу не создаёт.
+const Set<String> _dependencyRelationTypes = {
+  'requires',
+  'depends_on',
+  'enables',
+};
+
+/// Порог `UNREALISTIC_TIMING` (тип 16): оценка времени ОДНОГО узла выше этого
+/// предела нереалистична. Сумму по поддереву НЕ считаем: в драфтах L1/L2/L3
+/// детей может ещё не быть, и сумма получилась бы по неполному дереву.
+const int maxMinutesPerNode = 120;
+
+/// Детерминированная валидация структуры — пре-пасс перед LLM-валидацией.
+///
+/// Зачем он нужен. `ValidationNodeRef` (ровно то, что уходит в промпт
+/// `validate`) не содержит ни `relations`, ни `prerequisites`, ни
+/// `estimatedMinutes`, поэтому типы 14–16 (`MISSING_PREREQUISITE`,
+/// `CIRCULAR_DEPENDENCY`, `UNREALISTIC_TIMING`) модель проверить физически
+/// не может — их считает код. Точный дубликат подписей тоже надёжнее ловится
+/// кодом, чем «на глаз» сильной моделью.
+///
+/// Контракт возврата:
+///  * [hardIssues] — только `DUPLICATE` (тип 1): инвалидирует дерево и чинится
+///    `repair`-ом, у которого для этого типа есть правило;
+///  * [notes] — информационные находки (14–16): дерево не инвалидируют и
+///    `repair` их не чинит, но они попадают в `warnings`, чтобы дефект не
+///    потерялся. Семантика остаётся за LLM: дубли «разными словами» здесь
+///    намеренно не ищутся.
+///
+/// Полностью детерминирована: без сети и без случайности, порядок находок
+/// совпадает с порядком узлов во входном списке. Пустое и одноуровневое
+/// дерево не падает и даёт пустой результат — поэтому пре-пасс безопасен и в
+/// mock-режиме (`fallbackStructure`).
+DeterministicValidation deterministicValidate(List<NodeDraft> nodes) {
+  final hardIssues = <ValidationIssue>[];
+  final notes = <String>[];
+  if (nodes.isEmpty) return (hardIssues: hardIssues, notes: notes);
+
+  final ids = {for (final n in nodes) n.id};
+
+  // 1. exact-DUPLICATE (тип 1, инвалидирует): совпадает нормализованная
+  //    подпись. Порядок — по узлам; проблемой помечается второй узел пары.
+  final firstIdByTitle = <String, String>{};
+  for (final n in nodes) {
+    final title = _normalizeTitle(n.title);
+    // У пустой подписи не с чем сравнивать: выдумывать проблему нельзя.
+    if (title.isEmpty) continue;
+    final firstId = firstIdByTitle[title];
+    if (firstId == null) {
+      firstIdByTitle[title] = n.id;
+      continue;
+    }
+    hardIssues.add(ValidationIssue(
+      type: 'DUPLICATE',
+      nodeId: n.id,
+      reason: 'Дубликат узла «${n.title.trim()}» (совпадает с $firstId)',
+    ));
+  }
+
+  // 2. MISSING_PREREQUISITE (тип 14, note): ссылки в `relations.to` и в
+  //    `prerequisites` на узлы, которых в дереве нет. Повторы одной и той же
+  //    пары «узел → цель» схлопываются, порядок — по узлам и по relations.
+  final missingSeen = <String>{};
+  for (final n in nodes) {
+    final refs = <String>[
+      for (final r in n.relations ?? const <RawRelation>[]) r.to,
+      ...n.prerequisites,
+    ];
+    for (final to in refs) {
+      if (to.isEmpty || ids.contains(to)) continue;
+      if (!missingSeen.add('${n.id}|$to')) continue;
+      notes.add(
+          'MISSING_PREREQUISITE узел ${n.id}: ссылка на отсутствующий узел $to');
+    }
+  }
+
+  // 3. CIRCULAR_DEPENDENCY (тип 15, note): циклы в графе зависимостей.
+  notes.addAll(_circularDependencyNotes(nodes, ids));
+
+  // 4. UNREALISTIC_TIMING (тип 16, note): оценка времени самого узла.
+  for (final n in nodes) {
+    final minutes = n.estimatedMinutes;
+    if (minutes == null || minutes <= maxMinutesPerNode) continue;
+    notes.add('UNREALISTIC_TIMING узел ${n.id}: оценка $minutes мин выходит '
+        'за разумный предел $maxMinutesPerNode мин на узел');
+  }
+
+  return (hardIssues: hardIssues, notes: notes);
+}
+
+/// Циклы в графе зависимостей (`requires`/`depends_on`/`enables`).
+///
+/// DFS с тремя цветами (0 — не посещён, 1 — в стеке, 2 — обработан). Корни
+/// обхода идут в порядке входного списка, цели рёбер — в порядке `relations`,
+/// поэтому порядок находок стабилен между прогонами. Рёбра на несуществующие
+/// узлы пропускаются: их уже поймал `MISSING_PREREQUISITE`, повторно
+/// сообщать о том же не нужно.
+List<String> _circularDependencyNotes(
+  List<NodeDraft> nodes,
+  Set<String> ids,
+) {
+  final edges = <String, List<String>>{};
+  for (final n in nodes) {
+    for (final r in n.relations ?? const <RawRelation>[]) {
+      if (!_dependencyRelationTypes.contains(r.type)) continue;
+      if (!ids.contains(r.from) || !ids.contains(r.to)) continue;
+      final targets = edges.putIfAbsent(r.from, () => <String>[]);
+      if (!targets.contains(r.to)) targets.add(r.to);
+    }
+  }
+  if (edges.isEmpty) return const <String>[];
+
+  final notes = <String>[];
+  final reportedCycles = <String>{};
+  final color = <String, int>{for (final id in ids) id: 0};
+  final stack = <String>[];
+
+  void dfs(String id) {
+    color[id] = 1;
+    stack.add(id);
+    for (final to in edges[id] ?? const <String>[]) {
+      final state = color[to] ?? 0;
+      if (state == 0) {
+        dfs(to);
+      } else if (state == 1) {
+        // `to` ещё в стеке — ребро замыкает цикл `to … id → to`.
+        final cycle = [...stack.sublist(stack.indexOf(to)), to];
+        if (reportedCycles.add(cycle.join('>'))) {
+          notes.add('CIRCULAR_DEPENDENCY: цикл зависимостей '
+              '${cycle.join(' → ')}');
+        }
+      }
+    }
+    stack.removeLast();
+    color[id] = 2;
+  }
+
+  for (final n in nodes) {
+    if ((color[n.id] ?? 0) == 0) dfs(n.id);
+  }
+  return notes;
+}
 
 /// Applies repair results to the tree. A problematic node is replaced only if
 /// the repair returned a node with the same id; newly-created nodes are added.

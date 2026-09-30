@@ -5,6 +5,7 @@ import {
   parseNodeMetadata,
   consistencyCheckAgainstTree,
   mergeRepairs,
+  deterministicValidate,
   type NodeDraft,
 } from "../KnowledgeGraphEngine.js";
 import { masteryLevelToKnowledgeLevel } from "../../prompts/structure.js";
@@ -187,6 +188,121 @@ describe("KnowledgeGraphEngine helpers", () => {
       expect(out.find((n) => n.id === "n1_root")!.title).toBe("Тема (испр.)");
       expect(out.map((n) => n.id)).toContain("n3_x");
       expect(out).toHaveLength(3);
+    });
+  });
+
+  describe("deterministicValidate", () => {
+    const node = (id: string, title: string, extra: Partial<NodeDraft> = {}): NodeDraft => ({
+      id,
+      title,
+      parentId: null,
+      level: 1,
+      ...extra,
+    });
+
+    it("пустое и одноуровневое дерево — без находок", () => {
+      expect(deterministicValidate([]).hardIssues).toEqual([]);
+      expect(deterministicValidate([]).notes).toEqual([]);
+      const one = deterministicValidate([node("n1", "Тема")]);
+      expect(one.hardIssues).toEqual([]);
+      expect(one.notes).toEqual([]);
+    });
+
+    it("ловит точный дубликат и помечает второй узел пары", () => {
+      const nodes = [
+        node("a", "Раздел A"),
+        node("b", "Раздел B"),
+        node("c", "Раздел A"),
+      ];
+      const { hardIssues, notes } = deterministicValidate(nodes);
+      expect(notes).toEqual([]);
+      expect(hardIssues).toHaveLength(1);
+      expect(hardIssues[0].type).toBe("DUPLICATE");
+      expect(hardIssues[0].node_id).toBe("c");
+      expect(hardIssues[0].reason).toContain("совпадает с a");
+    });
+
+    it("нормализует регистр/пробелы при сравнении подписей", () => {
+      const nodes = [
+        node("a", "  Раздел   A "),
+        node("b", "раздел a"),
+      ];
+      const { hardIssues } = deterministicValidate(nodes);
+      expect(hardIssues).toHaveLength(1);
+      expect(hardIssues[0].node_id).toBe("b");
+    });
+
+    it("«разные слова» дубликатом не считает (семантика — за LLM)", () => {
+      const nodes = [
+        node("a", "Транспорт"),
+        node("b", "Логистика"),
+      ];
+      expect(deterministicValidate(nodes).hardIssues).toEqual([]);
+    });
+
+    it("MISSING_PREREQUISITE — note, а не hardIssue", () => {
+      const nodes = [
+        node("a", "Тема", {
+          relations: [{ from: "a", to: "ghost", type: "requires" }],
+        }),
+        node("b", "Раздел", {
+          prerequisites: ["ghost2"],
+        }),
+      ];
+      const { hardIssues, notes } = deterministicValidate(nodes);
+      expect(hardIssues).toEqual([]);
+      expect(notes.some((n) => n.startsWith("MISSING_PREREQUISITE узел a"))).toBe(true);
+      expect(notes.some((n) => n.startsWith("MISSING_PREREQUISITE узел b"))).toBe(true);
+    });
+
+    it("CIRCULAR_DEPENDENCY ловит цикл depends_on+enables, но не related/example_of", () => {
+      const nodes = [
+        node("a", "A", { relations: [{ from: "a", to: "b", type: "depends_on" }] }),
+        node("b", "B", { relations: [{ from: "b", to: "a", type: "enables" }] }),
+        node("c", "C", { relations: [{ from: "c", to: "a", type: "related" }] }),
+      ];
+      const { hardIssues, notes } = deterministicValidate(nodes);
+      expect(hardIssues).toEqual([]);
+      expect(notes.some((n) => n.startsWith("CIRCULAR_DEPENDENCY"))).toBe(true);
+      expect(notes.some((n) => n.includes("c → a"))).toBe(false);
+    });
+
+    it("UNREALISTIC_TIMING: порог 120 минут (включительно)", () => {
+      const ok = deterministicValidate([node("a", "A", { estimatedMinutes: 120 })]);
+      expect(ok.notes).toEqual([]);
+      const bad = deterministicValidate([node("b", "B", { estimatedMinutes: 121 })]);
+      expect(bad.notes.some((n) => n.startsWith("UNREALISTIC_TIMING"))).toBe(true);
+    });
+
+    it("порядок находок стабилен между прогонами", () => {
+      const nodes = [
+        node("a", "Раздел", {
+          relations: [{ from: "a", to: "b", type: "depends_on" }],
+          estimatedMinutes: 200,
+        }),
+        node("b", "Раздел", {
+          relations: [{ from: "b", to: "a", type: "enables" }],
+        }),
+        node("c", "Раздел"),
+      ];
+      const first = deterministicValidate(nodes);
+      const second = deterministicValidate(nodes);
+      expect(first.hardIssues).toEqual(second.hardIssues);
+      expect(first.notes).toEqual(second.notes);
+    });
+
+    it("fallbackStructure не даёт находок", () => {
+      const { hardIssues, notes } = deterministicValidate(fallbackStructure("Тема"));
+      expect(hardIssues).toEqual([]);
+      expect(notes).toEqual([]);
+    });
+
+    it("рёбра на несуществующие узлы не создают циклов (их ловит MISSING_PREREQUISITE)", () => {
+      const nodes = [
+        node("a", "A", { relations: [{ from: "a", to: "ghost", type: "requires" }] }),
+      ];
+      const { notes } = deterministicValidate(nodes);
+      expect(notes.some((n) => n.startsWith("CIRCULAR_DEPENDENCY"))).toBe(false);
     });
   });
 });

@@ -130,7 +130,7 @@ const tierStrong = 'strong';
 const tierFast = 'fast';
 
 const _strongOps = {
-  'structure', 'structure-l2', 'structure-l3', 'validate', 'repair',
+  'structure', 'structure-l2', 'structure-l3', 'validate',
   'quiz', 'curriculum', 'diagnostic', 'assessment', 'mastery',
   'tutor', 'milestone',
 };
@@ -139,8 +139,13 @@ const _strongOps = {
 /// Любая операция вне `_strongOps` тоже fast — список фиксирует намерение
 /// (например, `feedback` — дешёвая оценка ответа шага, не LLM-мастерство)
 /// и защищает от случайного переноса операции в strong.
+///
+/// `repair` в fast-тиру: работает только по проблемным узлам (не тащит всё
+/// дерево), а при неудаче дерево остаётся в прежнем состоянии — доменная
+/// логика не зависит от качества ремонта (решение от 2026-09-30).
 const _fastOps = {
   'feedback', 'activity', 'content', 'expand', 'oneline-rewrite',
+  'repair',
 };
 
 ModelTier tierForOperation(String op) {

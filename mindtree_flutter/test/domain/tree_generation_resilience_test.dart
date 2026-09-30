@@ -12,7 +12,8 @@
 //  2. Параллельный L3 даёт тот же порядок узлов, что и последовательный:
 //     результат не зависит от того, в каком порядке ответили ветви.
 //  3. Ремонт не каскадирует: бюджет ограничивает число вызовов `repair`
-//     на всё дерево, при исчерпании пайплайн не падает.
+//     на всё дерево, при исчерпании пайплайн не падает. Валидация уровня 3
+//     идёт одним батчем на всё дерево (2 вызова `validate` вместо 1+N).
 
 import 'dart:convert';
 
@@ -210,6 +211,160 @@ void _expectTreeInvariants(List<NodeDraft> nodes) {
 }
 
 void main() {
+  group('детерминированный пре-пасс валидации', () {
+    test('пустое и одноуровневое дерево даёт пустой результат', () {
+      expect(deterministicValidate(const []).hardIssues, isEmpty);
+      expect(deterministicValidate(const []).notes, isEmpty);
+
+      final single = deterministicValidate(
+        const [NodeDraft(id: 'n1', title: 'Корень')],
+      );
+      expect(single.hardIssues, isEmpty);
+      expect(single.notes, isEmpty);
+    });
+
+    test('одинаковые подписи (в т.ч. с разным регистром и пробелами) — '
+        'DUPLICATE на втором узле', () {
+      final res = deterministicValidate(const [
+        NodeDraft(id: 'n1', title: 'Корень'),
+        NodeDraft(id: 'n2_1', title: 'Основы', parentId: 'n1', level: 2),
+        NodeDraft(id: 'n2_2', title: '  основы  ', parentId: 'n1', level: 2),
+        NodeDraft(id: 'n2_3', title: 'Применение', parentId: 'n1', level: 2),
+      ]);
+      expect(res.hardIssues, hasLength(1));
+      final issue = res.hardIssues.single;
+      expect(issue.type, 'DUPLICATE');
+      expect(issue.nodeId, 'n2_2',
+          reason: 'проблемой помечается второй узел пары, а не первый');
+      expect(issue.reason, contains('n2_1'));
+      expect(res.notes, isEmpty);
+    });
+
+    test('разные подписи дубликатами не считаются (семантика — дело LLM)', () {
+      final res = deterministicValidate(const [
+        NodeDraft(id: 'n1', title: 'Корень'),
+        NodeDraft(id: 'n2_1', title: 'Основы', parentId: 'n1', level: 2),
+        NodeDraft(id: 'n2_2', title: 'Базовые понятия', parentId: 'n1', level: 2),
+      ]);
+      expect(res.hardIssues, isEmpty);
+    });
+
+    test('ссылки на отсутствующие узлы — note, а не hardIssue', () {
+      final res = deterministicValidate(const [
+        NodeDraft(id: 'n1', title: 'Корень'),
+        NodeDraft(
+          id: 'n2_1',
+          title: 'Основы',
+          parentId: 'n1',
+          level: 2,
+          relations: [
+            (from: 'n2_1', to: 'n2_нет', type: 'depends_on', label: null),
+            (from: 'n2_1', to: 'n1', type: 'requires', label: null),
+          ],
+          prerequisites: ['n2_ещё_нет', 'n1'],
+        ),
+      ]);
+      expect(res.hardIssues, isEmpty);
+      expect(res.notes, hasLength(2));
+      expect(res.notes.first, contains('MISSING_PREREQUISITE узел n2_1'));
+      expect(res.notes.first, contains('n2_нет'));
+      expect(res.notes.last, contains('n2_ещё_нет'));
+    });
+
+    test('циклы в связях depends_on/requires/enables ловятся, related — нет',
+        () {
+      final withCycle = deterministicValidate(const [
+        NodeDraft(id: 'n1', title: 'Корень'),
+        NodeDraft(
+          id: 'n2_1',
+          title: 'A',
+          parentId: 'n1',
+          level: 2,
+          relations: [
+            (from: 'n2_1', to: 'n2_2', type: 'depends_on', label: null),
+          ],
+        ),
+        NodeDraft(
+          id: 'n2_2',
+          title: 'B',
+          parentId: 'n1',
+          level: 2,
+          relations: [
+            (from: 'n2_2', to: 'n2_1', type: 'enables', label: null),
+          ],
+        ),
+      ]);
+      expect(
+        withCycle.notes.where((n) => n.startsWith('CIRCULAR_DEPENDENCY')),
+        hasLength(1),
+      );
+      expect(withCycle.notes.first, contains('n2_1 → n2_2 → n2_1'));
+
+      final acyclic = deterministicValidate(const [
+        NodeDraft(id: 'n1', title: 'Корень'),
+        NodeDraft(
+          id: 'n2_1',
+          title: 'A',
+          parentId: 'n1',
+          level: 2,
+          relations: [
+            (from: 'n2_1', to: 'n2_2', type: 'related', label: null),
+            (from: 'n2_1', to: 'n2_2', type: 'example_of', label: null),
+          ],
+        ),
+        NodeDraft(id: 'n2_2', title: 'B', parentId: 'n1', level: 2),
+      ]);
+      expect(acyclic.notes, isEmpty);
+    });
+
+    test('оценка времени больше 120 минут — note', () {
+      final ok = deterministicValidate(const [
+        NodeDraft(id: 'n1', title: 'Корень', estimatedMinutes: 120),
+        NodeDraft(id: 'n2_1', title: 'Б', estimatedMinutes: 30),
+      ]);
+      expect(ok.notes, isEmpty);
+
+      final over = deterministicValidate(const [
+        NodeDraft(id: 'n1', title: 'Корень', estimatedMinutes: 60),
+        NodeDraft(id: 'n2_1', title: 'Б', estimatedMinutes: 200),
+      ]);
+      expect(over.hardIssues, isEmpty);
+      expect(over.notes.single, contains('UNREALISTIC_TIMING узел n2_1'));
+    });
+
+    test('порядок и содержимое находок стабильны между прогонами', () {
+      List<NodeDraft> tree() => const [
+            NodeDraft(
+              id: 'n1',
+              title: 'Корень',
+              relations: [
+                (from: 'n1', to: 'n2_нет', type: 'requires', label: null),
+              ],
+            ),
+            NodeDraft(id: 'n2_1', title: 'Основы', parentId: 'n1', level: 2,
+                estimatedMinutes: 500),
+            NodeDraft(id: 'n2_2', title: 'основы', parentId: 'n1', level: 2),
+          ];
+      final first = deterministicValidate(tree());
+      final second = deterministicValidate(tree());
+      expect(second.notes, first.notes);
+      expect(
+        second.hardIssues.map((i) => '${i.type}|${i.nodeId}|${i.reason}'),
+        first.hardIssues.map((i) => '${i.type}|${i.nodeId}|${i.reason}'),
+      );
+      // Порядок находок совпадает с порядком узлов во входном списке.
+      expect(first.notes, hasLength(2));
+      expect(first.notes.first, startsWith('MISSING_PREREQUISITE узел n1'));
+      expect(first.notes.last, startsWith('UNREALISTIC_TIMING узел n2_1'));
+    });
+
+    test('mock-дерево (fallbackStructure) проходит пре-пасс без находок', () {
+      final res = deterministicValidate(fallbackStructure('диффузионные модели'));
+      expect(res.hardIssues, isEmpty);
+      expect(res.notes, isEmpty);
+    });
+  });
+
   group('fail-soft уровня 2', () {
     test('сбой structure-l2 → уровень восстановлен через expand', () async {
       final fake = _BrokenFakes(broken: {PromptKind.l2});
@@ -360,27 +515,38 @@ void main() {
   });
 
   group('бюджет ремонта', () {
-    test('валидация на каждой ветке не превращается в каскад repair', () async {
+    test('уровень 3 валидируется одним вызовом, а не по одному на ветку',
+        () async {
       final fake = _AlwaysInvalidLlm();
       final result = await _generate(fake);
 
-      // Валидаций было 5 (L1+L2 + по одной на каждую из 4 ветвей), а ремонт
-      // ограничен бюджетом на всё дерево.
-      expect(fake.callsByKind['validate'], 5);
+      // Валидаций ровно 2: L1+L2 и один батч на весь уровень 3. Раньше их было
+      // 1 + по одной на каждый L2-раздел (4 ветки → 5 вызовов сильной модели).
+      expect(fake.callsByKind['L2'], 1);
+      expect(fake.callsByKind['L3'], 4, reason: 'ветвей четыре');
+      expect(fake.callsByKind['validate'], 2,
+          reason: 'validate вызывается на дерево, а не на ветку');
       expect(fake.callsByKind['repair'], 2,
           reason: 'бюджет ремонта на дерево = 2 вызова');
 
-      // Исчерпание бюджета — не ошибка: ровно один warning, пайплайн жив.
-      expect(
-        result.warnings.where((w) => w.contains('Ремонт исчерпан')).length,
-        1,
-        reason: 'warning об исчерпании не должен дублироваться по ветвям: '
-            '${result.warnings}',
-      );
-      expect(result.warnings.any((w) => w.contains('Ремонт исчерпан: 2')),
-          isTrue,
-          reason: '${result.warnings}');
       expect(result.nodes, isNotEmpty);
+      _expectTreeInvariants(result.nodes);
+    });
+
+    test('рент по батчу не превращается в каскад repair', () async {
+      final fake = _AlwaysInvalidLlm();
+      final result = await _generate(fake);
+
+      // Бюджет (2) совпадает с числом точек валидации (2), поэтому каскада
+      // нет, а warning об исчерпании не нужен: ремонт не отбрасывался.
+      expect(
+        result.warnings.where((w) => w.contains('Ремонт исчерпан')),
+        isEmpty,
+        reason: 'бюджет не должен выедаться: ${result.warnings}',
+      );
+      expect(result.warnings.where((w) => w.contains('Валидация не завершена')),
+          isEmpty,
+          reason: 'отказ сильной модели недопустим: ${result.warnings}');
       _expectTreeInvariants(result.nodes);
     });
   });

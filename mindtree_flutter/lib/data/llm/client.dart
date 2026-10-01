@@ -54,7 +54,26 @@ class LLMResult {
 class LLMUsage {
   final int inputTokens;
   final int outputTokens;
-  const LLMUsage({this.inputTokens = 0, this.outputTokens = 0});
+
+  /// Токены рассуждений — часть `outputTokens`, но отдельная и обычно
+  /// бо́льшая часть платного вывода. Провайдер отдаёт в
+  /// `usage.completion_tokens_details.reasoning_tokens`; 0, если не отдаёт.
+  final int reasoningTokens;
+
+  /// Авторитетная стоимость запроса в рублях от провайдера (`usage.cost_rub`).
+  /// `null`, если провайдер её не возвращает — тогда стоимость оценивается.
+  final double? costRub;
+
+  const LLMUsage({
+    this.inputTokens = 0,
+    this.outputTokens = 0,
+    this.reasoningTokens = 0,
+    this.costRub,
+  });
+
+  /// Доля вывода, потраченная на рассуждения (0..1).
+  double get reasoningShare =>
+      outputTokens <= 0 ? 0 : (reasoningTokens / outputTokens).clamp(0.0, 1.0);
 }
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -69,6 +88,33 @@ class LLMConfig {
   final double temperature;
   final int numCtx;
   final int timeoutMs;
+
+  /// Лимит выходных токенов на один запрос.
+  ///
+  /// Раньше жёстко 4096: этого не хватало `structure-l3` и `validate` на полном
+  /// дереве — `details`/`analogy` обрезались на полуслове и JSON не парсился.
+  final int maxOutputTokens;
+
+  /// Бюджет токенов рассуждений (`reasoning.max_tokens`), если задан.
+  ///
+  /// Документация AITUNNEL: «max_tokens ответа должен быть строго больше бюджета
+  /// мыслей, иначе на текст не останется места и ответ придёт пустым с
+  /// finish_reason: "length"». Именно это ломало вызовы на glm-5.3* (thinking
+  /// обязателен) при 4096. Оставляем `null` для моделей без thinking — лишний
+  /// параметр в теле запроса не нужен.
+  final int? reasoningMaxTokens;
+
+  /// Уровень усилий рассуждений (`reasoning.effort`), если задан.
+  ///
+  /// Замер на живом провайдере: задача с ответом ~30 токенов без `effort`
+  /// вернула 4106 выходных токенов (4077 из них — reasoning); с `effort: none`
+  /// — 35 токенов и ноль reasoning, ответ остался валидным. `minimal` не
+  /// помогает: провайдер мапит уровень и Qwen всё равно думает 3209 токенов.
+  ///
+  /// Взаимоисключающе с [reasoningMaxTokens]: провайдер требует «что-то одно».
+  /// Приоритет у явного бюджета, тогда `effort` в тело запроса не попадает.
+  final String? reasoningEffort;
+
   final String provider; // 'ollama' | 'openai' | 'auto'
   final bool isMock;
 
@@ -82,9 +128,26 @@ class LLMConfig {
     this.temperature = 0.4,
     this.numCtx = 16384,
     this.timeoutMs = 180000,
+    this.maxOutputTokens = 16384,
+    this.reasoningMaxTokens,
+    this.reasoningEffort = 'none',
     this.provider = 'auto',
     this.isMock = false,
   });
+
+  /// Блок `reasoning` для тела запроса.
+  ///
+  /// Провайдер (AITUNNEL) не принимает `effort` и `max_tokens` одновременно,
+  /// поэтому явный бюджет токенов имеет приоритет. Пустая карта = поле
+  /// `reasoning` не отправляем вообще.
+  Map<String, dynamic> get reasoningBlock {
+    if (reasoningMaxTokens != null) {
+      return {'max_tokens': reasoningMaxTokens};
+    }
+    final effort = reasoningEffort?.trim();
+    if (effort == null || effort.isEmpty) return const {};
+    return {'effort': effort};
+  }
 
   String get modelStrongResolved => modelStrong.isNotEmpty ? modelStrong : model;
   String get modelFastResolved => modelFast.isNotEmpty ? modelFast : model;
@@ -107,12 +170,28 @@ LLMConfig configFromEffective(EffectiveConfig ec) {
     numCtx: ec.numCtx,
     provider: ec.provider,
     timeoutMs: 180000,
+    maxOutputTokens: ec.maxOutputTokens,
+    reasoningMaxTokens: ec.reasoningMaxTokens,
+    reasoningEffort: ec.reasoningEffort ?? 'none',
   );
 }
 
-/// Явный generous-лимит выходных токенов. Без него провайдеры режут ответ
-/// дефолтным капом (часто 256–512), и `details` обрывается на полуслове.
-const int _defaultMaxOutputTokens = 4096;
+/// Температура для операции: `0` — детерминированный вывод, `null` — оставить
+/// дефолт из конфига (его подставит сам `callLLM`).
+///
+/// Температура 0 даёт здесь двойную выгоду: меньше невалидного JSON на границах
+/// схемы и заметно меньше токенов на сильной модели (прямое следствие
+/// спецификации sampling: p(T=0) — один токен на позицию вместо ветвления).
+double? defaultTemperatureForOperation(String op) =>
+    _deterministicOps.contains(op) ? 0 : null;
+
+/// Детерминированные операции. Всё, что не попало сюда, использует `cfg.temperature`:
+/// `quiz`/`diagnostic`/`tutor`/`milestone`/`content` выиграют от вариативности
+/// формулировок, а детерминированный разбор дерева или вердикт по ответу — нет.
+const _deterministicOps = {
+  'structure', 'structure-l2', 'structure-l3', 'validate',
+  'curriculum', 'assessment', 'mastery',
+};
 
 /// Жёсткий кап числа HTTP-запросов на один логический вызов `callLLM`.
 ///
@@ -181,6 +260,36 @@ final Map<String, int> _cooldowns = {};
 const _defaultCooldownSec = 30;
 const _rateLimitStatuses = {408, 429, 502, 503, 504};
 
+// ─── Reasoning-параметр и его несовместимость с моделью ────────────────────────
+
+/// Ключи `baseUrl|model`, для которых провайдер уже отверг объект `reasoning`.
+///
+/// У части моделей (семейство `glm-5.3*`) thinking обязателен и
+/// `reasoning: {effort: none}` возвращает ошибку. Чтобы не платить за
+/// бесполезный отказ на каждом вызове, достаточно одного отказа на пару
+/// «провайдер+модель» — дальше поле просто не отправляется.
+final Set<String> _reasoningUnsupported = {};
+
+final RegExp _reasoningRejectionRe = RegExp(
+  r'reasoning|thinking|effort|思考',
+  caseSensitive: false,
+);
+
+/// Тело блока `reasoning` для конкретной модели, с учётом уже известных отказов.
+Map<String, dynamic> _reasoningBlockFor(LLMConfig cfg, String model) {
+  if (_reasoningUnsupported.contains('${cfg.baseUrl}|$model')) {
+    return const {};
+  }
+  return cfg.reasoningBlock;
+}
+
+/// Ответ провайдера означает, что объект `reasoning` неприемлем для модели?
+bool _isReasoningRejection(Object error) {
+  final text = error.toString();
+  if (!RegExp(r'\b(400|422)\b').hasMatch(text)) return false;
+  return _reasoningRejectionRe.hasMatch(text);
+}
+
 // ─── Retry logic ──────────────────────────────────────────────────────────────
 
 bool shouldRetry(Object err, int attempt, int maxRetries) {
@@ -244,11 +353,13 @@ class _Choice {
     );
   }
 
-  String get content {
-    final c = delta?.content ?? message?.content ?? '';
-    if (c.isNotEmpty) return c;
-    return delta?.reasoningContent ?? message?.reasoningContent ?? '';
-  }
+  /// Текст ответа — и только он.
+  ///
+  /// Раньше здесь был fallback на `reasoningContent`, если `content` пуст. Для
+  /// клиента с JSON-контрактом это гарантированный промах: рассуждение — проза,
+  /// парсер получал мусор вместо схемы. Теперь пустой `content` даёт пустой
+  /// результат и штатный путь ретрая / fallback на другую модель.
+  String get content => delta?.content ?? message?.content ?? '';
 }
 
 class _Delta {
@@ -256,21 +367,39 @@ class _Delta {
   final String reasoningContent;
   _Delta({this.content = '', this.reasoningContent = ''});
 
+  /// AITUNNEL отдаёт цепочку мыслей в `reasoning`; `reasoning_content` —
+  /// документированный алиас для DeepSeek-совместимых клиентов. Читаем оба,
+  /// но наружу reasoning не отдаём (см. [_Choice.content]).
   factory _Delta.fromJson(Map<String, dynamic> j) => _Delta(
         content: j['content']?.toString() ?? '',
-        reasoningContent: j['reasoning_content']?.toString() ?? '',
+        reasoningContent:
+            j['reasoning']?.toString() ?? j['reasoning_content']?.toString() ?? '',
       );
 }
 
 class _Usage {
   final int promptTokens;
   final int completionTokens;
-  _Usage({this.promptTokens = 0, this.completionTokens = 0});
+  final int reasoningTokens;
+  final double? costRub;
+  _Usage({
+    this.promptTokens = 0,
+    this.completionTokens = 0,
+    this.reasoningTokens = 0,
+    this.costRub,
+  });
 
-  factory _Usage.fromJson(Map<String, dynamic> j) => _Usage(
-        promptTokens: (j['prompt_tokens'] as num?)?.toInt() ?? 0,
-        completionTokens: (j['completion_tokens'] as num?)?.toInt() ?? 0,
-      );
+  factory _Usage.fromJson(Map<String, dynamic> j) {
+    final completionDetails =
+        j['completion_tokens_details'] as Map<String, dynamic>?;
+    return _Usage(
+      promptTokens: (j['prompt_tokens'] as num?)?.toInt() ?? 0,
+      completionTokens: (j['completion_tokens'] as num?)?.toInt() ?? 0,
+      reasoningTokens:
+          (completionDetails?['reasoning_tokens'] as num?)?.toInt() ?? 0,
+      costRub: (j['cost_rub'] as num?)?.toDouble(),
+    );
+  }
 }
 
 // ─── SSE stream consumption ───────────────────────────────────────────────────
@@ -532,7 +661,7 @@ Future<LLMResult> _callOllama(LLMConfig cfg, String systemPrompt, double tempera
     'options': {
       'temperature': temperature,
       'num_ctx': cfg.numCtx,
-      'num_predict': _defaultMaxOutputTokens,
+      'num_predict': cfg.maxOutputTokens,
     },
   };
 
@@ -645,6 +774,8 @@ Future<LLMResult?> _chatCompletionsOnce(
       usage: LLMUsage(
         inputTokens: parsed.usage?.promptTokens ?? (promptChars / 4).ceil(),
         outputTokens: parsed.usage?.completionTokens ?? (text.length / 4).ceil(),
+        reasoningTokens: parsed.usage?.reasoningTokens ?? 0,
+        costRub: parsed.usage?.costRub,
       ),
     );
   }
@@ -705,67 +836,92 @@ Future<LLMResult> callLLM(
   // чего один логический вызов разворачивался в 4 тела × 2 режима = до 8
   // HTTP-запросов, каждый потенциально по `timeoutMs` (180 с) — на
   // таймаут-тяжёлом провайдере это и давало минуты на один вызов.
-  final baseBody = <String, dynamic>{
-    'model': useModel,
-    'messages': [{'role': 'system', 'content': systemPrompt}],
-    'temperature': temp,
-    'max_tokens': _defaultMaxOutputTokens,
-  };
-  final jsonBody = {...baseBody, 'response_format': {'type': 'json_object'}};
-  final candidates = <Map<String, dynamic>>[
-    if (seed != null) {...jsonBody, 'seed': seed},
-    jsonBody,
-    baseBody,
-    {
+  final reasoningBlock = _reasoningBlockFor(cfg, useModel);
+
+  /// Прогоняет список тел-кандидатов, возвращает результат или последнюю ошибку.
+  Future<LLMResult> attemptAll(Map<String, dynamic> reasoning) async {
+    final baseBody = <String, dynamic>{
       'model': useModel,
-      'messages': [{'role': 'user', 'content': systemPrompt}],
+      'messages': [
+        {'role': 'system', 'content': systemPrompt}
+      ],
       'temperature': temp,
-      'max_tokens': _defaultMaxOutputTokens,
-    },
-  ];
+      'max_tokens': cfg.maxOutputTokens,
+      if (reasoning.isNotEmpty) 'reasoning': reasoning,
+    };
+    final jsonBody = {...baseBody, 'response_format': {'type': 'json_object'}};
+    final candidates = <Map<String, dynamic>>[
+      if (seed != null) {...jsonBody, 'seed': seed},
+      jsonBody,
+      baseBody,
+      {
+        'model': useModel,
+        'messages': [
+          {'role': 'user', 'content': systemPrompt}
+        ],
+        'temperature': temp,
+        'max_tokens': cfg.maxOutputTokens,
+        if (reasoning.isNotEmpty) 'reasoning': reasoning,
+      },
+    ];
 
-  // Try each candidate non-streaming first, then streaming; hard cap on the
-  // total number of HTTP attempts so a broken provider cannot multiply
-  // latency. Exhaustion throws the last error: the scheduler applies its own
-  // retry/fallback-across-models policy on top.
-  var streamRejected = false;
-  var attempts = 0;
-  Exception? lastError;
-  outer:
-  for (final body in candidates) {
-    try {
-      final result = await _chatCompletionsOnce(cfg, url, body, false, cfg.timeoutMs, promptChars);
-      if (result != null) return result;
-    } on LLMRateLimitException {
-      rethrow;
-    } catch (e) {
-      lastError = e is Exception ? e : Exception(e.toString());
-      attempts++;
-      if (attempts >= _maxTransportAttempts) break outer;
-      continue;
-    }
-    attempts++;
-    if (attempts >= _maxTransportAttempts) break outer;
-
-    // Стрим — запасной путь для провайдеров, которые не отдают обычный ответ.
-    if (!streamRejected) {
+    // Try each candidate non-streaming first, then streaming; hard cap on the
+    // total number of HTTP attempts so a broken provider cannot multiply
+    // latency. Exhaustion throws the last error: the scheduler applies its own
+    // retry/fallback-across-models policy on top.
+    var streamRejected = false;
+    var attempts = 0;
+    Exception? lastError;
+    outer:
+    for (final body in candidates) {
       try {
-        final result = await _chatCompletionsOnce(cfg, url, body, true, cfg.timeoutMs, promptChars);
+        final result = await _chatCompletionsOnce(cfg, url, body, false, cfg.timeoutMs, promptChars);
         if (result != null) return result;
       } on LLMRateLimitException {
         rethrow;
       } catch (e) {
         lastError = e is Exception ? e : Exception(e.toString());
-        if (e.toString().contains('400') || e.toString().contains('stream')) {
-          streamRejected = true;
-        }
+        // Отказ именно из-за `reasoning` обрабатываем сразу: иначе остальные
+        // кандидаты с тем же полем съедят лимит попыток и до отката дойдёт
+        // только исчерпанный `_maxTransportAttempts`.
+        if (body.containsKey('reasoning') && _isReasoningRejection(e)) rethrow;
         attempts++;
         if (attempts >= _maxTransportAttempts) break outer;
+        continue;
+      }
+      attempts++;
+      if (attempts >= _maxTransportAttempts) break outer;
+
+      // Стрим — запасной путь для провайдеров, которые не отдают обычный ответ.
+      if (!streamRejected) {
+        try {
+          final result = await _chatCompletionsOnce(cfg, url, body, true, cfg.timeoutMs, promptChars);
+          if (result != null) return result;
+        } on LLMRateLimitException {
+          rethrow;
+        } catch (e) {
+          lastError = e is Exception ? e : Exception(e.toString());
+          if (e.toString().contains('400') || e.toString().contains('stream')) {
+            streamRejected = true;
+          }
+          attempts++;
+          if (attempts >= _maxTransportAttempts) break outer;
+        }
       }
     }
+    throw lastError ?? Exception('Failed to get LLM response after all candidates');
   }
 
-  throw lastError ?? Exception('Failed to get LLM response after all candidates');
+  try {
+    return await attemptAll(reasoningBlock);
+  } catch (e) {
+    // Модель с обязательным thinking (glm-5.3*) отвергает объект `reasoning`.
+    // Помечаем пару «провайдер+модель» и повторяем ровно один раз без него,
+    // чтобы пользовательский сценарий не падал из-за необязательного параметра.
+    if (reasoningBlock.isEmpty || !_isReasoningRejection(e)) rethrow;
+    _reasoningUnsupported.add('${cfg.baseUrl}|$useModel');
+    return attemptAll(const {});
+  }
 }
 
 // ─── Public: callLLMStream (streaming for tutor) ──────────────────────────────

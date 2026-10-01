@@ -9,6 +9,14 @@ export interface OperationTelemetry {
   retry_count: number;
   cache_hit: boolean;
   estimated_cost: number;
+  /**
+   * Токены рассуждений — часть `output_tokens`. Нужны, чтобы отличать «модель
+   * много думала» от «модель много написала»: по умолчанию reasoning составлял
+   * ~99% вывода на дешёвых операциях.
+   */
+  reasoning_tokens?: number;
+  /** Реальная стоимость в рублях от провайдера (`usage.cost_rub`). */
+  cost_rub?: number;
 }
 
 const ops: OperationTelemetry[] = [];
@@ -20,12 +28,33 @@ export function trackOperation(telemetry: Omit<OperationTelemetry, "ts">): void 
 }
 
 export function aggregateStats() {
-  if (ops.length === 0) return { count: 0, totalCost: 0, totalInput: 0, totalOutput: 0 };
+  if (ops.length === 0) {
+    return {
+      count: 0,
+      totalCost: 0,
+      totalInput: 0,
+      totalOutput: 0,
+      totalReasoningTokens: 0,
+      totalCostRub: null as number | null,
+    };
+  }
+  let costRubSum = 0;
+  let sawCostRub = false;
+  for (const op of ops) {
+    if (op.cost_rub !== undefined) {
+      costRubSum += op.cost_rub;
+      sawCostRub = true;
+    }
+  }
   return {
     count: ops.length,
     totalCost: ops.reduce((s, o) => s + o.estimated_cost, 0),
     totalInput: ops.reduce((s, o) => s + o.input_tokens, 0),
     totalOutput: ops.reduce((s, o) => s + o.output_tokens, 0),
+    totalReasoningTokens: ops.reduce((s, o) => s + (o.reasoning_tokens ?? 0), 0),
+    // null, пока провайдер не вернул ни одной cost_rub: не выдаём за факт
+    // сумму, которой у нас нет.
+    totalCostRub: sawCostRub ? costRubSum : null,
   };
 }
 

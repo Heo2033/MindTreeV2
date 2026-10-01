@@ -25,21 +25,38 @@ class LLMTelemetry {
 
   AggregateStats aggregateStats() {
     if (_ops.isEmpty) {
-      return const AggregateStats(count: 0, totalCost: 0, totalInput: 0, totalOutput: 0);
+      return const AggregateStats(
+        count: 0,
+        totalCost: 0,
+        totalInput: 0,
+        totalOutput: 0,
+      );
     }
     var totalCost = 0.0;
     var totalInput = 0;
     var totalOutput = 0;
+    var totalReasoning = 0;
+    var totalCostRub = 0.0;
+    var seenCostRub = false;
     for (final op in _ops) {
       totalCost += op.estimatedCost;
       totalInput += op.inputTokens;
       totalOutput += op.outputTokens;
+      totalReasoning += op.reasoningTokens;
+      if (op.costRub != null) {
+        totalCostRub += op.costRub!;
+        seenCostRub = true;
+      }
     }
     return AggregateStats(
       count: _ops.length,
       totalCost: totalCost,
       totalInput: totalInput,
       totalOutput: totalOutput,
+      totalReasoningTokens: totalReasoning,
+      // `null`, пока провайдер не вернул ни одной `cost_rub` — тогда не
+      // выдаём за факт сумму, которой у нас нет.
+      totalCostRub: seenCostRub ? totalCostRub : null,
     );
   }
 
@@ -61,6 +78,15 @@ class OperationTelemetry {
   final bool cacheHit;
   final double estimatedCost;
 
+  /// Токены рассуждений внутри [outputTokens]. Помогает отличить «модель
+  /// много думала» от «модель много написала» — по умолчанию reasoning
+  /// составлял ~99% вывода на дешёвых операциях.
+  final int reasoningTokens;
+
+  /// Авторитетная стоимость в рублях от провайдера (`usage.cost_rub`).
+  /// `null`, если провайдер её не вернул.
+  final double? costRub;
+
   const OperationTelemetry({
     required this.ts,
     required this.operation,
@@ -72,6 +98,8 @@ class OperationTelemetry {
     this.retryCount = 0,
     this.cacheHit = false,
     this.estimatedCost = 0,
+    this.reasoningTokens = 0,
+    this.costRub,
   });
 
   Map<String, dynamic> toJson() => {
@@ -81,10 +109,12 @@ class OperationTelemetry {
         'model': model,
         'input_tokens': inputTokens,
         'output_tokens': outputTokens,
+        'reasoning_tokens': reasoningTokens,
         'latency_ms': latencyMs,
         'retry_count': retryCount,
         'cache_hit': cacheHit,
         'estimated_cost': estimatedCost,
+        if (costRub != null) 'cost_rub': costRub,
       };
 }
 
@@ -118,12 +148,24 @@ class AggregateStats {  final int count;
   final int totalInput;
   final int totalOutput;
 
+  /// Reasoning-токены внутри [totalOutput].
+  final int totalReasoningTokens;
+
+  /// Сумма `usage.cost_rub` от провайдера; `null`, если он их не отдавал.
+  final double? totalCostRub;
+
   const AggregateStats({
     required this.count,
     required this.totalCost,
     required this.totalInput,
     required this.totalOutput,
+    this.totalReasoningTokens = 0,
+    this.totalCostRub,
   });
+
+  /// Доля вывода, ушедшая на рассуждения (0..1).
+  double get reasoningShare =>
+      totalOutput <= 0 ? 0 : (totalReasoningTokens / totalOutput).clamp(0.0, 1.0);
 }
 
 /// Estimate cost for a model (USD).

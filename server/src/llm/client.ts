@@ -5,13 +5,60 @@ const DEFAULT_MODEL = "gpt-4o";
 const DEFAULT_TEMPERATURE = 0.4;
 const DEFAULT_NUM_CTX = 16384;
 const DEFAULT_TIMEOUT_MS = 180_000;
-// Явный generous-лимит выходных токенов (зеркало flutter client.dart): без него
-// провайдеры режут ответ дефолтным капом, и details обрывается на полуслове.
-const DEFAULT_MAX_OUTPUT_TOKENS = 4096;
+// Лимит выходных токенов (зеркало flutter client.dart): без него провайдеры
+// режут ответ дефолтным капом, и details обрывается на полуслове.
+const DEFAULT_MAX_OUTPUT_TOKENS = 16384;
+
+/** Допустимые значения `LLM_REASONING_EFFORT` (AITUNNEL `reasoning.effort`). */
+export const REASONING_EFFORT_VALUES: ReadonlySet<string> = new Set([
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
+
+/**
+ * Ключи `baseUrl|model`, для которых провайдер уже отверг объект `reasoning`.
+ *
+ * У части моделей (семейство `glm-5.3*`) thinking обязателен и `effort: none`
+ * даёт ошибку. Чтобы не платить за бесполезный отказ на каждом вызове,
+ * достаточно одного отказа на пару «провайдер+модель».
+ */
+const reasoningUnsupported = new Set<string>();
+
+/** Тело блока `reasoning` для конкретной модели, с учётом известных отказов. */
+export function reasoningBlockFor(cfg: LLMConfig, model: string): Record<string, unknown> {
+  if (reasoningUnsupported.has(`${cfg.baseUrl}|${model}`)) return {};
+  if (cfg.reasoningMaxTokens !== null) return { max_tokens: cfg.reasoningMaxTokens };
+  const effort = cfg.reasoningEffort?.trim();
+  if (!effort) return {};
+  return { effort };
+}
+
+/** Ответ провайдера означает, что объект `reasoning` неприемлем для модели? */
+function isReasoningRejection(error: unknown): boolean {
+  const text = error instanceof Error ? error.message : String(error);
+  if (!/\b(400|422)\b/.test(text)) return false;
+  return /reasoning|thinking|effort|思考/i.test(text);
+}
 
 export interface ILLMUsage {
   input_tokens: number;
   output_tokens: number;
+  /**
+   * Токены рассуждений — часть `output_tokens`, но отдельная и обычно бо́льшая
+   * часть платного вывода. Зеркало flutter `LLMUsage`.
+   */
+  reasoning_tokens?: number;
+  /**
+   * Реальная стоимость запроса в рублях от провайдера (`usage.cost_rub`).
+   * Считать стоимость по каталогу нельзя: фактический тариф провайдера может
+   * отличаться от опубликованного.
+   */
+  cost_rub?: number;
 }
 
 export interface ILLMResult {
@@ -29,6 +76,15 @@ interface LLMConfig {
   seedOverride: number | null;
   numCtx: number;
   timeoutMs: number;
+  /** Лимит выходных токенов одного запроса (было жёстко 4096). */
+  maxOutputTokens: number;
+  /** Бюджет токенов рассуждений; null — поле `reasoning` не отправляется. */
+  reasoningMaxTokens: number | null;
+  /**
+   * Уровень усилений рассуждений (`reasoning.effort`), null — не отправлять.
+   * Взаимоисключающе с reasoningMaxTokens: провайдер требует «что-то одно».
+   */
+  reasoningEffort: string | null;
   provider: "ollama" | "openai" | "auto";
   isMock: boolean;
 }
@@ -115,6 +171,37 @@ function readLLMConfig(runtime: RuntimeLLMConfig | null = getRuntimeConfig()): L
     throw new Error("LLM_TEMPERATURE должен быть числом в диапазоне 0..2");
   }
 
+  const maxOutputTokensRaw = process.env.LLM_MAX_OUTPUT_TOKENS;
+  const parsedMaxOutputTokens =
+    maxOutputTokensRaw === undefined || maxOutputTokensRaw === ""
+      ? NaN
+      : Number(maxOutputTokensRaw);
+  const maxOutputTokens =
+    Number.isFinite(parsedMaxOutputTokens) && parsedMaxOutputTokens > 0
+      ? Math.floor(parsedMaxOutputTokens)
+      : DEFAULT_MAX_OUTPUT_TOKENS;
+
+  // Бюджет рассуждений: AITUNNEL требует, чтобы max_tokens ответа был строго
+  // больше бюджета мыслей, иначе ответ приходит пустым (finish_reason: length).
+  const reasoningMaxTokensRaw = process.env.LLM_REASONING_MAX_TOKENS;
+  const parsedReasoningMaxTokens =
+    reasoningMaxTokensRaw === undefined || reasoningMaxTokensRaw === ""
+      ? NaN
+      : Number(reasoningMaxTokensRaw);
+  const reasoningMaxTokens =
+    Number.isFinite(parsedReasoningMaxTokens) && parsedReasoningMaxTokens > 0
+      ? Math.floor(parsedReasoningMaxTokens)
+      : null;
+
+  // Уровень усилений рассуждений. Замер на живом провайдере: задача с ответом
+  // ~30 токенов без управления вернула 4106 выходных токенов (4077 — reasoning)
+  // и стоила 0.11 руб; с `effort: "none"` — 35 токенов, 0.01 руб. `minimal` не
+  // помогает, провайдер мапит уровень и Qwen всё равно думает тысячи токенов.
+  const reasoningEffortRaw = (process.env.LLM_REASONING_EFFORT ?? "").trim().toLowerCase();
+  const reasoningEffort = REASONING_EFFORT_VALUES.has(reasoningEffortRaw)
+    ? reasoningEffortRaw
+    : null;
+
   return {
     apiKey,
     baseUrl,
@@ -129,9 +216,35 @@ function readLLMConfig(runtime: RuntimeLLMConfig | null = getRuntimeConfig()): L
     seedOverride,
     numCtx,
     timeoutMs: resolveTimeoutMs(process.env.LLM_TIMEOUT_MS),
+    maxOutputTokens,
+    reasoningMaxTokens,
+    reasoningEffort,
     provider,
     isMock,
   };
+}
+
+/**
+ * Операции с детерминированным выводом: JSON-контракт фиксирован, нужна
+ * воспроизводимость (зеркало flutter client.dart).
+ */
+const DETERMINISTIC_OPS = new Set([
+  "structure",
+  "structure-l2",
+  "structure-l3",
+  "validate",
+  "curriculum",
+  "assessment",
+  "mastery",
+]);
+
+/**
+ * Температура для операции: `0` — детерминированный вывод, `undefined` —
+ * оставить дефолт из конфига (его подставит `callLLM`). Зеркало flutter
+ * client.dart.
+ */
+export function defaultTemperatureForOperation(operation: string): number | undefined {
+  return DETERMINISTIC_OPS.has(operation) ? 0 : undefined;
 }
 
 export type ModelTier = "strong" | "fast";
@@ -242,12 +355,14 @@ const cooldowns = new Map<string, number>();
 interface ChatUsage {
   prompt_tokens?: number;
   completion_tokens?: number;
+  completion_tokens_details?: { reasoning_tokens?: number };
+  cost_rub?: number;
 }
 
 interface ChatPayload {
   choices?: Array<{
-    message?: { content?: unknown; reasoning_content?: unknown };
-    delta?: { content?: unknown; reasoning_content?: unknown };
+    message?: { content?: unknown; reasoning?: unknown; reasoning_content?: unknown };
+    delta?: { content?: unknown; reasoning?: unknown; reasoning_content?: unknown };
   }>;
   usage?: ChatUsage;
 }
@@ -262,16 +377,19 @@ type ChatAttempt =
 
 function resultFromChatJson(payload: ChatPayload, promptChars: number): ILLMResult | null {
   const message = payload?.choices?.[0]?.message;
-  const content = typeof message?.content === "string" ? message.content : "";
-  const reasoning =
-    typeof message?.reasoning_content === "string" ? message.reasoning_content : "";
-  const text = content.trim() !== "" ? content : reasoning;
+  // Только content: рассуждение — проза, для JSON-контракта это мусор (зеркало
+  // flutter client.dart). Пустой content даёт null → штатный retry/fallback.
+  const text = typeof message?.content === "string" ? message.content : "";
   if (text.trim() === "") return null;
   return {
     text,
     usage: {
       input_tokens: payload?.usage?.prompt_tokens ?? Math.ceil(promptChars / 4),
       output_tokens: payload?.usage?.completion_tokens ?? Math.ceil(text.length / 4),
+      ...(payload?.usage?.completion_tokens_details?.reasoning_tokens !== undefined
+        ? { reasoning_tokens: payload.usage.completion_tokens_details.reasoning_tokens }
+        : {}),
+      ...(payload?.usage?.cost_rub !== undefined ? { cost_rub: payload.usage.cost_rub } : {}),
     },
   };
 }
@@ -285,7 +403,6 @@ async function consumeChatStream(response: Response, promptChars: number): Promi
   const decoder = new TextDecoder();
   let buffer = "";
   let content = "";
-  let reasoning = "";
   let usage: ChatUsage | null = null;
 
   while (true) {
@@ -308,7 +425,6 @@ async function consumeChatStream(response: Response, promptChars: number): Promi
         }
         const delta = chunk?.choices?.[0]?.delta;
         if (typeof delta?.content === "string") content += delta.content;
-        if (typeof delta?.reasoning_content === "string") reasoning += delta.reasoning_content;
         if (
           chunk?.usage &&
           (chunk.usage.prompt_tokens !== undefined || chunk.usage.completion_tokens !== undefined)
@@ -319,7 +435,7 @@ async function consumeChatStream(response: Response, promptChars: number): Promi
     }
   }
 
-  const text = content.trim() !== "" ? content : reasoning;
+  const text = content;
   if (text.trim() === "") {
     return { kind: "retry-without-stream", error: new Error("LLM API вернул пустой ответ") };
   }
@@ -330,6 +446,10 @@ async function consumeChatStream(response: Response, promptChars: number): Promi
       usage: {
         input_tokens: usage?.prompt_tokens ?? Math.ceil(promptChars / 4),
         output_tokens: usage?.completion_tokens ?? Math.ceil(text.length / 4),
+        ...(usage?.completion_tokens_details?.reasoning_tokens !== undefined
+          ? { reasoning_tokens: usage.completion_tokens_details.reasoning_tokens }
+          : {}),
+        ...(usage?.cost_rub !== undefined ? { cost_rub: usage.cost_rub } : {}),
       },
     },
   };
@@ -471,11 +591,14 @@ export async function callLLM(
     return callOllama(cfg, systemPrompt, temperature, seed, model);
   }
 
+  const reasoningBlock = reasoningBlockFor(cfg, model);
+
   const baseBody: Record<string, unknown> = {
     model,
     messages: [{ role: "system", content: systemPrompt }],
     temperature,
-    max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+    max_tokens: cfg.maxOutputTokens,
+    ...(Object.keys(reasoningBlock).length > 0 ? { reasoning: reasoningBlock } : {}),
   };
 
   const candidates: Array<Record<string, unknown>> = [];
@@ -488,52 +611,78 @@ export async function callLLM(
     model,
     messages: [{ role: "user", content: systemPrompt }],
     temperature,
-    max_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+    max_tokens: cfg.maxOutputTokens,
+    ...(Object.keys(reasoningBlock).length > 0 ? { reasoning: reasoningBlock } : {}),
   });
 
   const timeoutMs = options.timeoutMs ?? cfg.timeoutMs;
   const url = `${cfg.baseUrl}/chat/completions`;
   const promptChars = systemPrompt.length;
 
-  let lastError: Error | null = null;
-  let streamRejected = false;
+  /**
+   * Прогоняет список тел-кандидатов. Возвращает результат либо пробрасывает
+   * последнюю ошибку; при отказе именно из-за `reasoning` прерывается сразу,
+   * чтобы не потратить лимит попыток на заведомо обречённые варианты.
+   */
+  const attemptAll = async (bodies: Array<Record<string, unknown>>): Promise<ILLMResult> => {
+    let lastError: Error | null = null;
+    let streamRejected = false;
 
-  for (const body of candidates) {
-    if (!streamRejected) {
+    for (const body of bodies) {
+      const hasReasoning = body.reasoning !== undefined;
+      if (!streamRejected) {
+        const res = await chatCompletionsOnce(
+          providerKey,
+          url,
+          cfg.apiKey,
+          body,
+          true,
+          timeoutMs,
+          promptChars,
+        );
+        if (res.kind === "success") return res.result;
+        if (res.kind === "rate-limit") throw res.err;
+        lastError = res.error;
+        if (hasReasoning && isReasoningRejection(res.error)) throw res.error;
+        if (res.kind === "next-candidate") continue;
+        if (res.kind === "retry-without-stream") streamRejected = true;
+        else break;
+      }
+
       const res = await chatCompletionsOnce(
         providerKey,
         url,
         cfg.apiKey,
         body,
-        true,
+        false,
         timeoutMs,
         promptChars,
       );
       if (res.kind === "success") return res.result;
       if (res.kind === "rate-limit") throw res.err;
       lastError = res.error;
+      if (hasReasoning && isReasoningRejection(res.error)) throw res.error;
       if (res.kind === "next-candidate") continue;
-      if (res.kind === "retry-without-stream") streamRejected = true;
-      else break;
+      break;
     }
 
-    const res = await chatCompletionsOnce(
-      providerKey,
-      url,
-      cfg.apiKey,
-      body,
-      false,
-      timeoutMs,
-      promptChars,
-    );
-    if (res.kind === "success") return res.result;
-    if (res.kind === "rate-limit") throw res.err;
-    lastError = res.error;
-    if (res.kind === "next-candidate") continue;
-    break;
-  }
+    throw lastError ?? new Error("Ошибка вызова LLM");
+  };
 
-  throw lastError ?? new Error("Ошибка вызова LLM");
+  try {
+    return await attemptAll(candidates);
+  } catch (error) {
+    // Модель с обязательным thinking (glm-5.3*) отвергает объект `reasoning`.
+    // Помечаем пару «провайдер+модель» и повторяем ровно один раз без него.
+    if (Object.keys(reasoningBlock).length === 0 || !isReasoningRejection(error)) throw error;
+    reasoningUnsupported.add(`${cfg.baseUrl}|${model}`);
+    const withoutReasoning = candidates.map((body) => {
+      const copy = { ...body };
+      delete copy.reasoning;
+      return copy;
+    });
+    return attemptAll(withoutReasoning);
+  }
 }
 
 async function callOllama(
@@ -547,7 +696,7 @@ async function callOllama(
   const options: Record<string, unknown> = {
     temperature,
     num_ctx: cfg.numCtx,
-    num_predict: DEFAULT_MAX_OUTPUT_TOKENS,
+    num_predict: cfg.maxOutputTokens,
   };
   if (seed !== null && seed !== undefined) {
     options.seed = seed;
@@ -723,12 +872,9 @@ export async function* callLLMStream(
             continue;
           }
           const delta = chunk?.choices?.[0]?.delta;
-          const piece =
-            typeof delta?.content === "string"
-              ? delta.content
-              : typeof delta?.reasoning_content === "string"
-                ? delta.reasoning_content
-                : "";
+          // Только content (зеркало flutter client.dart): рассуждение в ответ не
+          // отдаём — на стриме это проза вперемешку с JSON-контрактом.
+          const piece = typeof delta?.content === "string" ? delta.content : "";
           if (piece.length > 0) {
             emitted += piece.length;
             yield piece;

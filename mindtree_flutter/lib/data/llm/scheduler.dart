@@ -7,6 +7,18 @@ import 'telemetry.dart';
 // ─── Scheduler config ─────────────────────────────────────────────────────────
 
 class SchedulerConfig {
+  /// Потолок запросов в минуту и одновременных запросов.
+  ///
+  /// Раньше здесь стояли 10 RPM и 2 одновременных запроса — то есть один вызов
+  /// каждые 6 секунд. Замер живым бурстом через `tool/probe/bin/rpm_probe.dart`
+  /// показал, что провайдер держит значительно больше: 15 одновременных запросов
+  /// на fast-модели прошли без единого 429 (≈410 вызовов/мин), 8 одновременных
+  /// на strong — тоже без 429 (≈88 вызовов/мин).
+  ///
+  /// На живом прогоне дерева из 20 узлов старое ограничение давало ~234 с
+  /// чистого ожидания лимита из 320 с wall clock, то есть скорость задавал
+  /// не алгоритм, а темп запросов. Текущие значения оставлены с запасом
+  /// относительно измеренного потолка, но уже не ограничивают пайплайн.
   final int maxRPM;
   final int maxRPD;
   final int maxConcurrency;
@@ -20,9 +32,9 @@ class SchedulerConfig {
   final int opDeadlineMs;
 
   const SchedulerConfig({
-    this.maxRPM = 10,
+    this.maxRPM = 60,
     this.maxRPD = 500,
-    this.maxConcurrency = 2,
+    this.maxConcurrency = 6,
     this.maxRetries = 3,
     this.batchSize = 3,
     this.opDeadlineMs = 120000,
@@ -184,6 +196,7 @@ class TreeScheduler {
     List<String>? nodeIds,
     String? promptVersion,
     String? model,
+    double? temperature,
   }) async {
     final startTime = DateTime.now().millisecondsSinceEpoch;
     final deadline = config.opDeadlineMs > 0
@@ -196,6 +209,11 @@ class TreeScheduler {
     final allModels = model != null
         ? [model]
         : modelsForTier(cfg, tierForOperation(operation));
+
+    // Детерминированные операции (`validate`, `structure*`, `assessment`, ...)
+    // идут при temperature=0: контракт фиксирован, нужна воспроизводимость.
+    // Явный аргумент `temperature` всегда важнее.
+    final temp = temperature ?? defaultTemperatureForOperation(operation);
 
     for (final m in allModels) {
       final key = cacheKey != null
@@ -231,7 +249,7 @@ class TreeScheduler {
           // вызов должен завершиться. Жёсткая граница «висящего» запроса —
           // клиентский LLMConfig.timeoutMs (по умолчанию 180 с).
           final attemptStart = DateTime.now().millisecondsSinceEpoch;
-          final llmResult = await _invokeLLM(cfg, prompt, model: m);
+          final llmResult = await _invokeLLM(cfg, prompt, model: m, temperature: temp);
           final attemptMs = DateTime.now().millisecondsSinceEpoch - attemptStart;
           final result = parseFn(llmResult.text);
           attemptsMade = attempt + 1;
@@ -255,6 +273,8 @@ class TreeScheduler {
             latencyMs: DateTime.now().millisecondsSinceEpoch - startTime,
             retryCount: attempt,
             estimatedCost: estimateCostForUsage(m, llmResult.usage.inputTokens, llmResult.usage.outputTokens),
+            reasoningTokens: llmResult.usage.reasoningTokens,
+            costRub: llmResult.usage.costRub,
           ));
 
           _release();
@@ -297,6 +317,7 @@ class TreeScheduler {
     String operation,
     String Function() promptFn, {
     String? model,
+    double? temperature,
   }) async* {
     final cfg = _configProvider();
     final allModels = model != null
@@ -308,6 +329,8 @@ class TreeScheduler {
         ? DateTime.fromMillisecondsSinceEpoch(startTime + config.opDeadlineMs)
         : null;
     Object? lastError;
+
+    final temp = temperature ?? defaultTemperatureForOperation(operation);
 
     for (final m in allModels) {
       var modelFailed = false;
@@ -332,7 +355,7 @@ class TreeScheduler {
           var any = false;
           // Чтение стрима ограничено клиентским callLLMStream (LLMConfig.timeoutMs),
           // зеркально server (controller.abort() по истечении timeoutMs).
-          await for (final token in callLLMStream(cfg, prompt, model: m)) {
+          await for (final token in callLLMStream(cfg, prompt, model: m, temperature: temp)) {
             any = true;
             yield token;
           }

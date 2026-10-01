@@ -23,6 +23,27 @@ class EffectiveConfig {
   final String provider;
   final double temperature;
   final int numCtx;
+
+  /// Лимит выходных токенов одного запроса (было жёстко 4096).
+  final int maxOutputTokens;
+
+  /// Бюджет токенов рассуждений; `null` — не отправлять поле `reasoning`.
+  final int? reasoningMaxTokens;
+
+  /// Уровень усилий рассуждений (`reasoning.effort`).
+  ///
+  /// Значения: `none | minimal | low | medium | high | xhigh | max`.
+  /// `null` — объект `reasoning` не отправляется вовсе.
+  ///
+  /// Замер на живом провайдере (AITUNNEL, задача с ответом ~30 токенов):
+  /// без `effort` модель вернула 4106 выходных токенов, из них 4077 — reasoning;
+  /// с `effort: none` — 35 токенов и 0 reasoning. `minimal` не помогает
+  /// (провайдер мапит уровень, Qwen всё равно думает 3209 токенов).
+  ///
+  /// По умолчанию `none`: все операции MindTree возвращают строгий JSON-контракт,
+  /// поэтому рассуждения обычно не нужны, но тарифицируются как вывод.
+  final String? reasoningEffort;
+
   final bool runtimeConfigured;
 
   const EffectiveConfig({
@@ -35,6 +56,9 @@ class EffectiveConfig {
     this.provider = 'auto',
     this.temperature = 0.7,
     this.numCtx = 8192,
+    this.maxOutputTokens = 16384,
+    this.reasoningMaxTokens,
+    this.reasoningEffort = 'none',
     this.runtimeConfigured = false,
   });
 
@@ -48,6 +72,9 @@ class EffectiveConfig {
         provider: json['provider'] as String? ?? 'auto',
         temperature: (json['temperature'] as num? ?? 0.7).toDouble(),
         numCtx: (json['numCtx'] as num? ?? 8192).toInt(),
+        maxOutputTokens: (json['maxOutputTokens'] as num? ?? 16384).toInt(),
+        reasoningMaxTokens: (json['reasoningMaxTokens'] as num?)?.toInt(),
+        reasoningEffort: json['reasoningEffort'] as String? ?? 'none',
         runtimeConfigured: json['runtimeConfigured'] as bool? ?? false,
       );
 
@@ -61,6 +88,9 @@ class EffectiveConfig {
         'provider': provider,
         'temperature': temperature,
         'numCtx': numCtx,
+        'maxOutputTokens': maxOutputTokens,
+        if (reasoningMaxTokens != null) 'reasoningMaxTokens': reasoningMaxTokens,
+        if (reasoningEffort != null) 'reasoningEffort': reasoningEffort,
         'runtimeConfigured': runtimeConfigured,
       };
 }

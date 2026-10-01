@@ -1,6 +1,7 @@
 import {
   callLLM,
   callLLMStream,
+  defaultTemperatureForOperation,
   getModelsForTier,
   LLMMockError,
   LLMRateLimitError,
@@ -30,9 +31,16 @@ interface RateTracker {
 type RequiredCoreConfig = Required<Omit<SchedulerConfig, "windowMs" | "opDeadlineMs">>;
 
 const DEFAULT_CONFIG: RequiredCoreConfig = {
-  maxRPM: 10,
+  // Потолок запросов в минуту и одновременных запросов. Раньше здесь стояли
+  // 10 RPM и 2 одновременных запроса (один вызов каждые 6 секунд). Замер живым
+  // бурстом показал, что провайдер держит заметно больше: 15 одновременных
+  // запросов на fast-модели прошли без единого 429 (≈410 вызовов/мин), 8
+  // одновременных на strong — тоже без 429 (≈88 вызовов/мин). На живом прогоне
+  // дерева из 20 узлов старое ограничение давало ~234 с чистого ожидания лимита
+  // из 320 с wall clock — скорость задавал темп запросов, а не алгоритм.
+  maxRPM: 60,
   maxRPD: 500,
-  maxConcurrency: 2,
+  maxConcurrency: 6,
   maxRetries: 3,
   batchSize: 3,
 };
@@ -234,6 +242,7 @@ export class TreeScheduler {
       nodeIds?: string[];
       promptVersion?: string;
       model?: string;
+      temperature?: number;
     },
   ): Promise<{ result: T; llmResult: ILLMResult; cached: boolean }> {
     const startTime = Date.now();
@@ -246,6 +255,11 @@ export class TreeScheduler {
     const allModels = options?.model
       ? [options.model]
       : getModelsForTier(tierForOperation(operation));
+
+    // Детерминированные операции (`validate`, `structure*`, `assessment`, ...)
+    // идут при temperature=0: контракт фиксирован, нужна воспроизводимость.
+    // Явный `options.temperature` всегда важнее (зеркало flutter scheduler).
+    const temperature = options?.temperature ?? defaultTemperatureForOperation(operation);
 
     for (const model of allModels) {
       const key = options?.cacheKey
@@ -277,7 +291,7 @@ export class TreeScheduler {
         try {
           const prompt = promptFn();
           lastPromptLength = prompt.length;
-          const llmResult = await callLLM(prompt, { model });
+          const llmResult = await callLLM(prompt, { model, temperature });
           const result = parseFn(llmResult.text);
           attemptsMade = attempt + 1;
 
@@ -295,6 +309,10 @@ export class TreeScheduler {
             retry_count: attempt,
             cache_hit: false,
             estimated_cost: estimateCost(model, llmResult.usage.input_tokens, llmResult.usage.output_tokens),
+            ...(llmResult.usage.reasoning_tokens !== undefined
+              ? { reasoning_tokens: llmResult.usage.reasoning_tokens }
+              : {}),
+            ...(llmResult.usage.cost_rub !== undefined ? { cost_rub: llmResult.usage.cost_rub } : {}),
           });
 
           this.release();

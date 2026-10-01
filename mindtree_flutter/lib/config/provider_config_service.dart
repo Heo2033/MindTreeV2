@@ -22,6 +22,9 @@ class RuntimeConfigBody {
   final String? modelFast;
   final double? temperature;
   final int? numCtx;
+  final int? maxOutputTokens;
+  final int? reasoningMaxTokens;
+  final String? reasoningEffort;
 
   const RuntimeConfigBody({
     this.provider,
@@ -33,6 +36,9 @@ class RuntimeConfigBody {
     this.modelFast,
     this.temperature,
     this.numCtx,
+    this.maxOutputTokens,
+    this.reasoningMaxTokens,
+    this.reasoningEffort,
   });
 
   Map<String, dynamic> toJson() => {
@@ -45,6 +51,9 @@ class RuntimeConfigBody {
         if (modelFast != null) 'modelFast': modelFast,
         if (temperature != null) 'temperature': temperature,
         if (numCtx != null) 'numCtx': numCtx,
+        if (maxOutputTokens != null) 'maxOutputTokens': maxOutputTokens,
+        if (reasoningMaxTokens != null) 'reasoningMaxTokens': reasoningMaxTokens,
+        if (reasoningEffort != null) 'reasoningEffort': reasoningEffort,
       };
 }
 
@@ -79,6 +88,9 @@ class ProviderConfigService {
         provider: ProviderEnv.provider,
         temperature: ProviderEnv.temperature,
         numCtx: ProviderEnv.numCtx,
+        maxOutputTokens: ProviderEnv.maxOutputTokens,
+        reasoningMaxTokens: ProviderEnv.reasoningMaxTokens,
+    reasoningEffort: ProviderEnv.reasoningEffort ?? 'none',
       );
 
   /// Load the effective config: runtime overrides on top of build defaults.
@@ -98,6 +110,9 @@ class ProviderConfigService {
         provider: ProviderEnv.provider,
         temperature: ProviderEnv.temperature,
         numCtx: ProviderEnv.numCtx,
+        maxOutputTokens: ProviderEnv.maxOutputTokens,
+        reasoningMaxTokens: ProviderEnv.reasoningMaxTokens,
+    reasoningEffort: ProviderEnv.reasoningEffort ?? 'none',
         runtimeConfigured: false,
       );
     }
@@ -130,6 +145,12 @@ class ProviderConfigService {
       provider: saved?['provider'] as String? ?? defaults.provider,
       temperature: (saved?['temperature'] as num?)?.toDouble() ?? defaults.temperature,
       numCtx: (saved?['numCtx'] as num?)?.toInt() ?? defaults.numCtx,
+      maxOutputTokens:
+          (saved?['maxOutputTokens'] as num?)?.toInt() ?? defaults.maxOutputTokens,
+      reasoningMaxTokens: (saved?['reasoningMaxTokens'] as num?)?.toInt() ??
+          defaults.reasoningMaxTokens,
+      reasoningEffort: saved?['reasoningEffort'] as String? ??
+          defaults.reasoningEffort,
       runtimeConfigured: saved != null,
     );
   }
@@ -148,6 +169,9 @@ class ProviderConfigService {
       provider: body.provider ?? current.provider,
       temperature: body.temperature ?? current.temperature,
       numCtx: body.numCtx ?? current.numCtx,
+      maxOutputTokens: body.maxOutputTokens ?? current.maxOutputTokens,
+      reasoningMaxTokens: body.reasoningMaxTokens ?? current.reasoningMaxTokens,
+      reasoningEffort: body.reasoningEffort ?? current.reasoningEffort,
       runtimeConfigured: true,
     );
 
@@ -163,6 +187,9 @@ class ProviderConfigService {
         'provider': merged.provider,
         'temperature': merged.temperature,
         'numCtx': merged.numCtx,
+        'maxOutputTokens': merged.maxOutputTokens,
+        'reasoningMaxTokens': merged.reasoningMaxTokens,
+        'reasoningEffort': merged.reasoningEffort,
       }),
     );
 

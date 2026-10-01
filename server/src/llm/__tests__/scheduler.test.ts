@@ -1,8 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TreeScheduler, isRateLimitError } from "../scheduler.js";
 import { LLMCache } from "../cache.js";
-import { LLMRateLimitError, LLMRetriesExhaustedError } from "../client.js";
-
+import { LLMRateLimitError, LLMRetriesExhaustedError, defaultTemperatureForOperation } from "../client.js";
 // callLLM подменяем, чтобы управлять сценариями «рейт-лимит / обычная ошибка /
 // успех». Прочие экспорты client.js (классы ошибок и т.п.) — реальные.
 vi.mock("../client.js", async (importOriginal) => {
@@ -128,5 +127,62 @@ describe("TreeScheduler.execute: ретраи при рейт-лимите", () 
 
     expect(res.result).toBe('"ok"');
     expect(backoff).not.toHaveBeenCalled();
+  });
+});
+
+// Регрессия транспортных параметров (зеркало flutter
+// test/data/llm/transport_params_test.dart).
+//
+// Температура была одна на все операции. Для детерминированных операций
+// (`validate`, `structure*`, `assessment`, ...) это и качество — мусор на
+// границах JSON-схемы, и деньги — лишние токены на сильной модели.
+describe("TreeScheduler.execute: per-op температура", () => {
+  it("детерминированная операция уходит с temperature=0", async () => {
+    mockedCallLLM.mockResolvedValueOnce({ text: '"ok"', usage: { input_tokens: 1, output_tokens: 1 } });
+
+    await makeScheduler().execute("validate", () => "prompt", parse, { model: "m" });
+
+    expect(mockedCallLLM.mock.calls[0]?.[1]?.temperature).toBe(0);
+  });
+
+  it("прочие операции оставляют дефолт конфига (undefined)", async () => {
+    mockedCallLLM.mockResolvedValueOnce({ text: '"ok"', usage: { input_tokens: 1, output_tokens: 1 } });
+
+    await makeScheduler().execute("content", () => "prompt", parse, { model: "m" });
+
+    expect(mockedCallLLM.mock.calls[0]?.[1]?.temperature).toBeUndefined();
+  });
+
+  it("явный temperature важнее per-op правила", async () => {
+    mockedCallLLM.mockResolvedValueOnce({ text: '"ok"', usage: { input_tokens: 1, output_tokens: 1 } });
+
+    await makeScheduler().execute("validate", () => "prompt", parse, {
+      model: "m",
+      temperature: 0.35,
+    });
+
+    expect(mockedCallLLM.mock.calls[0]?.[1]?.temperature).toBe(0.35);
+  });
+});
+
+describe("defaultTemperatureForOperation", () => {
+  it("детерминированные операции получают 0", () => {
+    for (const op of [
+      "structure",
+      "structure-l2",
+      "structure-l3",
+      "validate",
+      "curriculum",
+      "assessment",
+      "mastery",
+    ]) {
+      expect(defaultTemperatureForOperation(op)).toBe(0);
+    }
+  });
+
+  it("остальные операции возвращают undefined", () => {
+    for (const op of ["content", "activity", "repair", "quiz", "tutor", "milestone", "неизвестная"]) {
+      expect(defaultTemperatureForOperation(op)).toBeUndefined();
+    }
   });
 });

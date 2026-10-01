@@ -24,6 +24,7 @@ class _FailingScheduler extends TreeScheduler {
     List<String>? nodeIds,
     String? promptVersion,
     String? model,
+    double? temperature,
   }) async {
     calls++;
     throw Exception('LLM down (test)');

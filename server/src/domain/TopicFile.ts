@@ -8,6 +8,7 @@ import type {
   Sequence,
   SequenceStep,
 } from "@mindtree/types";
+import { truncateOneLiner } from "./KnowledgeGraphEngine.js";
 import { scopedSuffix } from "./scopedIds.js";
 
 /**
@@ -391,7 +392,7 @@ export function flattenNodes(
         onWarning?.(`Пропущен узел без id на уровне ${level}`);
         continue;
       }
-      const oneLiner = truncateOneLiner(asString(raw.oneLiner), onWarning);
+      const oneLiner = truncateOneLinerForFile(asString(raw.oneLiner), onWarning);
       const children = Array.isArray(raw.children)
         ? raw.children.filter(isPlainObject)
         : [];
@@ -431,10 +432,16 @@ export function flattenNodes(
   return out;
 }
 
-function truncateOneLiner(value: string, onWarning?: (message: string) => void): string {
+/** Импорт/экспорт: кламп лимита `one_liner`.
+ *
+ * Зеркало Dart `_truncateOneLiner`. Используется доменный безопасный кламп
+ * (граница предложения/клаузы/слова + снятие висящих служебных слов): сырой
+ * `slice` обрывал фразы посреди слова прямо в экспорте.
+ */
+function truncateOneLinerForFile(value: string, onWarning?: (message: string) => void): string {
   if (value.length <= ONE_LINER_MAX_LENGTH) return value;
   onWarning?.(`one_liner длиннее ${ONE_LINER_MAX_LENGTH} символов — обрезан`);
-  return value.slice(0, ONE_LINER_MAX_LENGTH);
+  return truncateOneLiner(value, ONE_LINER_MAX_LENGTH);
 }
 
 function relationFromJson(json: Record<string, unknown>): Relation {

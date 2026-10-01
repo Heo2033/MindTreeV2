@@ -345,13 +345,43 @@ String renderMarkdown(ProbeResult result) {
   b.writeln('- Вызовов: ${result.llm.calls}');
   b.writeln('- Входных токенов: ${result.llm.inputTokens}');
   b.writeln('- Выходных токенов: ${result.llm.outputTokens}');
+  if (result.llm.reasoningTokens > 0) {
+    final share = result.llm.outputTokens <= 0
+        ? 0
+        : result.llm.reasoningTokens / result.llm.outputTokens;
+    b.writeln('- Из них reasoning: ${result.llm.reasoningTokens} '
+        '(${(share * 100).toStringAsFixed(1)}% вывода)');
+  }
+  final rub = result.llm.costRub;
+  if (rub != null) {
+    b.writeln('- Фактическая стоимость: ${rub.toStringAsFixed(2)} руб '
+        '(по `usage.cost_rub` провайдера)');
+  }
+  if (result.llm.modelsUsed.isNotEmpty) {
+    b.writeln('- Модели: ${result.llm.modelsUsed.join(', ')}');
+  }
   b.writeln();
-  if (result.llm.callsByKind.isNotEmpty) {
-    b.writeln('| Вид промпта | Вызовов |');
-    b.writeln('| --- | --- |');
-    for (final key in result.llm.callsByKind.keys.toList()..sort()) {
-      b.writeln('| $key | ${result.llm.callsByKind[key]} |');
+  if (result.llm.usageByKind.isNotEmpty) {
+    b.writeln('### Расход по операциям');
+    b.writeln();
+    final hasRub = result.llm.costRub != null;
+    b.writeln('| Операция | Вызовов | Ретраев | Вход | Выход | Reasoning |'
+        '${hasRub ? ' Руб' : ''} | Модели |');
+    b.writeln('| --- | --- | --- | --- | --- | --- |${hasRub ? ' --- |' : ''} --- |');
+    for (final key in result.llm.usageByKind.keys.toList()..sort()) {
+      final u = result.llm.usageByKind[key]!;
+      final rubCell = hasRub
+          ? ' ${u.costRub == null ? '—' : u.costRub!.toStringAsFixed(2)} |'
+          : '';
+      b.writeln('| $key | ${u.calls} | ${u.retries} | ${u.inputTokens} | '
+          '${u.outputTokens} | ${u.reasoningTokens} |$rubCell '
+          '${u.models.join(', ')} |');
     }
+    b.writeln();
+    b.writeln('Итоги по колонкам совпадают с агрегатами выше; сумма строк —');
+    b.writeln('фактическая стоимость прогона, а не оценка «на глаз».');
+    b.writeln('Колонка Reasoning показывает, сколько вывода ушло на рассуждения');
+    b.writeln('модели, а сколько — в сам ответ.');
     b.writeln();
   }
 

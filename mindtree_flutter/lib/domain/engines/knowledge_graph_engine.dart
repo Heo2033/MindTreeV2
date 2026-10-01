@@ -324,16 +324,135 @@ String enforceOneLinerLimit(String? draft, {int maxChars = oneLinerMaxChars}) {
   return truncateOneLiner(trimmed, maxChars: maxChars);
 }
 
-/// Детерминированная обрезка до лимита: режем по границе слова, не оставляя
-/// хвостовой пунктуации. Результат всегда <= [maxChars].
+/// Служебные слова, после которых обрыв читается как незаконченная мысль.
+///
+/// Резать строку по границе слова мало: «процессов как» — слово целое, но фраза
+/// оборвана на предлоге. На живом прогоне это давало именно такие хвосты в
+/// `one_liner`: «описание прямого и обратного процессов как», «сигнала x̂_0,
+/// предсказание». Хвост из этого списка отбрасывается вместе с предшествующей
+/// запятой, чтобы не оставлять висящую конструкцию.
+const Set<String> _danglingTailWords = {
+  // предлоги
+  'в', 'во', 'на', 'по', 'за', 'из', 'от', 'до', 'об', 'о', 'обо', 'у', 'к',
+  'ко', 'с', 'со', 'для', 'при', 'через', 'между', 'над', 'под',
+  'перед', 'после', 'вокруг', 'вдоль', 'без', 'близ', 'вблизи', 'наравне',
+  'против', 'вопреки', 'согласно', 'вследствие', 'ввиду', 'вслед',
+  // союзы
+  'и', 'или', 'но', 'а', 'же', 'бы', 'то', 'ли', 'что', 'чтобы', 'как',
+  'так', 'тоже', 'также', 'зато', 'причем', 'причём', 'потому', 'поэтому',
+  'хотя', 'если', 'когда', 'пока', 'чем', 'раз', 'не', 'ни', 'да',
+  'однако',
+  // вводные обороты-кандидаты на обрыв
+  'например', 'включая', 'таким', 'следовательно', 'иными', 'особенно',
+  'главным', 'основным', 'прежде', 'затем', 'далее', 'точнее', 'условно',
+  'формально', 'фактически', 'концептуально', 'структурно', 'математически',
+  // относительные и связки
+  'который', 'которая', 'которое', 'которые', 'которых', 'которым',
+  'тем', 'где', 'куда', 'откуда', 'путем', 'путём',
+};
+
+/// Детерминированная обрезка `one_liner` до лимита так, чтобы видимый текст
+/// оставался связным куском, а не хвостом фразы.
+///
+/// Порядок попыток (первая удачная даёт результат):
+///  1. граница предложения — последняя точка/!/? внутри лимита;
+///  2. граница клаузы — последняя запятая/точка с запятой/двоеточие/тире;
+///  3. граница слова;
+///  4. в крайнем случае — жёсткий срез по [maxChars].
+///
+/// Дальше хвост чистится: снимается висящая пунктуация и [_danglingTailWords],
+/// причём петля продолжается — после удаления хвоста строка могла закончиться
+/// другим служебным словом. Гарантия инварианта: результат <= [maxChars].
 String truncateOneLiner(String s, {int maxChars = oneLinerMaxChars}) {
   if (s.length <= maxChars) return s;
-  var cut = s.substring(0, maxChars);
+  final cut = s.substring(0, maxChars);
+
+  // 1. Предпочитаем целое предложение. Знак конца предложения входит в
+  // результат: обрезанное по точке предложение должно выглядеть как
+  // законченная мысль, а не как фрагмент без точки.
+  final sentenceEnd = _lastIndexOfAny(cut, const ['. ', '! ', '? ', '.', '!', '?']);
+  if (sentenceEnd > maxChars * 0.6) {
+    final mark = const ['.', '!', '?']
+        .firstWhere((m) => cut[sentenceEnd] == m, orElse: () => '');
+    return _finalizeTruncation(
+      cut.substring(0, sentenceEnd),
+      maxChars: maxChars,
+      terminalMark: mark,
+    );
+  }
+  // 2. Иначе — клауза: запятая и подобное.
+  final clauseEnd =
+      _lastIndexOfAny(cut, const [', ', '; ', ': ', ' — ', ' – ', ',']);
+  if (clauseEnd > maxChars * 0.6) {
+    return _finalizeTruncation(cut.substring(0, clauseEnd), maxChars: maxChars);
+  }
+  // 3. Иначе — слово.
   final lastSpace = cut.lastIndexOf(' ');
   if (lastSpace > maxChars * 0.6) {
-    cut = cut.substring(0, lastSpace);
+    return _finalizeTruncation(cut.substring(0, lastSpace), maxChars: maxChars);
   }
-  return cut.trimRight();
+  // 4. Внутри лимита нет ни одной границы — жёсткий срез. Пунктуацию здесь
+  // не снимаем: это единственный шанс не вернуть пустую строку.
+  return _finalizeTruncation(cut, maxChars: maxChars, stripPunctuation: false);
+}
+
+/// Финальная чистка куска после выбора границы.
+///
+/// Гарантирует непустой результат: если чистка съела всё (строка состояла
+/// только из пунктуации), возвращается необработанный кусок — пустой
+/// `one_liner` в дереве хуже, чем неидеально обрезанный текст.
+String _finalizeTruncation(
+  String body, {
+  required int maxChars,
+  String terminalMark = '',
+  bool stripPunctuation = true,
+}) {
+  var out = stripPunctuation
+      ? _stripDanglingTail(body.trimRight(), maxChars: maxChars)
+      : body.trimRight();
+  if (out.isEmpty) out = body.trimRight();
+  if (out.isEmpty) return out;
+  if (terminalMark.isNotEmpty && out.length + terminalMark.length <= maxChars) {
+    out = '$out$terminalMark';
+  }
+  return out;
+}
+
+/// Убирает хвостовую пунктуацию и висящие служебные слова, пока фраза
+/// остаётся осмысленной. При каждом проходе [_truncateOneLiner] гарантирует,
+/// что длина не вырастет, поэтому лимит держится.
+String _stripDanglingTail(String cut, {required int maxChars}) {
+  var out = cut;
+  var changed = true;
+  while (changed) {
+    changed = false;
+    // Хвостовая пунктуация: «… процессов как,» -> «… процессов как».
+    final trimmedPunct = out.replaceFirst(RegExp(r'[\s,;:.!?’"`»)\]—–-]+$'), '');
+    if (trimmedPunct != out) {
+      out = trimmedPunct;
+      changed = true;
+      continue;
+    }
+    // Хвостовое служебное слово: «… процессов как» -> «… процессов».
+    final lastSpace = out.lastIndexOf(' ');
+    if (lastSpace <= 0) break;
+    final lastWord = out.substring(lastSpace + 1).toLowerCase();
+    if (_danglingTailWords.contains(lastWord)) {
+      out = out.substring(0, lastSpace);
+      changed = true;
+    }
+  }
+  return out.trimRight();
+}
+
+/// Индекс последнего вхождения любой из подстрок, либо -1.
+int _lastIndexOfAny(String haystack, List<String> needles) {
+  var best = -1;
+  for (final n in needles) {
+    final at = haystack.lastIndexOf(n);
+    if (at > best) best = at;
+  }
+  return best;
 }
 
 /// Сколько L3-ветвей движок держит «в полёте» одновременно.
@@ -455,6 +574,13 @@ class KnowledgeGraphEngine {
   }) generateOnelineRewrite;
   final bool Function(String rootTopic, List<String> nodePath) isCriticalDomain;
 
+  /// Типы находок валидатора, которые запускают ремонт. Остальные — стилистика
+  /// и соображения: они докладываются, но дерево не переписываются.
+  ///
+  /// Задаётся снаружи (см. `prompts.dart`), потому что движок намеренно не
+  /// знает про промпты — как и сами билдеры промптов.
+  final Set<String> blockingValidationTypes;
+
   const KnowledgeGraphEngine({
     required this.repo,
     required this.scheduler,
@@ -467,6 +593,7 @@ class KnowledgeGraphEngine {
     required this.generateContent,
     required this.generateOnelineRewrite,
     this.isCriticalDomain = _isCriticalDomainDefault,
+    this.blockingValidationTypes = const {},
   });
 
   /// Full pipeline: structure -> expand -> validate -> repair -> content.
@@ -820,7 +947,7 @@ class KnowledgeGraphEngine {
   /// формальные дефекты (exact-дубликаты подписей) считаются кодом и не
   /// требуют ни вызова сильной модели, ни её «удачи». Его `hardIssues`
   /// добавляются к issues LLM-валидации — `repair` этот тип правила умеет.
-  /// Информационные находки пре-пасса (типы 14–16, которые LLM по контракту
+  /// Информационные находки пре-пасса (MISSING_PREREQUISITE,
   /// проверять не может — в промпт не подаются `relations`/`prerequisites`/
   /// `estimatedMinutes`) уходят в [warnings] как есть, без повторов.
   ///
@@ -839,6 +966,19 @@ class KnowledgeGraphEngine {
     if (nodes.isEmpty) return nodes;
     onProgress?.call(phase, 'Проверка структуры на дубли и логические ошибки...');
     try {
+      // Циклы в графе зависимостей разрываются кодом ДО обращения к модели:
+      // участники цикла обычно не дефектны, а repair всё равно не умеет
+      // чинить связи. Заодно снимается причина ложных находок — в промпте
+      // тип CIRCULAR_DEPENDENCY объявлен критичным, но `relations` в
+      // `ValidationNodeRef` не передаются, то есть проверить его модель не
+      // может и выдумывает его вместо того, чтобы смотреть на другие узлы.
+      final broken = breakDependencyCycles(nodes);
+      if (broken.nodes != nodes) {
+        nodes = broken.nodes;
+        for (final note in broken.notes) {
+          if (!warnings.contains(note)) warnings.add(note);
+        }
+      }
       final deterministic = deterministicValidate(nodes);
       for (final note in deterministic.notes) {
         // Пре-пасс прогоняется на каждой точке пайплайна, поэтому один и тот же
@@ -846,10 +986,31 @@ class KnowledgeGraphEngine {
         if (!warnings.contains(note)) warnings.add(note);
       }
       final validation = await _validate(nodes, focusIds);
-      if (!validation.valid || deterministic.hardIssues.isNotEmpty) {
+      // Решение о ремонте принимается по ТИПУ находок, а не по флагу `valid`
+      // модели. Раньше правило «valid=false при любой находке» в промпте
+      // приводило к тому, что валидатор отвергал здоровое дерево и запускал
+      // полный repair-проход впустую (≈2.6 руб на прогон, замерено).
+      final blocking = validation.issues
+          .where((i) => blockingValidationTypes.contains(i.type))
+          .toList();
+      final advisory = validation.issues
+          .where((i) => !blockingValidationTypes.contains(i.type))
+          .toList();
+      // Сводка нужна для разбора прогонов: без неё неизвестно, что именно
+      // валидатор счёл проблемой и почему дерево чинили.
+      final verdictNote = 'Валидация (${nodes.length} узл.): вердикт '
+          'valid=${validation.valid}, '
+          'блокирующих=${blocking.length}, некритичных=${advisory.length}'
+          '${blocking.isEmpty ? '' : ' [${blocking.map((i) => i.type).toSet().join(', ')}]'}'
+          '${advisory.isEmpty ? '' : '; рекомендации: ${advisory.map((i) => i.type).toSet().join(', ')}'}';
+      if (!warnings.contains(verdictNote)) warnings.add(verdictNote);
+      // Модель может ошибиться в `valid`; верим типизированным находкам.
+      final needsRepair =
+          blocking.isNotEmpty || deterministic.hardIssues.isNotEmpty;
+      if (needsRepair) {
         final allIssues = <ValidationIssue>[
           ...deterministic.hardIssues,
-          ...validation.issues,
+          ...blocking,
         ];
         if (!repairBudget.tryConsume(warnings)) {
           return nodes;
@@ -1541,7 +1702,7 @@ typedef DeterministicValidation =
 
 /// Типы `relations`, образующие граф зависимостей.
 ///
-/// Только они участвуют в поиске цикла (тип 15 в промпте `validate`): связь
+/// Только они участвуют в поиске CIRCULAR_DEPENDENCY: связь
 /// `related`/`contrasts_with`/`example_of` цикла по смыслу не создаёт.
 const Set<String> _dependencyRelationTypes = {
   'requires',
@@ -1549,7 +1710,7 @@ const Set<String> _dependencyRelationTypes = {
   'enables',
 };
 
-/// Порог `UNREALISTIC_TIMING` (тип 16): оценка времени ОДНОГО узла выше этого
+/// Порог `UNREALISTIC_TIMING`: оценка времени ОДНОГО узла выше этого
 /// предела нереалистична. Сумму по поддереву НЕ считаем: в драфтах L1/L2/L3
 /// детей может ещё не быть, и сумма получилась бы по неполному дереву.
 const int maxMinutesPerNode = 120;
@@ -1558,13 +1719,13 @@ const int maxMinutesPerNode = 120;
 ///
 /// Зачем он нужен. `ValidationNodeRef` (ровно то, что уходит в промпт
 /// `validate`) не содержит ни `relations`, ни `prerequisites`, ни
-/// `estimatedMinutes`, поэтому типы 14–16 (`MISSING_PREREQUISITE`,
+/// `estimatedMinutes`, поэтому три типа (`MISSING_PREREQUISITE`,
 /// `CIRCULAR_DEPENDENCY`, `UNREALISTIC_TIMING`) модель проверить физически
 /// не может — их считает код. Точный дубликат подписей тоже надёжнее ловится
 /// кодом, чем «на глаз» сильной моделью.
 ///
 /// Контракт возврата:
-///  * [hardIssues] — только `DUPLICATE` (тип 1): инвалидирует дерево и чинится
+///  * [hardIssues] — только `DUPLICATE`: инвалидирует дерево и чинится
 ///    `repair`-ом, у которого для этого типа есть правило;
 ///  * [notes] — информационные находки (14–16): дерево не инвалидируют и
 ///    `repair` их не чинит, но они попадают в `warnings`, чтобы дефект не
@@ -1582,7 +1743,7 @@ DeterministicValidation deterministicValidate(List<NodeDraft> nodes) {
 
   final ids = {for (final n in nodes) n.id};
 
-  // 1. exact-DUPLICATE (тип 1, инвалидирует): совпадает нормализованная
+  // 1. exact-DUPLICATE (инвалидирует): совпадает нормализованная
   //    подпись. Порядок — по узлам; проблемой помечается второй узел пары.
   final firstIdByTitle = <String, String>{};
   for (final n in nodes) {
@@ -1601,7 +1762,7 @@ DeterministicValidation deterministicValidate(List<NodeDraft> nodes) {
     ));
   }
 
-  // 2. MISSING_PREREQUISITE (тип 14, note): ссылки в `relations.to` и в
+  // 2. MISSING_PREREQUISITE (note): ссылки в `relations.to` и в
   //    `prerequisites` на узлы, которых в дереве нет. Повторы одной и той же
   //    пары «узел → цель» схлопываются, порядок — по узлам и по relations.
   final missingSeen = <String>{};
@@ -1618,10 +1779,11 @@ DeterministicValidation deterministicValidate(List<NodeDraft> nodes) {
     }
   }
 
-  // 3. CIRCULAR_DEPENDENCY (тип 15, note): циклы в графе зависимостей.
+  // 3. CIRCULAR_DEPENDENCY (note): циклы в графе зависимостей. К моменту
+  //    доезжают до пре-пасса уже разорванными — см. breakDependencyCycles.
   notes.addAll(_circularDependencyNotes(nodes, ids));
 
-  // 4. UNREALISTIC_TIMING (тип 16, note): оценка времени самого узла.
+  // 4. UNREALISTIC_TIMING (note): оценка времени самого узла.
   for (final n in nodes) {
     final minutes = n.estimatedMinutes;
     if (minutes == null || minutes <= maxMinutesPerNode) continue;
@@ -1685,6 +1847,98 @@ List<String> _circularDependencyNotes(
   return notes;
 }
 
+/// Разрывает циклы в графе зависимостей детерминированно.
+///
+/// Обход — тот же DFS с тремя цветами и по тем же правилам, что и
+/// [_circularDependencyNotes]: корни в порядке входного списка, цели рёбер в
+/// порядке `relations`, рёбра на несуществующие узлы пропускаются (их ловит
+/// `MISSING_PREREQUISITE`). Удаляется только «обратное» ребро — то, чья цель
+/// ещё лежит в стеке обхода, — потому что именно оно замыкает цикл, а
+/// остальные рёбра цикла несут смысл и остаются. Набор обратных рёбер
+/// DFS-леса даёт ациклический граф, поэтому одного прохода достаточно.
+///
+/// Почему без вызова модели. Цикл в `requires`/`depends_on` делает порядок
+/// изучения противоречивым («A требует B» и «B требует A»), но чинить его
+/// repair-ом бессмысленно: узлы-участники как правило вовсе не дефектны, ложна
+/// связь между ними. Удаление одного ребра — точное минимальное исправление,
+/// детерминированное и бесплатное: поведение движка не должно зависеть от
+/// удачи модели.
+///
+/// Раньше циклы попадали только в `notes` пре-пасса и доходили до пользователя
+/// вместе с готовым деревом (замерено на живом прогоне: циклы `n2_1 → n2_2 → n2_1`
+/// и `n2_2 → n2_3 → n2_2`, repair при этом не запускался вовсе).
+///
+/// Возвращает исправленный список узлов и список разорванных циклов — он
+/// уходит в `warnings`, чтобы правка была видна, а не молчаливой.
+({List<NodeDraft> nodes, List<String> notes}) breakDependencyCycles(
+  List<NodeDraft> nodes,
+) {
+  final ids = {for (final n in nodes) n.id};
+  if (nodes.isEmpty || ids.isEmpty) {
+    return (nodes: nodes, notes: const <String>[]);
+  }
+
+  final edges = <String, List<String>>{};
+  for (final n in nodes) {
+    for (final r in n.relations ?? const <RawRelation>[]) {
+      if (!_dependencyRelationTypes.contains(r.type)) continue;
+      if (!ids.contains(r.from) || !ids.contains(r.to)) continue;
+      final targets = edges.putIfAbsent(r.from, () => <String>[]);
+      if (!targets.contains(r.to)) targets.add(r.to);
+    }
+  }
+  if (edges.isEmpty) return (nodes: nodes, notes: const <String>[]);
+
+  // Узел-источник -> цели рёбер, которые удаляем.
+  final dropped = <String, Set<String>>{};
+  final notes = <String>[];
+  final reported = <String>{};
+  final color = <String, int>{for (final id in ids) id: 0};
+  final stack = <String>[];
+
+  void dfs(String id) {
+    color[id] = 1;
+    stack.add(id);
+    for (final to in edges[id] ?? const <String>[]) {
+      final state = color[to] ?? 0;
+      if (state == 0) {
+        dfs(to);
+      } else if (state == 1) {
+        // `to` ещё в стеке — ребро `id → to` замыкает цикл и удаляется.
+        // Сюда же попадают петли `id → id`.
+        (dropped[id] ??= <String>{}).add(to);
+        final cycle = [...stack.sublist(stack.indexOf(to)), to];
+        if (reported.add(cycle.join('>'))) {
+          notes.add('CIRCULAR_DEPENDENCY разорван: ${cycle.join(' → ')} '
+              '(удалена связь $id → $to)');
+        }
+      }
+    }
+    stack.removeLast();
+    color[id] = 2;
+  }
+
+  for (final n in nodes) {
+    if ((color[n.id] ?? 0) == 0) dfs(n.id);
+  }
+  if (dropped.isEmpty) return (nodes: nodes, notes: const <String>[]);
+
+  final out = nodes
+      .map((n) {
+        final dead = dropped[n.id];
+        final relations = n.relations;
+        if (dead == null || relations == null) return n;
+        return n.copyWith(
+          relations: relations
+              .where((r) => !(_dependencyRelationTypes.contains(r.type) &&
+                  dead.contains(r.to)))
+              .toList(),
+        );
+      })
+      .toList();
+  return (nodes: out, notes: notes);
+}
+
 /// Applies repair results to the tree. A problematic node is replaced only if
 /// the repair returned a node with the same id; newly-created nodes are added.
 List<NodeDraft> mergeRepairs(List<NodeDraft> nodes, List<NodeDraft> repaired) {
@@ -1699,14 +1953,45 @@ List<NodeDraft> mergeRepairs(List<NodeDraft> nodes, List<NodeDraft> repaired) {
 
 /// Collapses exact duplicates and renames remaining id collisions, updating
 /// parentId references so the tree stays internally consistent.
+///
+/// Схлопывает и ДУБЛИ ПОДПИСЕЙ среди сиблингов. Раньше этого не делал никто:
+/// `deterministicValidate` помечает совпадающие нормализованные подписи как
+/// `DUPLICATE` и этим запускает repair, но автоматического фиксера у
+/// такой находки не существовало: `existing` ищется здесь по `id`, а у дублей
+/// подписей id разные. На живом прогоне так дубль и доходил до пользователя —
+/// «Алгоритмы адаптивной оптимизации» встречался дважды.
+///
+/// Ключ сравнения — тот же `_normalizeTitle`, что и у детектора. Это принципи-
+/// ально: иначе флаг поднимался на «Регуляризация» против «  регуляризация  »,
+/// а схлопнуть их было нечем, и находка оставалась неустранимой без удачи
+/// модели. Слияние допускается только среди сиблингов (один `parentId` и один
+/// `level`): узлы из разных ветвей объединять нельзя — сломалась бы структура.
+///
+/// Поглощённый узел не исчезает бесследно: его `id` попадает в `idMap`, а все
+/// ссылки на него — `parentId` детей, `relations`, `prerequisites` —
+/// переписываются на выживший узел. Иначе дети стали бы сиротами.
 List<NodeDraft> dedupeNodeIds(List<NodeDraft> nodes) {
   final seen = <String>{};
   final out = <NodeDraft>[];
   // original id -> new unique id (for all, including unchanged ids).
   final idMap = <String, String>{};
+  // Ключ сиблингов -> id выжившего узла с такой же подписью.
+  final survivorByLabel = <String, String>{};
 
   for (final n in nodes) {
     if (n.id.isEmpty) continue;
+
+    // Дубль подписи среди сиблингов: узел поглощается выжившим.
+    final label = _normalizeTitle(n.title);
+    final labelKey = '${n.parentId ?? ''}|${n.level}|$label';
+    if (label.isNotEmpty) {
+      final survivorId = survivorByLabel[labelKey];
+      if (survivorId != null && survivorId != n.id) {
+        idMap[n.id] = survivorId;
+        continue;
+      }
+    }
+
     final existing = _firstWhereOrNull(out, (o) => o.id == n.id);
     final isExactDup = existing != null &&
         existing.title == n.title &&
@@ -1718,8 +2003,8 @@ List<NodeDraft> dedupeNodeIds(List<NodeDraft> nodes) {
     }
 
     var newId = n.id;
-    if (seen.contains(n.id)) {
-      final base = n.id.replaceFirst(RegExp(r'-\d+$'), '');
+    if (seen.contains(newId)) {
+      final base = newId.replaceFirst(RegExp(r'-\d+$'), '');
       var i = 1;
       do {
         newId = '$base-$i';
@@ -1730,22 +2015,33 @@ List<NodeDraft> dedupeNodeIds(List<NodeDraft> nodes) {
     if (!idMap.containsKey(n.id)) {
       idMap[n.id] = newId;
     }
+    if (label.isNotEmpty) {
+      survivorByLabel[labelKey] = newId;
+    }
     out.add(n.copyWith(id: newId));
   }
 
-  // Rewrite parentId references according to the renames.
+  // Rewrite references according to the renames and the merges. Ссылка на
+  // саму себя после слияния бессмысленна — такие выкидываем.
+  String mapRef(String id) => idMap[id] ?? id;
+
   return out
       .map((n) {
         final parentId = n.parentId;
-        if (parentId != null &&
-            parentId != n.id &&
-            idMap.containsKey(parentId)) {
-          final mapped = idMap[parentId]!;
-          if (mapped != parentId) {
-            return n.copyWith(parentId: () => mapped);
-          }
-        }
-        return n;
+        final mappedParent =
+            parentId != null && parentId != n.id ? mapRef(parentId) : null;
+        final relations = n.relations;
+        final prerequisites = n.prerequisites;
+        return n.copyWith(
+          parentId: mappedParent != null ? () => mappedParent : null,
+          relations: relations
+              ?.map((r) =>
+                  (from: r.from, to: mapRef(r.to), type: r.type, label: r.label))
+              .where((r) => r.to != n.id)
+              .toList(),
+          prerequisites:
+              prerequisites.map(mapRef).where((p) => p != n.id).toList(),
+        );
       })
       .toList();
 }

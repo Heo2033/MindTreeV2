@@ -44,9 +44,11 @@ MindTree probe — headless прогон доменных движков.
   --minutes <N>        Бюджет времени, минут. По умолчанию 30.
   --out <каталог>      Куда положить отчёты. По умолчанию build/probe.
   --mock               Детерминированный прогон без сети (fake LLM).
-  --concurrency <N>    maxConcurrency scheduler для живого прогона.
-                       По умолчанию 2; для замера ускорения можно поднять
-                       до 4–5 (RPM=10 это допускает).
+--concurrency <N>    maxConcurrency scheduler для живого прогона.
+                      По умолчанию 6 (контент-пул и L3-ветви
+                      конкурентные).
+  --rpm <N>           maxRPM scheduler, по умолчанию 60.
+  --rpd <N>           maxRPD scheduler, по умолчанию 500.
   --max-nodes <N>      Ограничить число узлов дерева. 0 — без лимита.
   --skip-content       Не генерировать контент узлов.
   --skip-session       Не проходить учебную сессию и всё, что после неё.
@@ -105,11 +107,14 @@ Future<void> main(List<String> args) async {
             maxConcurrency: 1,
           )
         : SchedulerConfig(
-            maxRPM: 10,
-            maxRPD: 500,
-            // Живой прогон: параллельность можно поднять флагом --concurrency
-            // (RPM=10 это допускает; контент-пул и L3-ветви уже конкурентные).
-            maxConcurrency: opts.concurrency > 0 ? opts.concurrency : 2,
+            // Живой прогон: лимиты задаются флагами --rpm/--rpd/--concurrency.
+            // Замер бурстом (tool/probe/bin/rpm_probe.dart) показал, что
+            // провайдер держит 88–410 вызовов/мин без 429, поэтому значения
+            // по умолчанию здесь такие же, как в приложении, и не душат
+            // пайплайн: контент-пул и L3-ветви конкурентные.
+            maxRPM: opts.rpm,
+            maxRPD: opts.rpd,
+            maxConcurrency: opts.concurrency > 0 ? opts.concurrency : 6,
             maxRetries: 2,
             opDeadlineMs: 300000,
           ),
@@ -189,6 +194,8 @@ class _Args {
   final String out;
   final bool mock;
   final int concurrency;
+  final int rpm;
+  final int rpd;
   final int maxNodes;
   final bool skipContent;
   final bool skipSession;
@@ -203,6 +210,8 @@ class _Args {
     required this.out,
     required this.mock,
     required this.concurrency,
+    required this.rpm,
+    required this.rpd,
     required this.maxNodes,
     required this.skipContent,
     required this.skipSession,
@@ -219,6 +228,8 @@ _Args? _parseArgs(List<String> argv) {
   var out = 'build/probe';
   var mock = false;
   var concurrency = 0;
+  var rpm = 60;
+  var rpd = 500;
   var maxNodes = 0;
   var skipContent = false;
   var skipSession = false;
@@ -287,7 +298,23 @@ _Args? _parseArgs(List<String> argv) {
           stderr.writeln('--concurrency должно быть числом.');
           return null;
         }
-        concurrency = int.parse(v);
+concurrency = int.parse(v);
+      i++;
+      case '--rpm':
+        final r = valueFor('--rpm');
+        if (r == null || int.tryParse(r) == null) {
+          stderr.writeln('--rpm должно быть числом.');
+          return null;
+        }
+        rpm = int.parse(r);
+        i++;
+      case '--rpd':
+        final r = valueFor('--rpd');
+        if (r == null || int.tryParse(r) == null) {
+          stderr.writeln('--rpd должно быть числом.');
+          return null;
+        }
+        rpd = int.parse(r);
         i++;
       case '--skip-content':
         skipContent = true;
@@ -315,6 +342,8 @@ _Args? _parseArgs(List<String> argv) {
     out: out,
     mock: mock,
     concurrency: concurrency,
+    rpm: rpm,
+    rpd: rpd,
     maxNodes: maxNodes,
     skipContent: skipContent,
     skipSession: skipSession,
@@ -343,23 +372,59 @@ llm_client.LLMConfig? _readRealConfig() {
       modelStrong: _jsonString(raw, 'LLM_MODEL_STRONG') ?? '',
       modelStrongFallback: _jsonString(raw, 'LLM_MODEL_STRONG_FALLBACK') ?? '',
       modelFast: _jsonString(raw, 'LLM_MODEL_FAST') ?? '',
-      temperature: 0.4,
+      temperature: _jsonDouble(raw, 'LLM_TEMPERATURE') ?? 0.4,
       numCtx: 8192,
       timeoutMs: 180000,
+      maxOutputTokens: _jsonInt(raw, 'LLM_MAX_OUTPUT_TOKENS') ?? 16384,
+      reasoningMaxTokens: _jsonInt(raw, 'LLM_REASONING_MAX_TOKENS'),
+      reasoningEffort: _reasoningEffort(raw),
     );
   } catch (_) {
     return null;
   }
 }
 
+/// Уровень reasoning из конфига провайдера.
+///
+/// Пустое или недопустимое значение = поле `reasoning` не отправляется.
+/// Валидные: none | minimal | low | medium | high | xhigh | max.
+String _reasoningEffort(String raw) {
+  final v = (_jsonString(raw, 'LLM_REASONING_EFFORT') ?? '').trim().toLowerCase();
+  const allowed = {
+    'none',
+    'minimal',
+    'low',
+    'medium',
+    'high',
+    'xhigh',
+    'max',
+  };
+  return allowed.contains(v) ? v : 'none';
+}
+
 /// Достаёт строковое значение ключа верхнего уровня из плоского JSON.
 ///
 /// Экстрагирован, чтобы не печатать содержимое конфига в лог и не тянуть
-/// полноценный парсер там, где файла три поля.
+/// полноценный парсер там, где файл — плоский список полей.
 String? _jsonString(String raw, String key) {
   final pattern = RegExp('"$key"\\s*:\\s*"([^"]*)"');
   final m = pattern.firstMatch(raw);
   return m?.group(1);
+}
+
+/// То же для числового поля (в JSON может прийти и как число, и как строка).
+double? _jsonDouble(String raw, String key) {
+  final pattern = RegExp('"$key"\\s*:\\s*(?:"([^"]*)"|([0-9]+(?:\\.[0-9]+)?))');
+  final m = pattern.firstMatch(raw);
+  if (m == null) return null;
+  return double.tryParse(m.group(1) ?? m.group(2) ?? '');
+}
+
+int? _jsonInt(String raw, String key) {
+  final pattern = RegExp('"$key"\\s*:\\s*(?:"([^"]*)"|([0-9]+))');
+  final m = pattern.firstMatch(raw);
+  if (m == null) return null;
+  return int.tryParse(m.group(1) ?? m.group(2) ?? '');
 }
 
 /// Склейка пути с учётом Windows-разделителя.

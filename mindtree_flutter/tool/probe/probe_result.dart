@@ -6,6 +6,7 @@
 // Всё недетерминированное живёт в `RunStats` и попадает только в
 // `run-stats.json`.
 
+import 'package:mindtree_flutter/data/llm/telemetry.dart';
 import 'package:mindtree_flutter/domain/engines/diagnostic_engine.dart';
 import 'package:mindtree_flutter/domain/engines/mastery_engine.dart';
 import 'package:mindtree_flutter/domain/models/activity.dart';
@@ -153,6 +154,73 @@ class QueryOutcome {
   });
 }
 
+/// Расход одной операции LLM: сколько раз звали и сколько токенов сожгли.
+///
+/// Считается из телеметрии scheduler (`OperationTelemetry`), которая уже
+/// различает операции — проба лишь агрегирует её по `operation`.
+class OpUsage {
+  final int calls;
+
+  /// Сумма `retryCount` по вызовам операции: 0 — ни один вызов не повторялся.
+  final int retries;
+
+  final int inputTokens;
+  final int outputTokens;
+
+  /// Токены рассуждений — часть [outputTokens].
+  ///
+  /// Отделены от «полезного» вывода, потому что именно они обычно съедают
+  /// бюджет: на живом прогоне reasoning составлял ~99% вывода операции
+  /// `oneline-rewrite`, чей реальный ответ — одна короткая фраза.
+  final int reasoningTokens;
+
+  /// Сумма `usage.cost_rub` от провайдера; `null`, если он её не отдавал.
+  ///
+  /// Это авторитетная стоимость в рублях: считать её по каталогу в probe
+  /// нельзя — тарифы меняются, а у части провайдеров есть ступенчатые тарифы
+  /// по длине промпта.
+  final double? costRub;
+
+  /// Модели, реально отработавшие на этой операции (отсортированы).
+  ///
+  /// Не пусто даже при провале: scheduler пишет телеметрию и на неуспешной
+  /// попытке с замерами, поэтому видно, какой вендор упал.
+  final List<String> models;
+
+  const OpUsage({
+    required this.calls,
+    this.retries = 0,
+    required this.inputTokens,
+    required this.outputTokens,
+    this.reasoningTokens = 0,
+    this.costRub,
+    this.models = const [],
+  });
+
+  OpUsage merge(OperationTelemetry op) {
+    final hasRub = costRub != null || op.costRub != null;
+    return OpUsage(
+      calls: calls + 1,
+      retries: retries + op.retryCount,
+      inputTokens: inputTokens + op.inputTokens,
+      outputTokens: outputTokens + op.outputTokens,
+      reasoningTokens: reasoningTokens + op.reasoningTokens,
+      costRub: hasRub ? (costRub ?? 0) + (op.costRub ?? 0) : null,
+      models: {...models, op.model}.toList()..sort(),
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'calls': calls,
+        'retries': retries,
+        'inputTokens': inputTokens,
+        'outputTokens': outputTokens,
+        'reasoningTokens': reasoningTokens,
+        if (costRub != null) 'costRub': costRub,
+        'models': models,
+      };
+}
+
 /// Агрегаты по LLM: детерминированные счётчики (без времени).
 class LlmStats {
   /// Сколько раз вызывался scheduler за прогон.
@@ -161,21 +229,45 @@ class LlmStats {
   /// Разбивка по видам промптов, ключи отсортированы.
   final Map<String, int> callsByKind;
 
+  /// Разбивка токенов и ретраев по видам промптов, ключи отсортированы.
+  ///
+  /// Раньше probe отдавал только агрегат, и стоимость прогона приходилось
+  /// оценивать «на глаз», распределяя токены по операциям — это давало
+  /// неверные числа. Теперь каждый вид промпта виден со своей долей.
+  final Map<String, OpUsage> usageByKind;
+
+  /// Все модели, отработавшие в прогоне (отсортированы).
+  final List<String> modelsUsed;
+
   final int inputTokens;
   final int outputTokens;
+
+  /// Сумма reasoning-токенов по прогону (часть [outputTokens]).
+  final int reasoningTokens;
+
+  /// Сумма `usage.cost_rub` от провайдера; `null`, если он её не отдавал.
+  final double? costRub;
 
   const LlmStats({
     required this.calls,
     required this.callsByKind,
+    this.usageByKind = const {},
+    this.modelsUsed = const [],
     required this.inputTokens,
     required this.outputTokens,
+    this.reasoningTokens = 0,
+    this.costRub,
   });
 
   Map<String, dynamic> toJson() => {
         'calls': calls,
         'callsByKind': callsByKind,
+        'usageByKind': {for (final e in usageByKind.entries) e.key: e.value.toJson()},
+        'modelsUsed': modelsUsed,
         'inputTokens': inputTokens,
         'outputTokens': outputTokens,
+        'reasoningTokens': reasoningTokens,
+        if (costRub != null) 'costRub': costRub,
       };
 }
 

@@ -37,7 +37,7 @@ ${ALPHABET_RULE}
 
 # Онтологический контракт
 Для КАЖДОГО узла сгенерируй:
-- **canonical_definition** — строгое определение (1–2 предложения). Это источник истины. Content-модель будет основываться на нём.
+- **canonical_definition** — строгое определение. Это источник истины. Content-модель будет основываться на нём. СТРОГО ОДНО предложение, не длиннее 120 символов — это поле становится one_liner в дереве, и всё что длиннее, будет обрезано на полуслове. Жадность здесь оборачивается обрывом фразы.
 - **semantic_axis** — ось классификации. Один из: architecture, process, sampling, representation, loss, encoding, conditioning, application, theory, evaluation.
 - **forbidden_interpretations** — массив из 1–3 запрещённых интерпретаций.
 - **conceptType** — "topic", "concept", "component", "mechanism", "process", "property", "rule", "method", "example".

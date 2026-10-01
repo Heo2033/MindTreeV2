@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:mindtree_flutter/domain/engines/knowledge_graph_engine.dart';
 import 'package:mindtree_flutter/domain/engines/scoped_ids.dart';
 import 'package:mindtree_flutter/domain/lib/tree_validation.dart';
 import 'package:mindtree_flutter/domain/models/models.dart';
@@ -331,10 +332,15 @@ List<KnowledgeNode> flattenNodes(
   return out;
 }
 
+/// Импорт/экспорт: кламп лимита `one_liner`.
+///
+/// Зеркало доменного `truncateOneLiner` — важно и синтаксически безопасно
+/// (граница предложения/клаузы/слова + снятие висящих служебных слов), и
+/// просто: сырой `substring` обрывал фразы посреди слова прямо в экспорте.
 String _truncateOneLiner(String value, void Function(String)? onWarning) {
   if (value.length <= kOneLinerMaxLength) return value;
   onWarning?.call('one_liner длиннее $kOneLinerMaxLength символов — обрезан');
-  return value.substring(0, kOneLinerMaxLength);
+  return truncateOneLiner(value, maxChars: kOneLinerMaxLength);
 }
 
 /// Семантическая проверка импорта. Непустой результат блокирует импорт.

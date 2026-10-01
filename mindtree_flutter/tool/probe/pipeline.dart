@@ -262,7 +262,10 @@ Future<ProbeResult> runPipeline(
       // приложение (`_fillContentBackground`). Сортировка в отчёте всё равно
       // детерминированная (`sortNodesForReport`), поэтому порядок завершения
       // вызовов на report.json не влияет.
-      const concurrency = 4;
+      // Ширина пула держится на уровне `SchedulerConfig.maxConcurrency`
+      // (по умолчанию 6), иначе пул упирается в лимит планировщика и часть
+      // параллелизма теряется.
+      const concurrency = 6;
       var next = 0;
       int takeNext() => next < targets.length ? next++ : -1;
       await Future.wait([
@@ -553,21 +556,51 @@ Future<ProbeResult> runPipeline(
 }
 
 /// Детерминированные агрегаты по LLM из телеметрии scheduler.
+///
+/// Телеметрия уже различает операции (`OperationTelemetry.operation`), поэтому
+/// разбивка по видам промптов и по токенам считается здесь, а не на стороне
+/// клиента: агрегат без разбивки не позволяет честно посчитать стоимость
+/// отдельных операций.
 LlmStats _llmStats(TreeScheduler scheduler) {
   final telemetry = scheduler.telemetry;
   final aggregate = telemetry.aggregateStats();
-  // Считаем сами: `aggregateStats` не даёт разбивки по видам промптов.
+  final ops = telemetry.recentOperations(limit: 10000);
+
   final byKind = <String, int>{};
-  for (final op in telemetry.recentOperations(limit: 10000)) {
+  final usage = <String, OpUsage>{};
+  final models = <String>{};
+  for (final op in ops) {
     byKind.update(op.operation, (v) => v + 1, ifAbsent: () => 1);
+    usage.update(
+      op.operation,
+      (v) => v.merge(op),
+      ifAbsent: () => OpUsage(
+        calls: 1,
+        retries: op.retryCount,
+        inputTokens: op.inputTokens,
+        outputTokens: op.outputTokens,
+        reasoningTokens: op.reasoningTokens,
+        costRub: op.costRub,
+        models: [op.model],
+      ),
+    );
+    if (op.model.isNotEmpty) models.add(op.model);
   }
-  final sorted = <String, int>{
+
+  final sortedKinds = <String, int>{
     for (final key in byKind.keys.toList()..sort()) key: byKind[key]!,
+  };
+  final sortedUsage = <String, OpUsage>{
+    for (final key in usage.keys.toList()..sort()) key: usage[key]!,
   };
   return LlmStats(
     calls: aggregate.count,
-    callsByKind: sorted,
+    callsByKind: sortedKinds,
+    usageByKind: sortedUsage,
+    modelsUsed: models.toList()..sort(),
     inputTokens: aggregate.totalInput,
     outputTokens: aggregate.totalOutput,
+    reasoningTokens: aggregate.totalReasoningTokens,
+    costRub: aggregate.totalCostRub,
   );
 }

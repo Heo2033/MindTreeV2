@@ -130,8 +130,54 @@ class _AlwaysInvalidLlm extends FakeLlm {
   }
 }
 
-// ─── Обвязка ──────────────────────────────────────────────────────────────────
+/// Валидатор отвергает дерево, но только по стилистическим типам: ремонт
+/// такие находки не чинит.
+class _AdvisoryOnlyLlm extends FakeLlm {
+  @override
+  String respondTo(PromptKind kind, String prompt) {
+    if (kind == PromptKind.validate) {
+      return jsonEncode({
+        'valid': false,
+        'issues': <Map<String, dynamic>>[
+          {
+            'type': 'COVERAGE',
+            'node_id': 'n1_root',
+            'reason': 'можно было бы добавить ещё одну категорию'
+          },
+          {
+            'type': 'OVERLY_BROAD',
+            'node_id': 'n1_root',
+            'reason': 'узел можно расширить'
+          },
+        ],
+        'missing_concepts': <Map<String, dynamic>>[],
+        'should_expand': false,
+      });
+    }
+    return super.respondTo(kind, prompt);
+  }
+}
 
+/// Валидатор ставит `valid: true`, но перечисляет блокирующий тип: флагу модели
+/// нельзя доверять, ремонт обязан сработать.
+class _ValidFlagWithBlockingLlm extends FakeLlm {
+  @override
+  String respondTo(PromptKind kind, String prompt) {
+    if (kind == PromptKind.validate) {
+      return jsonEncode({
+        'valid': true,
+        'issues': <Map<String, dynamic>>[
+          {'type': 'DUPLICATE', 'node_id': 'n1_root', 'reason': 'дубль понятия'},
+        ],
+        'missing_concepts': <Map<String, dynamic>>[],
+        'should_expand': false,
+      });
+    }
+    return super.respondTo(kind, prompt);
+  }
+}
+
+// ─── Обвязка ──────────────────────────────────────────────────────────────────
 MindtreeEngines _engines(MindtreeDb db, FakeLlm fake,
     {int maxConcurrency = 1}) {
   return buildEngines(
@@ -548,6 +594,229 @@ void main() {
           isEmpty,
           reason: 'отказ сильной модели недопустим: ${result.warnings}');
       _expectTreeInvariants(result.nodes);
+    });
+  });
+
+  group('валидация не запускает ремонт без блокирующих находок', () {
+    // Регрессия на замере: до разделения типов валидатор отвергал здоровое
+    // дерево (2 прогона из 2) по стилистическим придиркам, и каждый отказ
+    // стоил ~1.24 руб (validate) + ремонт. Решение теперь принимается по типу
+    // находки, а не по флагу `valid` модели.
+    test('valid=false только с некритичными типами → repair не вызывается',
+        () async {
+      final fake = _AdvisoryOnlyLlm();
+      final result = await _generate(fake);
+
+      expect(fake.callsByKind['validate'], 2,
+          reason: 'валидация вызывается в тех же двух точках пайплайна');
+      expect(fake.callsByKind['repair'] ?? 0, 0,
+          reason: 'некритичные находки не чинятся ремонтом');
+
+      // Сводка вердикта обязана попасть в warnings — иначе прогон нечем разбирать.
+      final verdicts =
+          result.warnings.where((w) => w.startsWith('Валидация (')).toList();
+      expect(verdicts, hasLength(2), reason: '${result.warnings}');
+      expect(verdicts.first, contains('блокирующих=0'));
+      expect(verdicts.first, contains('некритичных=2'));
+      expect(verdicts.first, contains('COVERAGE'));
+      _expectTreeInvariants(result.nodes);
+    });
+
+    test('блокирующий тип запускает ремонт даже при valid=true', () async {
+      final fake = _ValidFlagWithBlockingLlm();
+      await _generate(fake);
+
+      expect(fake.callsByKind['repair'], isNotNull,
+          reason: 'тип находки важнее флага valid');
+    });
+  });
+
+  group('детерминированное схлопывание дублей подписей', () {
+    // Регресс: `deterministicValidate` помечает совпадающие нормализованные
+    // подписи как DUPLICATE, но автоматического фиксера у такой находки не
+    // было — `dedupeNodeIds` искал «уже существующий» узел по id, а у дублей
+    // подписей id разные. На живом прогоне «Алгоритмы адаптивной оптимизации»
+    // доезжали до пользователя дважды.
+
+    test('дубли среди сиблингов схлопываются по нормализованной подписи', () {
+      final out = dedupeNodeIds(const [
+        NodeDraft(id: 'n1', title: 'Корень'),
+        NodeDraft(id: 'n2_1', title: 'Основы', parentId: 'n1', level: 2),
+        NodeDraft(id: 'n2_2', title: '  основы  ', parentId: 'n1', level: 2),
+        NodeDraft(id: 'n2_3', title: 'Применение', parentId: 'n1', level: 2),
+      ]);
+      expect(out.map((n) => n.id), ['n1', 'n2_1', 'n2_3']);
+      // И выживший узел — первый из пары, а не второй.
+      expect(out[1].title, 'Основы');
+    });
+
+    test('ребёнок поглощённого узла переподчиняется, а не осиротевает', () {
+      final out = dedupeNodeIds(const [
+        NodeDraft(id: 'n1', title: 'Корень'),
+        NodeDraft(id: 'n2_1', title: 'Основы', parentId: 'n1', level: 2),
+        NodeDraft(id: 'n2_2', title: 'основы', parentId: 'n1', level: 2),
+        NodeDraft(id: 'n3_1', title: 'Часть', parentId: 'n2_2', level: 3),
+      ]);
+      final child = out.firstWhere((n) => n.id == 'n3_1');
+      expect(child.parentId, 'n2_1',
+          reason: 'ребёнок дубликата должен перейти к выжившему узлу');
+      final ids = out.map((n) => n.id).toSet();
+      expect(out.where((n) => n.parentId != null).every((n) => ids.contains(n.parentId)),
+          isTrue,
+          reason: 'сирот быть не должно ни одного');
+    });
+
+    test('relations и prerequisites на поглощённый узел перенаправляются', () {
+      final out = dedupeNodeIds(const [
+        NodeDraft(id: 'n1', title: 'Корень'),
+        NodeDraft(id: 'n2_1', title: 'Основы', parentId: 'n1', level: 2),
+        NodeDraft(id: 'n2_2', title: 'основы', parentId: 'n1', level: 2),
+        NodeDraft(
+          id: 'n2_3',
+          title: 'Применение',
+          parentId: 'n1',
+          level: 2,
+          relations: [
+            (from: 'n2_3', to: 'n2_2', type: 'related', label: null),
+          ],
+          prerequisites: ['n2_2'],
+        ),
+      ]);
+      final node = out.firstWhere((n) => n.id == 'n2_3');
+      expect(node.relations!.single.to, 'n2_1');
+      expect(node.prerequisites, ['n2_1']);
+    });
+
+    test('одинаковые подписи в РАЗНЫХ ветвях не сливаются', () {
+      final out = dedupeNodeIds(const [
+        NodeDraft(id: 'n1', title: 'Корень'),
+        NodeDraft(id: 'n2_1', title: 'Оптимизация', parentId: 'n1', level: 2),
+        NodeDraft(id: 'n3_1', title: 'Оптимизация', parentId: 'n2_1', level: 3),
+      ]);
+      expect(out.map((n) => n.id), ['n1', 'n2_1', 'n3_1'],
+          reason: 'разные parentId — сливать нельзя, сломалась бы структура');
+    });
+
+    test('пустая подпись и разный уровень дублем не считаются', () {
+      final out = dedupeNodeIds(const [
+        NodeDraft(id: 'n1', title: 'Корень'),
+        NodeDraft(id: 'n2_1', title: '', parentId: 'n1', level: 2),
+        NodeDraft(id: 'n2_2', title: '', parentId: 'n1', level: 2),
+        NodeDraft(id: 'n2_3', title: 'Основы', parentId: 'n1', level: 2),
+        NodeDraft(id: 'n2_4', title: 'Основы', parentId: 'n1', level: 3),
+      ]);
+      expect(out.map((n) => n.id), ['n1', 'n2_1', 'n2_2', 'n2_3', 'n2_4']);
+    });
+  });
+
+  group('детерминированный разрыв циклов зависимостей', () {
+    // Регресс: циклы ловились только как note и доезжали до пользователя с
+    // готовым деревом (на живом прогоне n2_1 → n2_2 → n2_1 и
+    // n2_2 → n2_3 → n2_2), а repair при этом не запускался вовсе — он не умеет
+    // чинить связи, участники цикла обычно не дефектны.
+
+    RawRelation dep(String from, String to) =>
+        (from: from, to: to, type: 'depends_on', label: null);
+
+    test('обратное ребро удаляется, остальные связи цикла сохраняются', () {
+      final broken = breakDependencyCycles([
+        NodeDraft(
+          id: 'n1',
+          title: 'Корень',
+          relations: [dep('n1', 'n2_1')],
+        ),
+        NodeDraft(
+          id: 'n2_1',
+          title: 'A',
+          parentId: 'n1',
+          level: 2,
+          relations: [dep('n2_1', 'n2_2')],
+        ),
+        NodeDraft(
+          id: 'n2_2',
+          title: 'B',
+          parentId: 'n1',
+          level: 2,
+          relations: [dep('n2_2', 'n2_1')],
+        ),
+      ]);
+      expect(broken.notes, hasLength(1));
+      expect(broken.notes.single, contains('CIRCULAR_DEPENDENCY разорван'));
+      final a = broken.nodes.firstWhere((n) => n.id == 'n2_1');
+      final b = broken.nodes.firstWhere((n) => n.id == 'n2_2');
+      expect(a.relations, hasLength(1), reason: 'прямое ребро A → B несут смысл');
+      expect(b.relations, isEmpty, reason: 'обратное ребро B → A замыкает цикл');
+      // После разрыва пре-пасс не должен больше видеть цикла.
+      expect(
+        deterministicValidate(broken.nodes).notes
+            .where((n) => n.contains('CIRCULAR_DEPENDENCY')),
+        isEmpty,
+      );
+    });
+
+    test('петля узла на себя разрывается', () {
+      final broken = breakDependencyCycles([
+        NodeDraft(id: 'n1', title: 'A', relations: [dep('n1', 'n1')]),
+      ]);
+      expect(broken.nodes.single.relations, isEmpty);
+      expect(broken.notes.single, contains('n1 → n1'));
+    });
+
+    test('цикл из related/contrasts_with не трогается', () {
+      const nodes = [
+        NodeDraft(
+          id: 'n1',
+          title: 'A',
+          relations: [
+            (from: 'n1', to: 'n2', type: 'related', label: null),
+          ],
+        ),
+        NodeDraft(
+          id: 'n2',
+          title: 'B',
+          relations: [
+            (from: 'n2', to: 'n1', type: 'related', label: null),
+          ],
+        ),
+      ];
+      final broken = breakDependencyCycles(nodes);
+      expect(broken.notes, isEmpty);
+      expect(broken.nodes, same(nodes),
+          reason: 'цикл по смыслу не является циклом зависимости');
+    });
+
+    test('ациклический граф не меняется (тот же список на том же месте)', () {
+      const nodes = [
+        NodeDraft(id: 'n1', title: 'Корень', relations: []),
+        NodeDraft(
+          id: 'n2_1',
+          title: 'A',
+          parentId: 'n1',
+          level: 2,
+          relations: [
+            (from: 'n2_1', to: 'n2_2', type: 'depends_on', label: null),
+          ],
+        ),
+        NodeDraft(id: 'n2_2', title: 'B', parentId: 'n1', level: 2, relations: []),
+      ];
+      final broken = breakDependencyCycles(nodes);
+      expect(broken.nodes, same(nodes));
+      expect(broken.notes, isEmpty);
+    });
+
+    test('ссылки на несуществующие узлы игнорируются (их ловит пре-пасс)', () {
+      const nodes = [
+        NodeDraft(
+          id: 'n1',
+          title: 'A',
+          relations: [
+            (from: 'n1', to: 'нет_такого', type: 'depends_on', label: null),
+          ],
+        ),
+      ];
+      final broken = breakDependencyCycles(nodes);
+      expect(broken.notes, isEmpty);
+      expect(broken.nodes.single.relations, hasLength(1));
     });
   });
 }

@@ -152,6 +152,7 @@ MindtreeEngines buildEngines({
       goal: ctx.options?.goal,
       level: ctx.options?.level,
     ),
+    blockingValidationTypes: validationBlockingIssueTypes,
     generateValidate: (ctx) => buildValidatePrompt(
       [
         for (final n in ctx.nodes)

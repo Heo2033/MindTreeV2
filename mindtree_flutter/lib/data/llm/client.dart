@@ -292,9 +292,23 @@ bool _isReasoningRejection(Object error) {
 
 // ─── Retry logic ──────────────────────────────────────────────────────────────
 
+/// Ошибка, которую повтор не исправит: неверное имя модели, ключ, формат
+/// запроса. Такой отказ провайдера детерминирован — ждать бессмысленно.
+bool isPermanentLLMError(Object err) {
+  final status = _extractStatus(err);
+  if (status == null) return false;
+  // 408/429 — временные, их ретраим.
+  if (status == 408 || status == 429) return false;
+  return status >= 400 && status < 500;
+}
+
 bool shouldRetry(Object err, int attempt, int maxRetries) {
   if (attempt >= maxRetries) return false;
   if (err is LLMMockException) return false;
+  // Перманентный 4xx повтором не лечится. Реальный случай: провайдер отвечал
+  // 400 «модель не найдена» — 4 попытки впустую, а пользователю показывали
+  // «исчерпаны попытки запроса (4)» вместо самой причины.
+  if (isPermanentLLMError(err)) return false;
   final status = _extractStatus(err);
   if (status != null && _rateLimitStatuses.contains(status) && attempt >= 2) return false;
   return true;
@@ -885,6 +899,12 @@ Future<LLMResult> callLLM(
         // кандидаты с тем же полем съедят лимит попыток и до отката дойдёт
         // только исчерпанный `_maxTransportAttempts`.
         if (body.containsKey('reasoning') && _isReasoningRejection(e)) rethrow;
+        // Перманентный 4xx (неверная модель, ключ, формат) повтором того же
+        // тела не исправляется, а оставшиеся кандидаты отличаются от него
+        // только наличием `reasoning` — для такого отказа они бесполезны.
+        // Реальный случай: «Указанная модель не найдена» стоил трёх HTTP-запросов
+        // внутри одного логического вызова ×4 попытки scheduler = 12 запросов.
+        if (isPermanentLLMError(e)) break outer;
         attempts++;
         if (attempts >= _maxTransportAttempts) break outer;
         continue;
@@ -1001,5 +1021,50 @@ String _compactErrorBody(String text) {
     final stripped = flat.replaceAll(RegExp(r'<[^>]+>'), ' ').replaceAll(RegExp(r'\s+'), ' ').trim();
     return (stripped.isEmpty ? 'HTML provider page' : stripped).substring(0, 200.clamp(0, stripped.length));
   }
-  return flat.length > 300 ? '${flat.substring(0, 300)}…' : flat;
+  // Тело ошибки провайдера почти всегда — JSON-обёртка `{"error":{"message":
+  // "…","code":400}}`. Само сообщение полезнее обёртки: именно в нём имя
+  // модели и причина отказа, а резать его до 300 символов нельзя — хвост
+  // («Возможно вы хотели использовать модель …») как раз и объясняет отказ.
+  final hinted = _withModelHint(_providerMessage(text) ?? flat);
+  return hinted.length > 300 ? '${hinted.substring(0, 300)}…' : hinted;
+}
+
+/// Достаёт человекочитаемое сообщение провайдера из JSON-тела ошибки.
+String? _providerMessage(String raw) {
+  final t = raw.trim();
+  if (!t.startsWith('{')) return null;
+  try {
+    final decoded = jsonDecode(t);
+    if (decoded is! Map) return null;
+    final err = decoded['error'];
+    if (err is String && err.trim().isNotEmpty) return err.trim();
+    if (err is Map && err['message'] is String) {
+      final msg = (err['message'] as String).trim();
+      return msg.isEmpty ? null : msg;
+    }
+    if (decoded['message'] is String) {
+      final msg = (decoded['message'] as String).trim();
+      return msg.isEmpty ? null : msg;
+    }
+  } catch (_) {
+    // Не JSON — оставляем как есть.
+  }
+  return null;
+}
+
+/// Отказ из-за неизвестного имени модели почти всегда означает устаревшую
+/// сборку: `provider-config.json` — build-time конфиг, он вшивается в
+/// бинарник через `--dart-define-from-file`. Без этой подсказки диагностика
+/// упирается в «модель не найдена» без пути к исправлению.
+final RegExp _modelUnavailableRe = RegExp(
+  r'(модел\w*|model).{0,80}?(не найден|недоступен|неизвестен|not found|unknown|unavailable)'
+  r'|(не найден|not found).{0,40}?(модел\w*|model)',
+  caseSensitive: false,
+);
+
+String _withModelHint(String body) {
+  if (!_modelUnavailableRe.hasMatch(body)) return body;
+  return '$body. Проверьте provider-config.json: имя модели вшивается в '
+      'бинарник при сборке (--dart-define-from-file), поэтому после правки '
+      'конфига приложение нужно пересобрать.';
 }

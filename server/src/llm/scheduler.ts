@@ -139,10 +139,20 @@ export function shouldRetry(err: Error, attempt: number, maxRetries: number): bo
   // В офлайн-режиме повторные попытки бессмысленны — сразу переходим к фолбэку.
   if (err instanceof LLMMockError) return false;
   const status = extractStatus(err);
+  // Перманентный 4xx повтором не лечится: реальный случай — провайдер отвечал
+  // 400 «модель не найдена», и на него тратились все попытки впустую.
+  if (status !== null && isPermanentLLMErrorStatus(status)) return false;
   if (status !== null && GATEWAY_RETRY_STATUSES.has(status) && attempt >= 2) {
     return false;
   }
   return true;
+}
+
+/** Ошибка, которую повтор не исправит: неверное имя модели, ключ, формат. */
+export function isPermanentLLMErrorStatus(status: number): boolean {
+  // 408/429 — временные, их ретраим.
+  if (status === 408 || status === 429) return false;
+  return status >= 400 && status < 500;
 }
 
 export class TreeScheduler {
@@ -250,6 +260,10 @@ export class TreeScheduler {
       this.opDeadlineMs > 0 ? startTime + this.opDeadlineMs : undefined;
     let lastError: Error | null = null;
     let attemptsMade = 0;
+    // Последний отказ был перманентным (неверная модель/ключ/запрос) — такой
+    // повторами не лечится, и его надо показать как есть, а не как
+    // «исчерпаны попытки». Объявлено вне цикла по моделям.
+    let permanentFailure = false;
     let lastPromptLength = 0;
 
     const allModels = options?.model
@@ -336,6 +350,12 @@ export class TreeScheduler {
 
           if (!retryAllowed || timeLeft <= 0) {
             modelFailed = true;
+            // Перманентный отказ (неверная модель/ключ/запрос) повторами не
+            // лечится — запоминаем, чтобы показать его как есть, а не под
+            // обёрткой «исчерпаны попытки» (зеркало flutter scheduler.execute).
+            if (!rateLimited && isPermanentLLMErrorStatus(extractStatus(lastError) ?? 0)) {
+              permanentFailure = true;
+            }
             break;
           }
 
@@ -353,10 +373,11 @@ export class TreeScheduler {
       }
     }
 
-    throw new LLMRetriesExhaustedError(
-      lastError ?? new Error("Не удалось выполнить LLM-запрос"),
-      attemptsMade,
-    );
+    const failure = lastError ?? new Error("Не удалось выполнить LLM-запрос");
+    // Перманентный отказ повторами не лечится: обёртка «исчерпаны попытки» с
+    // attempts=1 только прятала бы настоящую причину от пользователя.
+    if (permanentFailure) throw failure;
+    throw new LLMRetriesExhaustedError(failure, attemptsMade);
   }
 
   /**

@@ -204,6 +204,11 @@ class TreeScheduler {
         : null;
     Object? lastError;
     var attemptsMade = 0;
+    // Последний отказ был перманентным (неверная модель/ключ/запрос) — такой
+    // повторами не лечится, и его надо показать как есть, а не как
+    // «исчерпаны попытки». Объявлено вне цикла по моделям: значение нужно
+    // после выхода из него.
+    var permanentFailure = false;
 
     final cfg = _configProvider();
     final allModels = model != null
@@ -300,16 +305,21 @@ class TreeScheduler {
             continue;
           }
           modelFailed = true;
+          permanentFailure = isPermanentLLMError(e);
           break;
         }
       }
       if (modelFailed && allModels.indexOf(m) < allModels.length - 1) continue;
     }
 
-    throw LLMRetriesExhaustedException(
-      lastError is Exception ? lastError : Exception(lastError?.toString() ?? 'LLM request failed'),
-      attemptsMade,
-    );
+    final failure = lastError is Exception
+        ? lastError
+        : Exception(lastError?.toString() ?? 'LLM request failed');
+    // Перманентный отказ (неверная модель/ключ/запрос) повторами не лечится.
+    // Оборачивать его в «исчерпаны попытки» значит спрятать причину: раньше
+    // пользователь видел «исчерпаны попытки запроса (4)» и обрывок текста.
+    if (permanentFailure) throw failure;
+    throw LLMRetriesExhaustedException(failure, attemptsMade);
   }
 
   /// Streaming execute: yields tokens one by one, with same rate limiting/retry/fallback.

@@ -338,6 +338,39 @@ function parseRetryAfter(value: string | null): number | null {
 
 const RATE_LIMIT_STATUSES = new Set([408, 429, 502, 503, 504]);
 
+// Тело ошибки провайдера почти всегда — JSON-обёртка `{"error":{"message":
+// "…","code":400}}`. Само сообщение полезнее обёртки: именно в нём имя
+// модели и причина отказа, а резать его до 300 символов нельзя — хвост
+// («Возможно вы хотели использовать модель …») как раз и объясняет отказ.
+const MODEL_UNAVAILABLE_RE =
+  /(модел\w*|model).{0,80}?(не найден|недоступен|неизвестен|not found|unknown|unavailable)|(не найден|not found).{0,40}?(модел\w*|model)/i;
+
+function withModelHint(body: string): string {
+  if (!MODEL_UNAVAILABLE_RE.test(body)) return body;
+  return `${body}. Проверьте provider-config.json: имя модели вшивается в сборку ` +
+    `(LLM_MODEL_FAST/STRONG), поэтому после правки конфига приложение нужно пересобрать.`;
+}
+
+/** Достаёт человекочитаемое сообщение провайдера из JSON-тела ошибки. */
+function providerMessage(raw: string): string | null {
+  const t = raw.trim();
+  if (!t.startsWith("{")) return null;
+  try {
+    const decoded = JSON.parse(t) as Record<string, unknown>;
+    const err = decoded.error;
+    if (typeof err === "string" && err.trim()) return err.trim();
+    if (err && typeof err === "object") {
+      const msg = (err as { message?: unknown }).message;
+      if (typeof msg === "string" && msg.trim()) return msg.trim();
+    }
+    const msg = decoded.message;
+    if (typeof msg === "string" && msg.trim()) return msg.trim();
+  } catch {
+    // Не JSON — оставляем как есть.
+  }
+  return null;
+}
+
 function compactErrorBody(text: string): string {
   const flat = text.replace(/\s+/g, " ").trim();
   if (/<!DOCTYPE html|<html[\s>]/i.test(flat)) {
@@ -346,7 +379,8 @@ function compactErrorBody(text: string): string {
     const stripped = flat.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
     return (stripped || "HTML-страница провайдера").slice(0, 200);
   }
-  return flat.length > 300 ? `${flat.slice(0, 300)}…` : flat;
+  const hinted = withModelHint(providerMessage(text) ?? flat);
+  return hinted.length > 300 ? `${hinted.slice(0, 300)}…` : hinted;
 }
 
 const DEFAULT_RATE_LIMIT_COOLDOWN_S = 30;

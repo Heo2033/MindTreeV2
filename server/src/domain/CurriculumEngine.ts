@@ -46,10 +46,18 @@ export class CurriculumEngine {
   async generate(req: CurriculumRequest): Promise<CurriculumPlanResult> {
     // Deterministic conservative baseline: choose high-importance nodes within budget
     const baseline = this.deterministicSelect(req);
+    const knownIds = new Set(req.nodes.map((n) => n.id));
 
+    // LLM-план принимаем только если он ссылается на реальные узлы дерева.
+    // Модель часто возвращает либо пустой `items`, либо «сырые» id без
+    // `~`-скоупа (n3_1 вместо n3_1~hash). Раньше такой результат молча
+    // заменял детерминированный baseline, и сессия создавалась пустой:
+    // элементов 0, учиться нечему — пользователь видит вечное «генерация…».
     let llmItems = baseline;
     try {
-      llmItems = await this.llmSelect(req);
+      const fromLlm = await this.llmSelect(req);
+      const usable = fromLlm.filter((i) => knownIds.has(i.node_id));
+      if (usable.length > 0) llmItems = usable;
     } catch {
       // fall back to deterministic baseline
     }
@@ -94,7 +102,28 @@ export class CurriculumEngine {
 
     // Детерминированный кап по бюджету времени: план не должен обещать
     // больше минут, чем пользователь выделил (зеркало fitPlanToBudget flutter).
-    const fitted = fitPlanToBudget(items, req.timeBudgetMinutes || 60);
+    let fitted = fitPlanToBudget(items, req.timeBudgetMinutes || 60);
+
+    // Последний рубеж: сессия без единого элемента — это не сессия, а
+    // «генерация не создалась». План обязан быть непустым, пока в дереве
+    // есть хотя бы один узел, который ещё не известен пользователю.
+    if (fitted.length === 0 && baseline.length > 0) {
+      fitted = fitPlanToBudget(
+        baseline
+          .filter((i) => knownIds.has(i.node_id))
+          .map((item) => ({
+            id: shortIdWith("ci_"),
+            nodeId: item.node_id,
+            label: byId.get(item.node_id)?.label ?? item.node_id,
+            order: item.order,
+            type: this.itemTypeFor(byId.get(item.node_id)),
+            estimatedMinutes: item.estimated_minutes,
+            priority: 50,
+            status: "pending" as const,
+          })),
+        req.timeBudgetMinutes || 60,
+      );
+    }
 
     const sessionId = shortIdWith("curriculum_");
 
@@ -157,6 +186,26 @@ export class CurriculumEngine {
         estimated_minutes: Math.min(node.estimatedTimeMinutes || 5, 20),
         why: "Базовое понятие — план не может быть пустым",
       });
+    }
+
+    // Дерево из одного корня (или где все узлы уже известны): кандидатов
+    // level>=2 нет, но сессия всё равно должна что-то предложить. Берём
+    // корень — иначе пользователь видит «генерация не создалась».
+    if (selected.length === 0) {
+      const root = req.nodes
+        .filter((n) => !known.has(n.id))
+        .reduce<KnowledgeNode | null>(
+          (best, n) => (best === null || n.level < best.level ? n : best),
+          null,
+        );
+      if (root !== null) {
+        selected.push({
+          node_id: root.id,
+          order: 1,
+          estimated_minutes: Math.min(root.estimatedTimeMinutes || 5, 20),
+          why: "Корень темы — базовое понятие для разбора",
+        });
+      }
     }
     return selected;
   }

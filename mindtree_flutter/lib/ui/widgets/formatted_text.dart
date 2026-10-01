@@ -38,39 +38,25 @@ class FormattedText extends StatelessWidget {
       }
     }
 
-    for (final seg in _splitMath(text)) {
+    for (final seg in _splitMath(_sanitizeMarkdown(text))) {
       if (seg.isMath) {
         if (seg.display) {
           flush();
-          Widget block;
-          try {
-            block = SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Math.tex(
-                seg.content,
-                mathStyle: MathStyle.display,
-                textStyle: baseStyle,
-              ),
-            );
-          } catch (_) {
-            block = Text('\$\$${seg.content}\$\$', style: baseStyle);
-          }
           children.add(Padding(
             padding: const EdgeInsets.symmetric(vertical: 6),
-            child: Align(alignment: Alignment.centerLeft, child: block),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: _mathOrFallback(seg, baseStyle, display: true),
+            ),
           ));
         } else {
-          try {
-            spans.add(WidgetSpan(
-              alignment: PlaceholderAlignment.middle,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 2),
-                child: Math.tex(seg.content, textStyle: baseStyle),
-              ),
-            ));
-          } catch (_) {
-            spans.add(TextSpan(text: '\$${seg.content}\$', style: baseStyle));
-          }
+          spans.add(WidgetSpan(
+            alignment: PlaceholderAlignment.middle,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 2),
+              child: _mathOrFallback(seg, baseStyle, display: false),
+            ),
+          ));
         }
       } else {
         spans.add(TextSpan(text: seg.content, style: baseStyle));
@@ -80,6 +66,51 @@ class FormattedText extends StatelessWidget {
     flush();
     return children;
   }
+
+  /// Формула либо отрисована, либо показана её исходная запись.
+  ///
+  /// Раньше здесь стоял `try { Math.tex(...) } catch`, который не срабатывал
+  /// НИКОГДА: `Math.tex` не бросает исключение синхронно, парсинг TeX
+  /// происходит позже — при build. Пользователь вместо формулы видел
+  /// внутренний текст парсера: «Parse error: unexpected character:\`».
+  /// Теперь отказ обрабатывает `onErrorFallback` — показываем исходник
+  /// формулы, а не диагностику парсера.
+  Widget _mathOrFallback(_MathSegment seg, TextStyle baseStyle, {required bool display}) {
+    // Экранируем именно литеральный доллар. Через raw-строку `r'...'` нельзя:
+// Dart не интерполирует `${...}` внутри неё, и пользователь увидел бы
+// текст «${seg.content}» вместо формулы.
+final source = display
+        ? '\$\$${seg.content}\$\$'
+        : '\$${seg.content}\$';
+    final style = baseStyle.copyWith(color: baseStyle.color?.withValues(alpha: 0.85));
+    Widget degrade(Object _) => Text(source, style: style);
+
+    return Math.tex(
+      seg.content,
+      // Для инлайн-формулы `text` — единственный стиль, совпадающий по
+      // размеру с обычным текстом (`inline` в enum нет).
+      mathStyle: display ? MathStyle.display : MathStyle.text,
+      textStyle: baseStyle,
+      onErrorFallback: degrade,
+    );
+  }
+}
+
+/// Убирает markdown-обвязку, которая ломает рендер формул.
+///
+/// Модель часто оборачивает формулу в инлайн-код: «$X = \alpha X$» → на
+/// выходе в тексте оказываются обратные кавычки, и TeX-парсер падает на
+/// символе «`». Разметку мы всё равно не умеем рисовать, поэтому она
+/// только мешает: убираем ограждения, содержимое сохраняем.
+String _sanitizeMarkdown(String input) {
+  if (!input.contains('`')) return input;
+  var s = input.replaceAll(RegExp('```[a-zA-Z0-9_+-]*'), '');
+  s = s.replaceAll('```', '');
+  s = s.replaceAll('`', '');
+  // Двойные пробелы от вырезанных ограждений схлопываем, но переносы строк
+  // сохраняем — по ним видны границы абзацев.
+  s = s.replaceAll(RegExp('[ \t]{2,}'), ' ');
+  return s;
 }
 
 class _MathSegment {

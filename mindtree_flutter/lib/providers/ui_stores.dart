@@ -552,16 +552,39 @@ class SessionNotifier extends StateNotifier<SessionState> {
         milestoneId: milestoneId,
       ));
       final current = await _engine.getCurrentItem(session.id);
+      if (current == null) {
+        state = state.copyWith(
+          loading: false,
+          error:
+              'Не удалось составить план обучения. Возможно, все концепции уже изучены — попробуйте изменить цель или увеличить бюджет времени.',
+        );
+        return;
+      }
       state = state.copyWith(
         session: session,
-        currentItem: current?.item,
-        currentIndex: current?.index ?? 0,
+        currentItem: current.item,
+        currentIndex: current.index,
         loading: false,
       );
       // Фоновая предгенерация следующих разделов (контент узлов + шаги activity).
-      unawaited(_prefetchAhead(session.id, current?.index ?? 0));
+      unawaited(_prefetchAhead(session.id, current.index));
     } catch (e) {
-      state = state.copyWith(loading: false, error: '$e');
+      final msg = '$e';
+      if (msg.contains('Все концепции по теме уже изучены')) {
+        state = state.copyWith(
+          loading: false,
+          error: 'Все концепции по теме уже изучены. Можете перейти к следующей вехе или изменить цель.',
+        );
+        return;
+      }
+      if (msg.contains('Не удалось составить план обучения')) {
+        state = state.copyWith(
+          loading: false,
+          error: msg,
+        );
+        return;
+      }
+      state = state.copyWith(loading: false, error: msg);
     }
   }
 
@@ -622,7 +645,25 @@ class SessionNotifier extends StateNotifier<SessionState> {
     if (sessionId == null) return;
     state = state.copyWith(studying: true, loading: true, error: null);
     try {
-      await _engine.studyNode(sessionId, nodeId);
+      String effectiveNodeId = nodeId.trim();
+      if (effectiveNodeId.isEmpty) {
+        final current = state.currentItem?.nodeId;
+        if (current != null && current.isNotEmpty) {
+          effectiveNodeId = current;
+        } else {
+          final cur = await _engine.getCurrentItem(sessionId);
+          effectiveNodeId = cur?.item.nodeId ?? '';
+        }
+      }
+      if (effectiveNodeId.isEmpty) {
+        state = state.copyWith(
+          studying: false,
+          loading: false,
+          error: 'Не удалось определить узел для изучения',
+        );
+        return;
+      }
+      await _engine.studyNode(sessionId, effectiveNodeId);
       await ensureActivity();
       state = state.copyWith(studying: false, loading: false);
     } catch (e) {

@@ -396,6 +396,16 @@ String truncateOneLiner(String s, {int maxChars = oneLinerMaxChars}) {
   return _finalizeTruncation(cut, maxChars: maxChars, stripPunctuation: false);
 }
 
+bool _isPunctuationOnly(String s) {
+  if (s.trim().isEmpty) return true;
+  final trimmed = s.trim();
+  // Содержит ли хоть одну букву/цифру?
+  if (RegExp(r'[A-Za-zА-Яа-яЁё0-9]').hasMatch(trimmed)) {
+    return false;
+  }
+  return true;
+}
+
 /// Финальная чистка куска после выбора границы.
 ///
 /// Гарантирует непустой результат: если чистка съела всё (строка состояла
@@ -1262,9 +1272,12 @@ class KnowledgeGraphEngine {
       label: node.title,
       draft: '${result['one_liner'] ?? node.title}',
     );
+    final finalOneLiner = _isPunctuationOnly(oneLiner)
+        ? truncateOneLiner(node.title.isNotEmpty ? node.title : oneLiner)
+        : oneLiner;
 
     return NodeContentResult(
-      oneLiner: oneLiner,
+      oneLiner: finalOneLiner,
       details: '${result['details'] ?? ''}',
       analogy: result['analogy'] is String && (result['analogy'] as String).isNotEmpty
           ? result['analogy'] as String
@@ -1285,7 +1298,15 @@ class KnowledgeGraphEngine {
     required String draft,
   }) async {
     final trimmed = draft.trim();
-    if (trimmed.isEmpty || trimmed.length <= oneLinerMaxChars) return draft;
+    if (_isPunctuationOnly(trimmed)) {
+      return truncateOneLiner(label.trim().isEmpty ? trimmed : label);
+    }
+    if (trimmed.isEmpty || trimmed.length <= oneLinerMaxChars) {
+      if (_isPunctuationOnly(trimmed)) {
+        return truncateOneLiner(label.trim().isEmpty ? trimmed : label);
+      }
+      return trimmed.isEmpty ? label.trim() : trimmed;
+    }
     try {
       final exec = await scheduler.execute<Map<String, dynamic>>(
         'oneline-rewrite',
@@ -1293,13 +1314,19 @@ class KnowledgeGraphEngine {
         (raw) => parseLLMJson<Map<String, dynamic>>(raw),
       );
       final candidate = '${exec.result['one_liner'] ?? ''}'.trim();
-      if (candidate.isNotEmpty && candidate.length <= oneLinerMaxChars) {
+      if (candidate.isNotEmpty &&
+          candidate.length <= oneLinerMaxChars &&
+          !_isPunctuationOnly(candidate)) {
         return candidate;
       }
     } catch (_) {
       // Сбой переспроса не роняет сценарий — ниже детерминированный fallback.
     }
-    return truncateOneLiner(trimmed);
+    final truncated = truncateOneLiner(trimmed);
+    if (_isPunctuationOnly(truncated)) {
+      return truncateOneLiner(label.trim().isEmpty ? trimmed : label);
+    }
+    return truncated;
   }
 
   /// Deepens the branch of a node from the DB: reads the node and its

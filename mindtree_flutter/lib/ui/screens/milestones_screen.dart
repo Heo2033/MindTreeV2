@@ -49,7 +49,10 @@ class _MilestonesScreenState extends ConsumerState<MilestonesScreen> {
         if (mounted) setState(() { _loading = false; _error = 'Репозиторий недоступен'; });
         return;
       }
-      final journey = await repo.getJourneyForTopic(widget.topicId);
+      var journey = await repo.getJourneyForTopic(widget.topicId);
+      // Миграция не требуется: в доменной модели milestone нет journeyId.
+      // Старые записи с journey_id='' остаются в БД, но чтение уже
+      // отказоустойчиво (getJourneyForTopic выбирает journey по теме).
       if (mounted) {
         setState(() {
           _journey = journey;

@@ -1,7 +1,7 @@
 ---
 description: Реализация промптов mindtree_flutter: prompts.dart (17+ билдеров: L1-L3, expand, validate, repair, content, explain, activity, assessment, curriculum, diagnostic, mastery, milestone, quiz, tutor) + зеркальное соответствие server/src/prompts/*.ts. Вызывается для изменения инструкций модели, JSON-контрактов, лимитов и антижаргона.
 mode: subagent
-model: opencode-go/qwen3.6-plus
+model: opencode/big-pickle
 ---
 
 # Flutter Prompts — промпты движка

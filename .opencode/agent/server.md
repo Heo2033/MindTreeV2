@@ -1,7 +1,7 @@
 ---
 description: Поддержка reference TS-стека: server (Fastify + better-sqlite3), packages/types. Зеркалит домен и промпты mindtree_flutter 1:1. Вызывается для правок server/src/domain/*.ts, server/src/prompts/*.ts, эндпоинтов API и синхронизации стеков.
 mode: subagent
-model: opencode-go/deepseek-v4-flash
+model: opencode/fledge-alpha-free
 ---
 
 # Server — reference TS-стек

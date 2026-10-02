@@ -1,7 +1,7 @@
 ---
 description: Реализация LLM-слоя mindtree_flutter: client (OpenAI/Ollama/SSE), TreeScheduler (RPM/RPD/reтries), cache, telemetry, provider config. Вызывается для лимитов, retry/cooldown, моделей (strong/fast), JSON-репара, fallback и офлайн-режима.
 mode: subagent
-model: opencode-go/deepseek-v4-flash
+model: opencode/big-pickle
 ---
 
 # Flutter LLM — LLM-инфраструктура

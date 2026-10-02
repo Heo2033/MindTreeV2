@@ -1,7 +1,7 @@
 ---
 description: Реализация UI-слоя mindtree_flutter: экраны, визуализация дерева знаний, тема, виджеты, Riverpod-провайдеры, роутинг. Вызывается для экранов (home, graph, session, quiz, tutor и т.д.), граф-канваса, сторов ui_stores и интеграции с движками.
 mode: subagent
-model: opencode-go/deepseek-v4-flash
+model: opencode/mimo-v2.6-flash-free
 ---
 
 # Flutter UI — интерфейс

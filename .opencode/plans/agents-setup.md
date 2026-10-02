@@ -16,23 +16,58 @@
   дерево знаний, LLM-конвенции, домен, безопасность, команды валидации).
 - `.opencode/opencode.json` — `default_agent: architect`; `instructions: ["AGENTS.md"]`;
   `skills.paths: [".opencode/skill"]`; permission bash: allow `flutter/dart/npm/node/git`,
-  остальное — ask. Модель — OpenCode Go, small — Go flash.
+  остальное — ask. Модель — `opencode/big-pickle` (free).
 - `.opencode/.gitignore` — защита от коммита настроек (node_modules, package.json м.п.).
 
 ### Агенты (`.opencode/agent/`)
-| Агент | mode | model |
-|---|---|---|
-| `architect` | primary | go (Qwen) |
-| `flutter-domain` | subagent | big-pickle (free) |
-| `flutter-data` | subagent | go flash |
-| `flutter-llm` | subagent | go flash |
-| `flutter-prompts` | subagent | go (Qwen) |
-| `flutter-ui` | subagent | go flash |
-| `server` | subagent | go flash |
-| `testing` | subagent | big-pickle (free), `permission: edit: deny` |
+| Агент | mode | model | почему |
+|---|---|---|---|
+| `architect` | primary | big-pickle | держит инварианты и зеркальность стеков |
+| `flutter-domain` | subagent | big-pickle | детерминированная логика (SRS, mastery), ошибки не видны в UI |
+| `flutter-prompts` | subagent | big-pickle | контракты промптов и их синк с `server/` |
+| `flutter-llm` | subagent | big-pickle | лимиты, retry, fallback — цена ошибки высока |
+| `flutter-data` | subagent | big-pickle | drift-миграции: ошибка компилируется и проходит тесты на чистой БД, но портит существующую |
+| `testing` | subagent | big-pickle | `permission: edit: deny`, проектирует тесты |
+| `content-reviewer` | subagent | big-pickle | ловит тонкие дефекты материала; слабая модель = ложная уверенность |
+| `flutter-ui` | subagent | mimo-v2.6-flash-free | нужна UX-оценка, но гейт — `flutter analyze` + widget-тесты |
+| `server` | subagent | fledge-alpha-free | зеркалирование принятого Dart-решения, гейт жёсткий: `tsc` + `eslint` + `vitest` |
 
-Модели: подписка OpenCode Go (`opencode-go/*`); фолбэк — free-модели
-(`opencode/big-pickle`, `opencode/mimo-v2.5-free`).
+Модели: все агенты на бесплатном провайдере `opencode`.
+Модели OpenCode Go (`opencode-go/*`) отключены не из-за имён — по разбору
+`~/.local/share/opencode/log/opencode.log` (147 строк ERROR) причина в четырёх
+независимых вещах:
+
+| Модель | Ошибка | Сколько | Что это |
+|---|---|---|---|
+| `deepseek-v4-flash` | `This Go model requires Global regions` | 120 | **настройка приватности workspace**, не лимит и не имя |
+| `deepseek-v4-flash` | `only available hosted in China and requires explicit opt in` | 3 | региональный гейт |
+| `qwen3.6-plus` | `data_inspection_failed <400> InternalError.Algo.DataInspection` | 15 | провайдер отклоняет часть запросов; последняя — 02.10.2026 |
+| `qwen3.6-plus` | `Weekly usage limit reached. Resets in 2-3 days` | 3 | квота |
+| `qwen3.8-max` | `5-hour usage limit reached` | 3 | квота |
+| `qwen3.7-plus` | `No payment method` | 2 | нет оплаты |
+| `qwen3.8-max` | `Endpoint is unavailable` | 1 | транзиентный обрыв провайдера |
+
+Имена у моделей валидные: `qwen3.6-plus` сделала 428 успешных stream-вызовов
+(последний 24.09.2026), `deepseek-v4-flash` — рабочие вызовы 02.10.2026. То есть
+Go-модели вернутся, если выставить workspace в Global-регион; сейчас блокирует
+именно региональная настройка, а не лимит.
+
+Операционные факты (проверены 02.10.2026):
+
+- **Конфиг агентов читается при старте opencode.** Правка `model:` в
+  `.opencode/agent/*.md` не подхватывается в уже запущенном процессе: проба
+  агента после правки всё ещё уходила на старое имя модели. Каждая правка
+  требует рестарта opencode — отсюда проверять модели по одной нельзя,
+  только пачкой за один перезапуск.
+- **Free-модели ротируются.** `opencode/mimo-v2.5-free` и
+  `opencode/deepseek-v4-flash-free` проработали на этой машине (234 и 35
+  сообщений), но к 02.10.2026 уже отсутствуют в каталоге провайдера; вместо них
+  доступны `mimo-v2.6-flash-free`, `ling-3.0-flash-fin-free`, `fledge-alpha-free`.
+  При ошибке `Model not found` нужно обновить id в этом файле (opencode сам
+  печатает список актуальных имён в подсказке) и перезапустить opencode.
+- По этой же причине `big-pickle` стоит на всех агентах, где цена ошибки
+  высокая: он единственный проверен в текущем прогоне (27k сообщений) и не
+  исчезает при ротации free-каталога.
 
 ### Скиллы (`.opencode/skill/`)
 - `tree-generation` — пайплайн L1/L2/L3, expand/validate/repair/content, NodeState,

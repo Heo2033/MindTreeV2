@@ -1,7 +1,7 @@
 ---
 description: Главный координатор MindTree adaptive learning engine. Запускается для планирования фич в mindtree_flutter и TS-стеке, разбиения работы на подзадачи, интеграции и контроля зеркального соответствия двух стеков. Владеет продуктовой спецификацией и инвариантами AGENTS.md.
 mode: primary
-model: opencode-go/qwen3.6-plus
+model: opencode/big-pickle
 ---
 
 # Architect — координатор MindTree

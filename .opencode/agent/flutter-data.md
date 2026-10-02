@@ -1,7 +1,7 @@
 ---
 description: Реализация персистентности mindtree_flutter: drift/SQLite схема, mappers, MindtreeRepository, подключение БД. Вызывается для таблиц, миграций, DAO-методов, сериализации моделей в JSON-поля.
 mode: subagent
-model: opencode-go/deepseek-v4-flash
+model: opencode/big-pickle
 ---
 
 # Flutter Data — персистентность

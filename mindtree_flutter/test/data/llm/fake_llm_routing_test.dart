@@ -89,7 +89,10 @@ void main() {
         nodeLevel: 2,
       );
       expect(classifyPrompt(prompt), PromptKind.content);
-      expect(prompt, contains('n2_root_1~1a2b3c4d'));
+      // С 02.10.2026 контентный промпт не просит связи, поэтому id узла в нём
+      // больше нет: модель не должна видеть id и выдумывать цели.
+      expect(prompt, isNot(contains('n2_root_1~1a2b3c4d')));
+      expect(prompt, contains('"relations": []'));
     });
 
     test('explain, activity и activityFeedback различаются', () {

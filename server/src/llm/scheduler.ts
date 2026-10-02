@@ -80,7 +80,8 @@ export function readSchedulerConfigFromEnv(): RequiredCoreConfig {
 
 // repair в fast-тиру (зеркало client.dart от 2026-09-30): работает только по
 // проблемным узлам, а при неудаче дерево остаётся в прежнем состоянии.
-const STRONG_OPERATIONS = new Set(["structure", "structure-l2", "structure-l3", "validate", "quiz", "curriculum", "diagnostic", "assessment", "mastery", "tutor", "milestone"]);
+// judge — LLM-судья ревью артефактов (tool/review, зеркало client.dart).
+const STRONG_OPERATIONS = new Set(["structure", "structure-l2", "structure-l3", "validate", "quiz", "curriculum", "diagnostic", "assessment", "mastery", "tutor", "milestone", "judge"]);
 
 export function tierForOperation(operation: string): ModelTier {
   return STRONG_OPERATIONS.has(operation) ? "strong" : "fast";

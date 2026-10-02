@@ -212,6 +212,9 @@ const _strongOps = {
   'structure', 'structure-l2', 'structure-l3', 'validate',
   'quiz', 'curriculum', 'diagnostic', 'assessment', 'mastery',
   'tutor', 'milestone',
+  // `judge` — LLM-судья ревью артефактов (tool/review). Нужен strong-тир:
+  // судья проверяет факты и рассуждает о содержании, а не переписывает текст.
+  'judge',
 };
 
 /// Операции, явно приписанные к быстрому тиру («остальное» по AGENTS.md).

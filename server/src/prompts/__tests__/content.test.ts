@@ -96,3 +96,28 @@ describe("buildContentPrompt (тон контента от уровня цели
     expect(prompt).toContain("ЗАПРЕЩЕНО использовать термин");
   });
 });
+
+describe("buildContentPrompt (контракт ответа от 02.10.2026)", () => {
+  it("не просит генерировать relations: id других узлов модели неизвестны", () => {
+    const prompt = buildContentPrompt({ ...base, knowledgeLevel: "intermediate" });
+    expect(prompt).toContain('"relations": []');
+    expect(prompt).not.toContain("id_другого_узла");
+    expect(prompt).not.toContain("id_этого_узла");
+  });
+
+  it("non-expert получает блок сложности, expert — нет", () => {
+    const beginner = buildContentPrompt({ ...base, knowledgeLevel: "beginner" });
+    expect(beginner).toContain("# Сложность");
+    expect(beginner).toContain("расшифруй");
+
+    const expert = buildContentPrompt({ ...base, knowledgeLevel: "expert" });
+    expect(expert).not.toContain("# Сложность");
+  });
+
+  it("фактическая дисциплина есть на любом уровне", () => {
+    for (const level of ["beginner", "intermediate", "expert"]) {
+      const prompt = buildContentPrompt({ ...base, knowledgeLevel: level });
+      expect(prompt).toContain("# Фактическая дисциплина");
+    }
+  });
+});

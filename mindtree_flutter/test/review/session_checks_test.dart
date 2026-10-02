@@ -1,0 +1,1218 @@
+// Детерминированные проверки ПРОЖИТОЙ учебной сессии.
+//
+// Файл закрывает `tool/review/session_checks.dart` — набор из 13 проверок,
+// которые ревьюер применяет к плоскому `SessionView`. БД, drift и сеть не
+// нужны: на вход DTO, на выход — список `Finding`.
+//
+// ЗАЧЕМ ЭТИ ТЕСТЫ. Коды проверок и тексты сообщений — часть контракта отчёта
+// (`review-*.json`), а отчёты сравнивают между прогонами. Поэтому фиксируем:
+//   * какой КОД и с какой СЕРЬЁЗНОСТЬЮ срабатывает на минимальном дефекте;
+//   * что здоровая сессия не даёт НИ ОДНОЙ находки (защита от ложных
+//     срабатываний — иначе ревью превратится в шум);
+//   * что порядок и тексты находок детерминированы между вызовами.
+//
+// Пороги проверок не «подстраиваются» под тест: константы импортируются из
+// самого `session_checks.dart`, поэтому правка порога в продакшене уронит
+// тест — и это правильно.
+
+import 'dart:convert';
+
+import 'package:flutter_test/flutter_test.dart';
+
+import '../../tool/review/finding.dart';
+import '../../tool/review/session_checks.dart';
+
+// ─── Эталонные шаги и активность ─────────────────────────────────────────────
+
+/// Recall-шаг без дефектов: 2 варианта, `correctIndex` в диапазоне.
+const SessionStepView goodRecall = SessionStepView(
+  type: kStepRecall,
+  title: 'Что такое остановка?',
+  options: <String>['Верно: останавливается', 'Неверно: работает вечно'],
+  correctIndex: 0,
+  userAnswer: 'Верно: останавливается',
+  correct: true,
+  feedback: 'верно: это и есть определение остановки',
+);
+
+/// Apply-шаг без дефектов: есть инструкция и этал, ответ отличается от этала.
+const SessionStepView goodApply = SessionStepView(
+  type: kStepApply,
+  title: 'Своими словами',
+  instruction: 'Объясни своими словами, что такое остановка.',
+  bestAnswer: 'Программа не завершится за конечное время.',
+  userAnswer: 'Любая программа рано или поздно зависнет.',
+  correct: true,
+  feedback: 'верно, формулировка близка к эталону',
+);
+
+/// Активность без дефектов: есть и recall, и apply, помечена завершённой.
+const SessionActivityView goodActivity = SessionActivityView(
+  nodeId: 'n1',
+  nodeLabel: 'Остановка',
+  isComplete: true,
+  steps: <SessionStepView>[goodRecall, goodApply],
+);
+
+/// Вопрос без дефектов: закрытый, с эталоном, вердиктом и пояснением.
+const SessionQuestionView goodQuestion = SessionQuestionView(
+  nodeId: 'n1',
+  type: kStepRecall,
+  question: 'Что такое остановка?',
+  options: <String>['Верно: останавливается', 'Неверно: работает вечно'],
+  correctAnswer: 'Верно: останавливается',
+  correctIndex: 0,
+  userAnswer: 'Верно: останавливается',
+  correct: true,
+  feedback: 'верно: это и есть определение остановки',
+  timeSpentMs: 30000,
+);
+
+/// Сессия без дефектов: план, активности, вопросы и mastery согласованы.
+SessionView cleanView({
+  String status = kStatusCompleted,
+  int timeBudgetMinutes = 45,
+  List<String> plannedNodeIds = const <String>['n1'],
+  List<SessionActivityView> activities = const <SessionActivityView>[goodActivity],
+  List<SessionQuestionView> questions = const <SessionQuestionView>[goodQuestion],
+  Map<String, double> masteryBefore = const <String, double>{},
+  Map<String, double> masteryAfter = const <String, double>{'n1': 0.625},
+  List<String> misconceptions = const <String>[],
+  Map<String, String> misconceptionsByNode = const <String, String>{},
+  List<AssessmentScoreView> assessments = const <AssessmentScoreView>[],
+}) =>
+    SessionView(
+      topicName: 'Теорема остановки',
+      goal: 'overview',
+      targetLevel: 'basic_understanding',
+      timeBudgetMinutes: timeBudgetMinutes,
+      startedAt: '2024-05-01T10:00:00.000',
+      completedAt: '2024-05-01T10:30:00.000',
+      status: status,
+      plannedNodeIds: plannedNodeIds,
+      activities: activities,
+      questions: questions,
+      masteryBefore: masteryBefore,
+      masteryAfter: masteryAfter,
+      misconceptions: misconceptions,
+      misconceptionsByNode: misconceptionsByNode,
+      assessments: assessments,
+    );
+
+// ─── Хелперы для утверждений ─────────────────────────────────────────────────
+
+/// Только находки с указанным кодом — проверяем конкретный дефект.
+List<Finding> withCode(List<Finding> findings, String code) =>
+    <Finding>[for (final f in findings) if (f.code == code) f];
+
+/// Коды находок в порядке выдачи — компактно для `expect`.
+List<String> codesOf(List<Finding> findings) =>
+    <String>[for (final f in findings) f.code];
+
+/// «код/серьёзность» в порядке выдачи.
+List<String> tagsOf(List<Finding> findings) =>
+    <String>[for (final f in findings) '${f.code}/${f.severity.name}'];
+
+/// Все проверки по отдельности — эталон для проверки точки входа.
+List<Finding> everyCheck(SessionView view) => <Finding>[
+      ...checkActivityNodesKnown(view),
+      ...checkActivityStepMix(view),
+      ...checkRecallOptions(view),
+      ...checkApplyContract(view),
+      ...checkFeedbackMissing(view),
+      ...checkAnswersScored(view),
+      ...checkApplyDegenerate(view),
+      ...checkStepDuration(view),
+      ...checkSessionCompletion(view),
+      ...checkMasteryDelta(view),
+      ...checkMisconceptionRemediation(view),
+      ...checkQuestionDepth(view),
+      ...checkSessionProgression(view),
+      ...checkAssessmentScores(view),
+      ...checkVerdictConsistency(view),
+    ];
+
+/// Сессия со всеми возможными дефектами сразу — для проверки детерминизма
+/// и того, что точка входа ничего не теряет и не дублирует.
+SessionView dirtyView() => SessionView(
+      topicName: 'Теорема остановки',
+      goal: 'overview',
+      timeBudgetMinutes: 5,
+      startedAt: '2024-05-01T10:00:00.000',
+      status: 'active',
+      plannedNodeIds: const <String>['n-plan'],
+      activities: const <SessionActivityView>[
+        SessionActivityView(
+          nodeId: 'n-alien',
+          nodeLabel: 'Чужой узел',
+          steps: <SessionStepView>[
+            SessionStepView(
+              type: kStepExplain,
+              title: 'Лекция',
+              body: 'Очень длинный текст лекции, который никто не замерял '
+                  'и потому время шага осталось нулевым, а это уже больше '
+                  'четырёхсот символов в одной строке, чтобы проверка времени '
+                  'сработала и напомнила про метрику Learning Gain / Time, '
+                  'которая без замеров бессмысленна, и добавляем ещё текста '
+                  'для гарантии по порогу в четыреста символов подряд.',
+            ),
+            SessionStepView(type: kStepRecall, title: 'Без вариантов'),
+          ],
+        ),
+        SessionActivityView(
+          nodeId: 'n-plan',
+          nodeLabel: 'Плановый узел',
+          steps: <SessionStepView>[
+            SessionStepView(type: kStepExplain, title: 'Лекция 1'),
+            SessionStepView(type: kStepExplain, title: 'Лекция 2'),
+            SessionStepView(type: kStepExplain, title: 'Лекция 3'),
+            SessionStepView(
+              type: kStepApply,
+              title: 'apply без контракта',
+              userAnswer: 'какой-то ответ',
+            ),
+          ],
+        ),
+      ],
+      questions: const <SessionQuestionView>[
+        SessionQuestionView(
+          nodeId: 'n-alien',
+          type: 'application',
+          question: 'Приведи пример программы, которая не останавливается.',
+          userAnswer: 'busy wait без yield',
+        ),
+      ],
+      masteryAfter: const <String, double>{'n-прочь': 0.9},
+      misconceptions: const <String>['Путает остановку с бесконечным циклом'],
+    );
+
+void main() {
+  group('здоровая сессия', () {
+    test('не даёт ни одной находки (защита от ложных срабатываний)', () {
+      final findings = runSessionChecks(cleanView());
+
+      expect(findings, isEmpty,
+          reason: 'согласованная сессия не должна попадать в отчёт:\n'
+              '${findings.map((f) => f.toString()).join('\n')}');
+      expect(summarizeFindings(findings).hasProblems, isFalse);
+    });
+
+    test('пустая сессия даёт ровно одну info-находку про mastery', () {
+      // `SessionView()` без данных — это «сессия, из которой ничего не
+      // прочиталось». Ожидаемый контракт: не падать и честно сказать, что
+      // дельту mastery проверить нечем.
+      final findings = runSessionChecks(const SessionView(topicName: ''));
+
+      expect(tagsOf(findings), <String>['session_mastery_delta/info']);
+      expect(findings.single.message, contains('дельту проверить нечем'));
+    });
+  });
+
+  group('session_activity_node_unknown', () {
+    test('активность на узле вне плана → fail', () {
+      final findings = runSessionChecks(cleanView(
+        plannedNodeIds: const <String>['n1'],
+        activities: const <SessionActivityView>[
+          SessionActivityView(nodeId: 'n-пришелец', nodeLabel: 'Пришелец'),
+        ],
+        questions: const <SessionQuestionView>[],
+      ));
+
+      final hit = withCode(findings, SessionCheckCode.activityNodeUnknown);
+      expect(hit, hasLength(1));
+      expect(hit.single.severity, FindingSeverity.fail);
+      expect(hit.single.nodeId, 'n-пришелец');
+      expect(hit.single.data?['knownCount'], 1);
+    });
+
+    test('без плана, mastery и вопросов — info, а не fail', () {
+      final findings = runSessionChecks(cleanView(
+        plannedNodeIds: const <String>[],
+        activities: const <SessionActivityView>[
+          SessionActivityView(nodeId: 'n1'),
+        ],
+        questions: const <SessionQuestionView>[],
+        masteryAfter: const <String, double>{},
+      ));
+
+      final hit = withCode(findings, SessionCheckCode.activityNodeUnknown);
+      expect(hit, hasLength(1));
+      expect(hit.single.severity, FindingSeverity.info);
+      expect(hit.single.message, contains('проверить, откуда взялись активности'));
+    });
+
+    test('без активностей проверка молчит', () {
+      final findings = runSessionChecks(cleanView(activities: const []));
+      expect(withCode(findings, SessionCheckCode.activityNodeUnknown), isEmpty);
+    });
+  });
+
+  group('session_step_mix', () {
+    test('только лекция → warn со списком типов', () {
+      final findings = runSessionChecks(cleanView(
+        activities: const <SessionActivityView>[
+          SessionActivityView(
+            nodeId: 'n1',
+            nodeLabel: 'Остановка',
+            steps: <SessionStepView>[
+              SessionStepView(type: kStepExplain, title: 'Лекция'),
+              SessionStepView(type: kStepExample, title: 'Пример'),
+            ],
+          ),
+        ],
+      ));
+
+      final hit = withCode(findings, SessionCheckCode.stepMix);
+      expect(hit, hasLength(1));
+      expect(hit.single.severity, FindingSeverity.warn);
+      expect(hit.single.data?['stepTypes'], <String>[kStepExplain, kStepExample]);
+      expect(hit.single.message, contains('только читает'));
+    });
+
+    test('один recall среди explain спасает активность', () {
+      final findings = runSessionChecks(cleanView(
+        activities: const <SessionActivityView>[
+          SessionActivityView(
+            nodeId: 'n1',
+            steps: <SessionStepView>[
+              SessionStepView(type: kStepExplain, title: 'Лекция'),
+              SessionStepView(
+                type: kStepRecall,
+                title: 'Проверка',
+                options: <String>['да', 'нет'],
+                correctIndex: 0,
+              ),
+            ],
+          ),
+        ],
+      ));
+
+      expect(withCode(findings, SessionCheckCode.stepMix), isEmpty);
+    });
+  });
+
+  group('session_recall_options', () {
+    SessionView viewWithRecall(SessionStepView step) => cleanView(
+          activities: <SessionActivityView>[
+            SessionActivityView(
+                nodeId: 'n1', nodeLabel: 'Остановка', steps: <SessionStepView>[step]),
+          ],
+          questions: const <SessionQuestionView>[],
+        );
+
+    test('вариантов нет → fail', () {
+      final findings = runSessionChecks(viewWithRecall(
+          const SessionStepView(type: kStepRecall, title: 'Без вариантов')));
+
+      final hit = withCode(findings, SessionCheckCode.recallOptions);
+      expect(hit, hasLength(1));
+      expect(hit.single.severity, FindingSeverity.fail);
+      expect(hit.single.message, contains('вариантов нет'));
+    });
+
+    test('один вариант и пять вариантов → fail (границы 2..4)', () {
+      final one = withCode(
+        runSessionChecks(viewWithRecall(const SessionStepView(
+            type: kStepRecall, title: 'Один', options: <String>['да'], correctIndex: 0))),
+        SessionCheckCode.recallOptions,
+      );
+      final five = withCode(
+        runSessionChecks(viewWithRecall(const SessionStepView(
+            type: kStepRecall,
+            title: 'Пять',
+            options: <String>['a', 'b', 'c', 'd', 'e'],
+            correctIndex: 0))),
+        SessionCheckCode.recallOptions,
+      );
+
+      expect(one.single.data?['options'], 1);
+      expect(five.single.data?['options'], 5);
+      expect(one.single.message, contains('вариантов 1'));
+      expect(five.single.message, contains('вариантов 5'));
+    });
+
+    test('correctIndex не задан → fail', () {
+      final findings = runSessionChecks(viewWithRecall(const SessionStepView(
+        type: kStepRecall,
+        title: 'Без этала',
+        options: <String>['да', 'нет'],
+      )));
+
+      expect(withCode(findings, SessionCheckCode.recallOptions).single.message,
+          contains('не задан correctIndex'));
+    });
+
+    test('correctIndex вне диапазона → fail с числами в data', () {
+      final findings = runSessionChecks(viewWithRecall(const SessionStepView(
+        type: kStepRecall,
+        title: 'Мимо',
+        options: <String>['да', 'нет'],
+        correctIndex: 3,
+      )));
+
+      final hit = withCode(findings, SessionCheckCode.recallOptions);
+      expect(hit.single.severity, FindingSeverity.fail);
+      expect(hit.single.data?['correctIndex'], 3);
+      expect(hit.single.data?['options'], 2);
+      expect(hit.single.message, contains('вне диапазона 0..1'));
+    });
+
+    test('границы диапазона (2 и 4 варианта) — чисто', () {
+      for (final options in <List<String>>[
+        <String>['да', 'нет'],
+        <String>['a', 'b', 'c', 'd'],
+      ]) {
+        final findings = runSessionChecks(viewWithRecall(SessionStepView(
+          type: kStepRecall,
+          title: 'В границах',
+          options: options,
+          correctIndex: 0,
+        )));
+        expect(withCode(findings, SessionCheckCode.recallOptions), isEmpty,
+            reason: 'вариантов ${options.length} — это норма');
+      }
+      // Сами пороги обязаны совпадать с объявленными в продакшене.
+      expect(kMinRecallOptions, 2);
+      expect(kMaxRecallOptions, 4);
+    });
+  });
+
+  group('session_apply_contract', () {
+    SessionView viewWithApply(SessionStepView step) => cleanView(
+          activities: <SessionActivityView>[
+            SessionActivityView(
+                nodeId: 'n1', nodeLabel: 'Остановка', steps: <SessionStepView>[step]),
+          ],
+          questions: const <SessionQuestionView>[],
+        );
+
+    test('нет инструкции и этала → две fail-находки', () {
+      final findings = runSessionChecks(
+          viewWithApply(const SessionStepView(type: kStepApply, title: 'Голый apply')));
+
+      final hit = withCode(findings, SessionCheckCode.applyContract);
+      expect(hit, hasLength(2));
+      expect(hit.map((f) => f.severity), everyElement(FindingSeverity.fail));
+      expect(hit.first.message, contains('пустая инструкция'));
+      expect(hit.last.message, contains('нет эталонного ответа'));
+    });
+
+    test('инструкция из пробелов считается пустой', () {
+      final findings = runSessionChecks(viewWithApply(const SessionStepView(
+        type: kStepApply,
+        title: 'Пробелы',
+        instruction: '   ',
+        bestAnswer: 'эталон есть',
+      )));
+
+      expect(withCode(findings, SessionCheckCode.applyContract), hasLength(1));
+    });
+
+    test('есть и инструкция, и этал → чисто', () {
+      expect(withCode(runSessionChecks(viewWithApply(goodApply)), SessionCheckCode.applyContract),
+          isEmpty);
+    });
+  });
+
+  group('session_apply_degenerate', () {
+    test('этал дословно повторяет инструкцию → warn', () {
+      const text = 'Объясни своими словами что такое остановка';
+      final findings = runSessionChecks(cleanView(
+        activities: const <SessionActivityView>[
+          SessionActivityView(
+            nodeId: 'n1',
+            steps: <SessionStepView>[
+              SessionStepView(
+                type: kStepApply,
+                title: 'Этал = инструкция',
+                instruction: text,
+                bestAnswer: text,
+              ),
+            ],
+          ),
+        ],
+        questions: const <SessionQuestionView>[],
+      ));
+
+      final hit = withCode(findings, SessionCheckCode.applyDegenerate);
+      expect(hit, hasLength(1));
+      expect(hit.single.severity, FindingSeverity.warn);
+      expect(hit.single.message, contains('дословно совпадает с инструкцией'));
+    });
+
+    test('серия apply с ответом = этал → warn с maxRun', () {
+      final findings = runSessionChecks(cleanView(
+        activities: <SessionActivityView>[
+          SessionActivityView(
+            nodeId: 'n1',
+            steps: <SessionStepView>[
+              for (var i = 0; i < kApplyEchoRun; i++)
+                SessionStepView(
+                  type: kStepApply,
+                  title: 'Задача $i',
+                  instruction: 'Сформулируй определение остановки',
+                  bestAnswer: 'Программа не завершится за конечное время',
+                  userAnswer: 'Программа не завершится за конечное время',
+                  correct: true,
+                  feedback: 'верно',
+                ),
+            ],
+          ),
+        ],
+        questions: const <SessionQuestionView>[],
+      ));
+
+      final hit = withCode(findings, SessionCheckCode.applyDegenerate);
+      expect(hit, hasLength(1));
+      expect(hit.single.data?['maxRun'], kApplyEchoRun);
+      expect(hit.single.message, contains('копипаст'));
+      expect(kApplyEchoRun, 3);
+    });
+
+    test('серия короче порога — молчим', () {
+      final findings = runSessionChecks(cleanView(
+        activities: <SessionActivityView>[
+          SessionActivityView(
+            nodeId: 'n1',
+            steps: <SessionStepView>[
+              for (var i = 0; i < kApplyEchoRun - 1; i++)
+                SessionStepView(
+                  type: kStepApply,
+                  title: 'Задача $i',
+                  instruction: 'Сформулируй определение остановки',
+                  bestAnswer: 'Программа не завершится за конечное время',
+                  userAnswer: 'Программа не завершится за конечное время',
+                  correct: true,
+                  feedback: 'верно',
+                ),
+            ],
+          ),
+        ],
+        questions: const <SessionQuestionView>[],
+      ));
+
+      expect(withCode(findings, SessionCheckCode.applyDegenerate), isEmpty);
+    });
+  });
+
+  group('session_feedback_missing и session_answer_not_scored', () {
+    test('отвеченный шаг без фидбека → warn; незаполненный — молчит', () {
+      final findings = runSessionChecks(cleanView(
+        activities: const <SessionActivityView>[
+          SessionActivityView(
+            nodeId: 'n1',
+            steps: <SessionStepView>[
+              SessionStepView(
+                  type: kStepRecall, title: 'Отвечен', userAnswer: 'да', correct: true),
+              SessionStepView(type: kStepRecall, title: 'Не отвечен'),
+            ],
+          ),
+        ],
+        questions: const <SessionQuestionView>[],
+      ));
+
+      final hit = withCode(findings, SessionCheckCode.feedbackMissing);
+      expect(hit, hasLength(1));
+      expect(hit.single.severity, FindingSeverity.warn);
+      expect(hit.single.message, contains('Отвечен'));
+    });
+
+    test('ответ есть, вердикта нет → warn отдельно по шагам и вопросам', () {
+      final findings = runSessionChecks(cleanView(
+        activities: const <SessionActivityView>[
+          SessionActivityView(
+            nodeId: 'n1',
+            steps: <SessionStepView>[
+              SessionStepView(
+                type: kStepApply,
+                title: 'Без вердикта',
+                instruction: 'Опиши остановку',
+                bestAnswer: 'не завершится',
+                userAnswer: 'зависнет',
+                feedback: 'близко',
+              ),
+            ],
+          ),
+        ],
+        questions: const <SessionQuestionView>[
+          SessionQuestionView(
+            nodeId: 'n1',
+            question: 'Что такое остановка?',
+            options: <String>['да', 'нет'],
+            correctIndex: 0,
+            userAnswer: 'да',
+            feedback: 'верно',
+          ),
+        ],
+      ));
+
+      final hit = withCode(findings, SessionCheckCode.answerNotScored);
+      expect(hit, hasLength(2));
+      expect(hit.every((f) => f.severity == FindingSeverity.warn), isTrue);
+      expect(hit.first.message, contains('correct == null'));
+      expect(hit.last.message, contains('correct == null'));
+    });
+  });
+
+  group('session_step_duration', () {
+    test('сумма времени в 2.5 бюджета → warn', () {
+      final findings = runSessionChecks(cleanView(
+        timeBudgetMinutes: 1,
+        questions: const <SessionQuestionView>[
+          SessionQuestionView(
+            nodeId: 'n1',
+            question: 'Что такое остановка?',
+            correctAnswer: 'остановка',
+            userAnswer: 'остановка',
+            correct: true,
+            timeSpentMs: 150000,
+          ),
+        ],
+      ));
+
+      final hit = withCode(findings, SessionCheckCode.stepDuration);
+      expect(hit, hasLength(1));
+      expect(hit.single.severity, FindingSeverity.warn);
+      expect(hit.single.data?['ratio'], 2.5);
+      expect(hit.single.message, contains('2.5x)'));
+      expect(kSessionDurationWarnRatio, 2.0);
+    });
+
+    test('сумма времени в 6x бюджета → fail', () {
+      final findings = runSessionChecks(cleanView(
+        timeBudgetMinutes: 1,
+        questions: const <SessionQuestionView>[
+          SessionQuestionView(
+            nodeId: 'n1',
+            question: 'Что такое остановка?',
+            correctAnswer: 'остановка',
+            userAnswer: 'остановка',
+            correct: true,
+            timeSpentMs: 400000,
+          ),
+        ],
+      ));
+
+      final hit = withCode(findings, SessionCheckCode.stepDuration);
+      expect(hit.single.severity, FindingSeverity.fail);
+      expect(hit.single.message, contains('fail от 5.0x'));
+      expect(kSessionDurationFailRatio, 5.0);
+    });
+
+    test('нулевое время при длинном тексте → warn со списком шагов', () {
+      final findings = runSessionChecks(cleanView(
+        activities: <SessionActivityView>[
+          SessionActivityView(
+            nodeId: 'n1',
+            nodeLabel: 'Остановка',
+            steps: <SessionStepView>[
+              SessionStepView(
+                type: kStepExplain,
+                title: 'Длинная лекция',
+                body: 'я' * (kLongStepTextChars + 10),
+              ),
+              goodRecall,
+            ],
+          ),
+        ],
+      ));
+
+      final hit = withCode(findings, SessionCheckCode.stepDuration);
+      expect(hit, hasLength(1));
+      expect(hit.single.severity, FindingSeverity.warn);
+      expect(hit.single.data?['silentSteps'], 1);
+      expect(hit.single.message, contains('n1#1'));
+      expect(hit.single.message, contains('$kLongStepTextChars символов'));
+    });
+
+    test('короткий шаг без замера — не находка', () {
+      final findings = runSessionChecks(cleanView(
+        activities: const <SessionActivityView>[
+          SessionActivityView(
+            nodeId: 'n1',
+            steps: <SessionStepView>[
+              SessionStepView(type: kStepExplain, title: 'Короткая подсказка', body: 'мало'),
+              goodRecall,
+            ],
+          ),
+        ],
+      ));
+
+      expect(withCode(findings, SessionCheckCode.stepDuration), isEmpty);
+    });
+  });
+
+  group('session_completion', () {
+    SessionView viewWithAnswers(int answered, {bool isComplete = false}) => cleanView(
+          status: 'active',
+          activities: <SessionActivityView>[
+            SessionActivityView(
+              nodeId: 'n1',
+              nodeLabel: 'Остановка',
+              isComplete: isComplete,
+              steps: <SessionStepView>[
+                for (var i = 0; i < answered; i++)
+                  SessionStepView(
+                    type: kStepApply,
+                    title: 'Задача $i',
+                    instruction: 'Опиши остановку',
+                    bestAnswer: 'не завершится',
+                    userAnswer: 'зависнет',
+                    correct: true,
+                    feedback: 'верно',
+                  ),
+                if (answered == 0) const SessionStepView(type: kStepExplain, title: 'Лекция'),
+              ],
+            ),
+          ],
+          questions: const <SessionQuestionView>[],
+        );
+
+    test('обе ветви: статус не переключили и флаг isComplete не выставлен', () {
+      final hit =
+          withCode(runSessionChecks(viewWithAnswers(kEnoughAnswersForCompletion)),
+              SessionCheckCode.completion);
+
+      expect(hit, hasLength(2));
+      expect(hit.every((f) => f.severity == FindingSeverity.warn), isTrue);
+      expect(hit.first.message, contains('просто статус не переключили'));
+      expect(hit.first.data?['answeredSteps'], kEnoughAnswersForCompletion);
+      expect(hit.last.message, contains('isComplete == false'));
+    });
+
+    test('порог ответов: двух мало, трёх достаточно', () {
+      // Ветка «статус не переключили» срабатывает от числа ответов, а ветка
+      // про isComplete — от самого факта ответов. Поэтому границу проверяем
+      // на активности, где флаг завершения уже выставлен.
+      expect(kEnoughAnswersForCompletion, 3);
+      expect(
+        withCode(
+          runSessionChecks(
+              viewWithAnswers(kEnoughAnswersForCompletion - 1, isComplete: true)),
+          SessionCheckCode.completion,
+        ),
+        isEmpty,
+        reason: 'двух ответов недостаточно, чтобы считать сессию завершённой',
+      );
+      expect(
+        withCode(
+          runSessionChecks(viewWithAnswers(kEnoughAnswersForCompletion, isComplete: true)),
+          SessionCheckCode.completion,
+        ),
+        hasLength(1),
+      );
+    });
+
+    test('isComplete выставлен — вторая ветка молчит', () {
+      final hit = withCode(
+        runSessionChecks(viewWithAnswers(kEnoughAnswersForCompletion, isComplete: true)),
+        SessionCheckCode.completion,
+      );
+
+      expect(hit, hasLength(1));
+      expect(hit.single.message, contains('просто статус не переключили'));
+    });
+
+    test('completed без активностей — чисто', () {
+      expect(
+        withCode(
+          runSessionChecks(cleanView(status: kStatusCompleted, activities: const [])),
+          SessionCheckCode.completion,
+        ),
+        isEmpty,
+      );
+    });
+  });
+
+  group('session_mastery_delta', () {
+    test('нет данных ПОСЛЕ → info', () {
+      final hit = withCode(
+        runSessionChecks(cleanView(masteryAfter: const <String, double>{})),
+        SessionCheckCode.masteryDelta,
+      );
+
+      expect(hit.single.severity, FindingSeverity.info);
+    });
+
+    test('рост на узле вне сессии → warn', () {
+      final hit = withCode(
+        runSessionChecks(cleanView(masteryAfter: const <String, double>{'n-прочь': 0.9})),
+        SessionCheckCode.masteryDelta,
+      );
+
+      expect(hit, hasLength(1));
+      expect(hit.single.severity, FindingSeverity.warn);
+      expect(hit.single.nodeId, 'n-прочь');
+      expect(hit.single.data?['before'], isNull);
+      expect(hit.single.message, contains('не было ни в плане'));
+    });
+
+    test('mastery не выросла (после <= до) → молчим', () {
+      expect(
+        withCode(
+          runSessionChecks(cleanView(
+            masteryBefore: const <String, double>{'n1': 0.9},
+            masteryAfter: const <String, double>{'n1': 0.5},
+          )),
+          SessionCheckCode.masteryDelta,
+        ),
+        isEmpty,
+      );
+    });
+  });
+
+  group('session_misconception_without_remediation', () {
+    test('мисконцепция без nodeId → warn (данных не хватает)', () {
+      final hit = withCode(
+        runSessionChecks(cleanView(
+          misconceptions: const <String>['Путает остановку с зацикливанием'],
+        )),
+        SessionCheckCode.misconceptionWithoutRemediation,
+      );
+
+      expect(hit.single.severity, FindingSeverity.warn);
+      expect(hit.single.data?['count'], 1);
+      expect(hit.single.message, contains('без nodeId'));
+    });
+
+    test('мисконцепция на узле без активностей → warn', () {
+      final hit = withCode(
+        runSessionChecks(cleanView(
+          misconceptions: const <String>['Путает остановку с зацикливанием'],
+          misconceptionsByNode: const <String, String>{'n-прочь': 'Путает остановку'},
+          plannedNodeIds: const <String>[],
+          activities: const <SessionActivityView>[],
+          questions: const <SessionQuestionView>[],
+        )),
+        SessionCheckCode.misconceptionWithoutRemediation,
+      );
+
+      expect(hit.single.message, contains('активностей по узлу не было вовсе'));
+    });
+
+    test('активности без apply → warn: отработки не было', () {
+      final hit = withCode(
+        runSessionChecks(cleanView(
+          misconceptions: const <String>['Путает остановку с зацикливанием'],
+          misconceptionsByNode: const <String, String>{'n1': 'Путает остановку'},
+          activities: const <SessionActivityView>[
+            SessionActivityView(nodeId: 'n1', steps: <SessionStepView>[goodRecall]),
+          ],
+        )),
+        SessionCheckCode.misconceptionWithoutRemediation,
+      );
+
+      expect(hit.single.data?['activities'], 1);
+      expect(hit.single.message, contains('без apply-шага'));
+    });
+
+    test('активность с apply на узле мисконцепции → чисто', () {
+      expect(
+        withCode(
+          runSessionChecks(cleanView(
+            misconceptions: const <String>['Путает остановку с зацикливанием'],
+            misconceptionsByNode: const <String, String>{'n1': 'Путает остановку'},
+          )),
+          SessionCheckCode.misconceptionWithoutRemediation,
+        ),
+        isEmpty,
+      );
+    });
+  });
+
+  group('session_question_shallow', () {
+    test('закрытый вопрос без фидбека → warn', () {
+      final hit = withCode(
+        runSessionChecks(cleanView(
+          questions: const <SessionQuestionView>[
+            SessionQuestionView(
+              nodeId: 'n1',
+              type: 'recall',
+              question: 'Что такое остановка?',
+              options: <String>['да', 'нет'],
+              correctIndex: 0,
+              userAnswer: 'да',
+              correct: true,
+            ),
+          ],
+        )),
+        SessionCheckCode.questionShallow,
+      );
+
+      expect(hit.single.severity, FindingSeverity.warn);
+      expect(hit.single.message, contains('нет фидбека'));
+    });
+
+    test('фидбек без цитаты варианта и без оценочной связки → warn', () {
+      final hit = withCode(
+        runSessionChecks(cleanView(
+          questions: const <SessionQuestionView>[
+            SessionQuestionView(
+              nodeId: 'n1',
+              type: 'recall',
+              question: 'Что такое остановка?',
+              options: <String>['Верно: останавливается', 'Неверно: работает вечно'],
+              correctIndex: 0,
+              userAnswer: 'Верно: останавливается',
+              correct: true,
+              feedback: 'Ну вот как-то так',
+            ),
+          ],
+        )),
+        SessionCheckCode.questionShallow,
+      );
+
+      expect(hit.single.message, contains('фидбек не объясняет правильный вариант'));
+    });
+
+    test('открытый вопрос без эталона → warn', () {
+      final hit = withCode(
+        runSessionChecks(cleanView(
+          questions: const <SessionQuestionView>[
+            SessionQuestionView(
+              nodeId: 'n1',
+              type: 'application',
+              question: 'Приведи пример вечной программы.',
+              userAnswer: 'busy wait',
+              correct: true,
+              feedback: 'хороший пример',
+            ),
+          ],
+        )),
+        SessionCheckCode.questionShallow,
+      );
+
+      expect(hit.single.message, contains('без эталонного ответа'));
+    });
+
+    test('оценочная связка из продакшена засчитывается как пояснение', () {
+      // Связка должна совпасть ПОЛНОСТЬЮ: «потому что» — да, «потому» — нет.
+      expect(
+        withCode(
+          runSessionChecks(cleanView(
+            questions: const <SessionQuestionView>[
+              SessionQuestionView(
+                nodeId: 'n1',
+                type: 'recall',
+                question: 'Что такое остановка?',
+                options: <String>['Верно: останавливается', 'Неверно: работает вечно'],
+                correctIndex: 0,
+                userAnswer: 'Верно: останавливается',
+                correct: true,
+                feedback: 'Ответ принят, потому что это определение остановки',
+              ),
+            ],
+          )),
+          SessionCheckCode.questionShallow,
+        ),
+        isEmpty,
+      );
+    });
+
+    test('усечённая связка «потому» пояснением не считается', () {
+      final hit = withCode(
+        runSessionChecks(cleanView(
+          questions: const <SessionQuestionView>[
+            SessionQuestionView(
+              nodeId: 'n1',
+              type: 'recall',
+              question: 'Что такое остановка?',
+              options: <String>['Верно: останавливается', 'Неверно: работает вечно'],
+              correctIndex: 0,
+              userAnswer: 'Верно: останавливается',
+              correct: true,
+              feedback: 'Ответ принят, потому остановка и есть остановка',
+            ),
+          ],
+        )),
+        SessionCheckCode.questionShallow,
+      );
+
+      expect(hit, hasLength(1));
+    });
+  });
+
+  group('session_question_shallow: зафиксированный дефект', () {
+    test('этал не из вариантов + оценочная связка → проверка молчит', () {
+      // Комментарий в коде проверки обещает, что связка («верно», «потому что»)
+      // засчитывается как пояснение «только если вариант известен». На деле
+      // условие `option != null` не проверяется: вопрос, у которого
+      // `correctAnswer` не совпал ни с одним вариантом (loader вернул
+      // `correctIndex == null`), проходит с любым фидбеком вида «верно».
+      // Зафиксировано как есть — правка нужна в `checkQuestionDepth`.
+      final hit = withCode(
+        runSessionChecks(cleanView(
+          questions: const <SessionQuestionView>[
+            SessionQuestionView(
+              nodeId: 'n1',
+              type: 'recall',
+              question: 'Что такое остановка?',
+              options: <String>['да', 'нет'],
+              correctAnswer: 'возможно',
+              correctIndex: null,
+              userAnswer: 'да',
+              correct: true,
+              feedback: 'верно',
+            ),
+          ],
+        )),
+        SessionCheckCode.questionShallow,
+      );
+
+      expect(hit, isEmpty);
+    });
+  });
+
+  group('session_progression', () {
+    test('4 шага одного типа → info с порядком типов', () {
+      final findings = runSessionChecks(cleanView(
+        activities: const <SessionActivityView>[
+          SessionActivityView(
+            nodeId: 'n1',
+            steps: <SessionStepView>[
+              SessionStepView(type: kStepExplain, title: 'Лекция 1'),
+              SessionStepView(type: kStepExplain, title: 'Лекция 2'),
+              SessionStepView(type: kStepExplain, title: 'Лекция 3'),
+              SessionStepView(type: kStepExplain, title: 'Лекция 4'),
+            ],
+          ),
+        ],
+      ));
+
+      final hit = withCode(findings, SessionCheckCode.progression);
+      expect(hit.single.severity, FindingSeverity.info);
+      expect(hit.single.data?['repeats'], 3);
+      expect(hit.single.data?['transitions'], 3);
+      expect(hit.single.message, contains('100%'));
+      expect(kMinStepsForProgression, 4);
+      expect(kMaxSameTypeRunRatio, 0.6);
+    });
+
+    test('трёх шагов мало для вывода о повторах', () {
+      final findings = runSessionChecks(cleanView(
+        activities: const <SessionActivityView>[
+          SessionActivityView(
+            nodeId: 'n1',
+            steps: <SessionStepView>[
+              SessionStepView(type: kStepExplain, title: 'Лекция 1'),
+              SessionStepView(type: kStepExplain, title: 'Лекция 2'),
+              SessionStepView(type: kStepExplain, title: 'Лекция 3'),
+            ],
+          ),
+        ],
+      ));
+
+      expect(withCode(findings, SessionCheckCode.progression), isEmpty);
+    });
+  });
+
+  group('session_score_mismatch', () {
+    test('балл расходится с долей верных попыток → warn', () {
+      final hit = withCode(
+        runSessionChecks(cleanView(
+          assessments: const <AssessmentScoreView>[
+            AssessmentScoreView(
+              type: 'quiz',
+              recordedScore: 0.9,
+              attempts: 3,
+              correctAttempts: 2,
+            ),
+          ],
+        )),
+        SessionCheckCode.scoreMismatch,
+      );
+
+      expect(hit.single.severity, FindingSeverity.warn);
+      expect(hit.single.message, contains('0.90'));
+    });
+
+    test('балл в пределах допуска → без находки', () {
+      expect(
+        runSessionChecks(cleanView(
+          assessments: const <AssessmentScoreView>[
+            AssessmentScoreView(
+              type: 'quiz',
+              recordedScore: 0.7,
+              attempts: 3,
+              correctAttempts: 2,
+            ),
+          ],
+        )),
+        isEmpty,
+      );
+    });
+
+    test('попыток нет, а балл записан → warn: сверить нечего', () {
+      final hit = withCode(
+        runSessionChecks(cleanView(
+          assessments: const <AssessmentScoreView>[
+            AssessmentScoreView(type: 'quiz', recordedScore: 0.8),
+          ],
+        )),
+        SessionCheckCode.scoreMismatch,
+      );
+
+      expect(hit.single.message, contains('попыток'));
+    });
+  });
+
+  group('session_verdict_contradicts_answer', () {
+    test('ответ равен эталону, а попытка «неверно» → fail', () {
+      // Кейс из архива сессии: правильный ответ помечен как ошибка, из-за чего
+      // mastery и мисконцепции считают ученика неуспешным на ровном месте.
+      final hit = withCode(
+        runSessionChecks(cleanView(
+          questions: const <SessionQuestionView>[
+            SessionQuestionView(
+              nodeId: 'n1',
+              type: kStepRecall,
+              question: 'Что такое остановка?',
+              options: <String>['Верно: останавливается', 'Неверно: работает вечно'],
+              correctAnswer: 'Верно: останавливается',
+              correctIndex: 0,
+              userAnswer: 'Верно: останавливается',
+              correct: false,
+              feedback: 'Ну вот как-то так',
+            ),
+          ],
+        )),
+        SessionCheckCode.verdictContradictsAnswer,
+      );
+
+      expect(hit.single.severity, FindingSeverity.fail);
+      expect(hit.single.message, contains('правильным вариантом'));
+      expect(hit.single.nodeId, 'n1');
+    });
+
+    test('ответ совпал с текстом правильного варианта → тоже fail', () {
+      // `correctAnswer` в базе может быть пустым, а совпадение идёт по тексту
+      // варианта с correctIndex.
+      final hit = withCode(
+        checkVerdictConsistency(cleanView(
+          questions: const <SessionQuestionView>[
+            SessionQuestionView(
+              nodeId: 'n1',
+              type: kStepRecall,
+              question: 'Что такое остановка?',
+              options: <String>['останавливается', 'работает вечно'],
+              correctIndex: 0,
+              userAnswer: 'останавливается',
+              correct: false,
+            ),
+          ],
+        )),
+        SessionCheckCode.verdictContradictsAnswer,
+      );
+
+      expect(hit, isNotEmpty);
+    });
+
+    test('открытый вопрос без этала не считается противоречием', () {
+      // Вердикт по открытому ответу может быть rubric-оценкой — сравнивать
+      // тексты здесь нельзя, иначе будут ложные срабатывания.
+      final hit = withCode(
+        runSessionChecks(cleanView(
+          questions: const <SessionQuestionView>[
+            SessionQuestionView(
+              nodeId: 'n1',
+              type: 'application',
+              question: 'Постройте пример остановки.',
+              correctAnswer: 'любой корректный пример',
+              userAnswer: 'любой корректный пример',
+              correct: false,
+              feedback: 'Ответ верный по смыслу, но не развёрнут.',
+            ),
+          ],
+        )),
+        SessionCheckCode.verdictContradictsAnswer,
+      );
+
+      expect(hit, isEmpty);
+    });
+
+    test('correctIndex за границами вариантов → без падения и без находки', () {
+      // Битые данные не должны ронять ревью - ровно то, что мы чинили в
+      // загрузчике, нельзя reintroduce в проверках.
+      final hit = withCode(
+        checkVerdictConsistency(cleanView(
+          questions: const <SessionQuestionView>[
+            SessionQuestionView(
+              nodeId: 'n1',
+              type: kStepRecall,
+              question: 'Что такое остановка?',
+              options: <String>['останавливается', 'работает вечно'],
+              correctIndex: 7,
+              userAnswer: 'останавливается',
+              correct: false,
+            ),
+          ],
+        )),
+        SessionCheckCode.verdictContradictsAnswer,
+      );
+
+      expect(hit, isEmpty);
+    });
+
+    test('здоровый вердикт не даёт находок', () {
+      expect(checkVerdictConsistency(cleanView()), isEmpty);
+    });
+  });
+
+  group('детерминизм', () {
+    test('два вызова на одном входе дают идентичный список находок', () {
+      final view = dirtyView();
+      final first = runSessionChecks(view);
+      final second = runSessionChecks(view);
+
+      expect(
+        <Map<String, dynamic>>[for (final f in second) f.toJson()],
+        <Map<String, dynamic>>[for (final f in first) f.toJson()],
+      );
+      expect(jsonEncode(<Object>[for (final f in second) f.toJson()]),
+          jsonEncode(<Object>[for (final f in first) f.toJson()]));
+    });
+
+    test('находки отсортированы по коду, затем по узлу', () {
+      final findings = runSessionChecks(dirtyView());
+      final codes = codesOf(findings);
+
+      expect(codes, <String>[...codes]..sort());
+      expect(findings.length, greaterThan(3),
+          reason: 'грязная сессия обязана дать несколько находок разных проверок');
+    });
+
+    test('точка входа = все проверки + стабильная сортировка', () {
+      // Ни одна проверка не теряется и не дублируется на пути к отчёту.
+      final view = dirtyView();
+      final throughEntryPoint = runSessionChecks(view);
+      final direct = sortedFindings(everyCheck(view));
+
+      expect(
+        <Map<String, dynamic>>[for (final f in throughEntryPoint) f.toJson()],
+        <Map<String, dynamic>>[for (final f in direct) f.toJson()],
+      );
+    });
+
+    test('грязная сессия даёт и fail, и warn', () {
+      final summary = summarizeFindings(runSessionChecks(dirtyView()));
+
+      expect(summary.fail, greaterThan(0));
+      expect(summary.warn, greaterThan(0));
+      expect(summary.hasProblems, isTrue);
+      expect(summary.hasFailures, isTrue);
+      expect(summary.rankMax, FindingSeverity.fail.rank);
+    });
+
+    test('info появляется ровно там, где данных не хватает', () {
+      // Нет mastery «после» — единственная находка должна быть info, и никаких
+      // warn/fail: неполные данные не должны выглядеть как плохое обучение.
+      final summary = summarizeFindings(
+          runSessionChecks(cleanView(masteryAfter: const <String, double>{})));
+
+      expect(summary.info, 1);
+      expect(summary.warn, 0);
+      expect(summary.fail, 0);
+      expect(summary.hasProblems, isFalse);
+    });
+  });
+}

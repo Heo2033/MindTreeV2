@@ -1,4 +1,4 @@
-import type {
+﻿import type {
   Relation,
   RelationType,
 } from "@mindtree/types";
@@ -1093,7 +1093,14 @@ export class KnowledgeGraphEngine {
       content.one_liner,
       content.details,
       content.analogy ?? null,
-      JSON.stringify(content.relations),
+      JSON.stringify(
+        mergeContentRelations({
+          existing: parseNodeRelations(nodeRow.relations_json),
+          fromContent: content.relations,
+          nodeId,
+          knownIds: new Set(allRows.map((r) => String(r.id))),
+        }),
+      ),
       JSON.stringify(content.sources ?? []),
       nodeId,
     );
@@ -1360,6 +1367,63 @@ const VALID_RELATION_TYPES = new Set<string>([
   "used_for",
   "alternative_to",
 ]);
+
+/** Разбирает `relations_json` узла; битое значение — пустой список. */
+function parseNodeRelations(raw: unknown): Relation[] {
+  if (typeof raw !== "string" || raw === "") return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (r): r is Relation =>
+        !!r && typeof r === "object" && typeof (r as { to?: unknown }).to === "string",
+    );
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Связи принадлежат структурной стадии: там модель видит настоящие id.
+ *
+ * Контентная стадия таких id не знает, поэтому её связи не должны ни затирать
+ * структурные, ни попадать в дерево выдуманными целями (`AGENTS.md`: связи
+ * ссылаются на существующие узлы). Берём структурные как есть и добавляем только
+ * разрешимые контентные. Зеркало `_mergeContentRelations` в knowledge_graph_engine.dart.
+ */
+export function mergeContentRelations({
+  existing,
+  fromContent,
+  nodeId,
+  knownIds,
+}: {
+  existing: Relation[];
+  fromContent: unknown;
+  nodeId: string;
+  knownIds: Set<string>;
+}): Relation[] {
+  const out: Relation[] = [...existing];
+  const seen = new Set(existing.map((r) => `${r.from}|${r.to}|${r.type}`));
+  const list = Array.isArray(fromContent) ? fromContent : [];
+  for (const item of list) {
+    if (!item || typeof item !== "object") continue;
+    const rec = item as { to?: unknown; type?: unknown; label?: unknown };
+    if (typeof rec.to !== "string" || rec.to === "") continue;
+    // `from` принудительно ведёт с узла: иначе связь повисает в воздухе.
+    if (!knownIds.has(nodeId) || !knownIds.has(rec.to)) continue;
+    const type = typeof rec.type === "string" ? rec.type : "related";
+    const key = `${nodeId}|${rec.to}|${type}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      from: nodeId,
+      to: rec.to,
+      type: type as RelationType,
+      label: typeof rec.label === "string" ? rec.label : undefined,
+    } as Relation);
+  }
+  return out;
+}
 
 
 function maxLevelOf(nodes: NodeDraft[]): number {

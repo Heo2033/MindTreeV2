@@ -92,9 +92,53 @@ void main() {
         },
       );
       expect(p, contains('DDIM'));
-      expect(p, contains('n3_ddim'));
       expect(p, contains('Детерминированный метод сэмплирования'));
       expectNoPlaceholders(p, 'content');
+    });
+
+    test('buildContentPrompt не генерирует relations (id неизвестны модели)', () {
+      // Контентная стадия не знает id других узлов: связи задаёт структурная.
+      // Промпт обязан требовать пустой массив, иначе модель выдумывает id.
+      final p = buildContentPrompt(
+        rootTopic: 'Диффузионные модели',
+        nodePath: ['Корень', 'DDIM'],
+        nodeId: 'n3_ddim',
+        nodeLabel: 'DDIM',
+        siblings: const [],
+        knowledgeLevel: 'intermediate',
+        goal: 'deep',
+      );
+      expect(p, contains('"relations": []'));
+      expect(p, isNot(contains('id_другого_узла')));
+      expect(p, isNot(contains('id_этого_узла')));
+    });
+
+    test('buildContentPrompt добавляет дисциплину фактов и сложности', () {
+      final beginner = buildContentPrompt(
+        rootTopic: 'Диффузионные модели',
+        nodePath: const ['Корень'],
+        nodeId: 'n1_root',
+        nodeLabel: 'Диффузионные модели',
+        siblings: const [],
+        knowledgeLevel: 'beginner',
+        goal: 'deep',
+      );
+      expect(beginner, contains('# Фактическая дисциплина'));
+      expect(beginner, contains('# Сложность'));
+      expect(beginner, contains('расшифруй'));
+
+      // У эксперта блок сложности не нужен, фактическая дисциплина — нужна.
+      final expert = buildContentPrompt(
+        rootTopic: 'Диффузионные модели',
+        nodePath: const ['Корень'],
+        nodeId: 'n1_root',
+        nodeLabel: 'Диффузионные модели',
+        siblings: const [],
+        knowledgeLevel: 'expert',
+        goal: 'deep',
+      );
+      expect(expert, isNot(contains('# Сложность')));
+      expect(expert, contains('# Фактическая дисциплина'));
     });
 
     test('buildValidatePrompt embeds the real tree JSON', () {

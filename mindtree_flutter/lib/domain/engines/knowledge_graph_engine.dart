@@ -1,4 +1,4 @@
-import 'dart:async';
+﻿import 'dart:async';
 
 import '../../data/database/mindtree_repository.dart';
 import '../../data/llm/client.dart';
@@ -1476,13 +1476,45 @@ class KnowledgeGraphEngine {
       oneLiner: content.oneLiner,
       details: content.details,
       analogy: () => content.analogy,
-      relations: content.relations,
+      relations: mergeContentRelations(
+        existing: node.relations,
+        fromContent: content.relations,
+        nodeId: nodeId,
+        knownIds: {for (final r in allRows) r.id},
+      ),
       sources: content.sources,
       state: NodeState.contentGenerated,
       contentLoaded: true,
     ));
 
     return content;
+  }
+
+  /// Связи принадлежат структурной стадии: там модель видит настоящие id.
+  ///
+  /// Контентная стадия таких id не знает, поэтому её связи не должны ни
+  /// затирать структурные, ни попадать в дерево выдуманными целями
+  /// (`AGENTS.md`: `parentId`/связи ссылаются на существующие узлы).
+  /// Берём структурные как есть и добавляем только разрешимые контентные.
+  static List<Relation> mergeContentRelations({
+    required List<Relation> existing,
+    required List<Relation> fromContent,
+    required String nodeId,
+    required Set<String> knownIds,
+  }) {
+    final out = <Relation>[...existing];
+    final seen = {
+      for (final r in existing) '${r.from}|${r.to}|${r.type.raw}',
+    };
+    for (final r in fromContent) {
+      // `from` принудительно ведёт с узла: иначе связь повисает в воздухе.
+      final from = nodeId;
+      if (!knownIds.contains(from) || !knownIds.contains(r.to)) continue;
+      final key = '$from|${r.to}|${r.type.raw}';
+      if (!seen.add(key)) continue;
+      out.add(Relation(from: from, to: r.to, type: r.type, label: r.label));
+    }
+    return out;
   }
 
   List<String> _nodePathFromRows(List<KnowledgeNode> rows, String nodeId) {

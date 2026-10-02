@@ -38,10 +38,23 @@ export class LearningSessionEngine {
   async create(input: CreateSessionInput): Promise<LearningSession> {
     let journeyId = input.journeyId;
     if (!journeyId) {
-      journeyId = shortIdWith("journey_");
-      getDb()
-        .prepare(`INSERT INTO learning_journeys (id, topic_id) VALUES (?,?)`)
-        .run(journeyId, input.topicId);
+      // Journey на тему должен быть один. Раньше здесь безусловно создавался
+      // новый, поэтому каждая сессия плодила дубль в learning_journeys, а
+      // выбор journey по topic_id начинал отдавать несколько строк.
+      // Зеркало: mindtree_flutter LearningSessionEngine.create.
+      const existing = getDb()
+        .prepare(
+          `SELECT id FROM learning_journeys WHERE topic_id = ? ORDER BY created_at DESC LIMIT 1`,
+        )
+        .get(input.topicId) as { id: string } | undefined;
+      if (existing) {
+        journeyId = existing.id;
+      } else {
+        journeyId = shortIdWith("journey_");
+        getDb()
+          .prepare(`INSERT INTO learning_journeys (id, topic_id) VALUES (?,?)`)
+          .run(journeyId, input.topicId);
+      }
     }
 
     const nodeRows = getDb()

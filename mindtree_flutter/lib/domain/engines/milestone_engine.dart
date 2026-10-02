@@ -147,7 +147,7 @@ class MilestoneEngine {
       );
     }).toList();
 
-    await repo.insertMilestones(persisted);
+    await repo.insertMilestones(persisted, journeyId: journeyId);
     return persisted;
   }
 }

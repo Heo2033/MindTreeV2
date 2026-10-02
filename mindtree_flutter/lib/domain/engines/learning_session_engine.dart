@@ -50,9 +50,18 @@ class LearningSessionEngine {
 
   Future<LearningSession> create(CreateSessionInput input) async {
     var journeyId = input.journeyId;
-    if (journeyId == null) {
-      journeyId = shortIdWith('journey_');
-      await repo.createJourney(journeyId, input.topicId);
+    if (journeyId == null || journeyId.isEmpty) {
+      // Journey на тему должен быть один. Раньше здесь безусловно создавался
+      // новый, поэтому каждая сессия плодила дубль, а `getJourneyForTopic`
+      // падал с «Bad state: Too many elements» (drift внутри getSingleOrNull
+      // делает `list.single`). Переиспользуем существующий journey.
+      final existing = await repo.getJourneyForTopic(input.topicId);
+      if (existing != null) {
+        journeyId = existing.id;
+      } else {
+        journeyId = shortIdWith('journey_');
+        await repo.createJourney(journeyId, input.topicId);
+      }
     }
 
     final nodes = await repo.listNodes(input.topicId);

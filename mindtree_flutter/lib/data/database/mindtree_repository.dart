@@ -139,12 +139,28 @@ class MindtreeRepository {
   // ---------- Learning Journeys & Milestones ----------
 
   Future<LearningJourney?> getJourneyForTopic(String topicId) async {
-    final row = await (db.select(db.learningJourneys)
-          ..where((j) => j.topicId.equals(topicId)))
-        .getSingleOrNull();
-    if (row == null) return null;
-    final milestones = await listMilestones(row.id);
-    return Mappers.journeyFromRow(row, milestones);
+    // Именно journey, у которого есть вехи: если в базе остались дубли
+    // (старые сборки создавали journey на каждую сессию), показываем тот,
+    // где реально лежит прогресс. `getSingleOrNull` на >1 строке бросает
+    // «Bad state: Too many elements», поэтому берём список и выбираем сами.
+    final rows = await (db.select(db.learningJourneys)
+          ..where((j) => j.topicId.equals(topicId))
+          ..orderBy([(j) => OrderingTerm.desc(j.createdAt)]))
+        .get();
+    if (rows.isEmpty) return null;
+
+    LearningJourneyRowData? chosen;
+    for (final row in rows) {
+      // Приоритет у journey с вехами: в нём лежит реальный прогресс.
+      if ((await listMilestones(row.id)).isNotEmpty) {
+        chosen = row;
+        break;
+      }
+      chosen ??= row;
+    }
+    if (chosen == null) return null;
+    final milestones = await listMilestones(chosen.id);
+    return Mappers.journeyFromRow(chosen, milestones);
   }
 
   Future<LearningJourney> createJourney(String id, String topicId) async {
@@ -159,10 +175,13 @@ class MindtreeRepository {
     return rows.map(Mappers.milestoneFromRow).toList();
   }
 
-  Future<void> insertMilestones(List<LearningMilestone> milestones) async {
+  Future<void> insertMilestones(List<LearningMilestone> milestones, {String journeyId = ''}) async {
+    // `journeyId` обязателен для привязки: без него вехи не попадают
+    // в `listMilestones(journeyId)` и journey остаётся без прогресса.
+    // Зеркало: server/src/domain/MilestoneEngine.ts пишет journey_id в INSERT.
     await db.batch((b) {
       for (final m in milestones) {
-        final companion = Mappers.milestoneToRow(m);
+        final companion = Mappers.milestoneToRow(m, journeyId: journeyId);
         b.insert(db.learningMilestones, LearningMilestonesCompanion(
           id: companion.id,
           journeyId: companion.journeyId,
@@ -238,10 +257,14 @@ class MindtreeRepository {
   // ---------- Learner Models ----------
 
   Future<LearnerModel?> getLearnerModel(String topicId, {String userId = 'default'}) async {
-    final row = await (db.select(db.learnerModels)
+    final rows = await (db.select(db.learnerModels)
           ..where((m) => m.topicId.equals(topicId) & m.userId.equals(userId)))
-        .getSingleOrNull();
-    return row == null ? null : Mappers.learnerModelFromRow(row);
+        .get();
+    // Модель по паре (topicId, userId) должна быть одна. `getSingleOrNull`
+    // при дублях бросает «Bad state: Too many elements», поэтому при
+    // нескольких строках берём последнюю — она и есть актуальная.
+    if (rows.isEmpty) return null;
+    return Mappers.learnerModelFromRow(rows.last);
   }
 
   Future<void> saveLearnerModel(LearnerModel model) async {

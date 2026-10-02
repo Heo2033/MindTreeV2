@@ -91,10 +91,10 @@ class Mappers {
             const [],
       );
 
-  static LearningMilestonesCompanion milestoneToRow(LearningMilestone m) =>
+  static LearningMilestonesCompanion milestoneToRow(LearningMilestone m, {String journeyId = ''}) =>
       LearningMilestonesCompanion(
         id: Value(m.id),
-        journeyId: Value(''), // set by caller
+        journeyId: Value(journeyId),
         level: Value(m.level.raw),
         title: Value(m.title),
         description: Value(m.description),

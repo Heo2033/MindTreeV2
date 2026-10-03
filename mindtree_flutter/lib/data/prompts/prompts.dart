@@ -710,6 +710,11 @@ const String promptContent = '# Роль\n'
     '- Не нарушай forbidden_interpretations — не утверждай то, что запрещено.\n'
     '- Не смешивай semantic_axis — не описывай архитектуру как процесс и наоборот.\n'
     '- Не противоречь parent, ancestors и siblings.\n'
+    // JSON-экранирование обратного слэша в LaTeX: одиночный `\r`, `\t`, `\n`
+    // jsonDecode считает валидным escape и молча портит значение.
+    // В исходнике 4 слэша -> в промпте модель видит 2: `\\frac`, `\\text`.
+    '- Формулы в JSON-строках экранируй: КАЖДЫЙ обратный слэш удваивай — '
+    'пиши \\\\frac, \\\\text, \\\\rightarrow, а не \\frac.\n'
     '$noMetaRule\n'
     '{{anti_jargon_block}}'
     '$alphabetRule\n'

@@ -65,6 +65,7 @@ export const PROMPT_CONTENT = `# Роль
 - Не нарушай forbidden_interpretations — не утверждай то, что запрещено.
 - Не смешивай semantic_axis — не описывай архитектуру как процесс и наоборот.
 - Не противоречь parent, ancestors и siblings.
+- Формулы в JSON-строках экранируй: КАЖДЫЙ обратный слэш удваивай — пиши \\\\frac, \\\\text, \\\\rightarrow, а не \\frac.
 ${NO_META_RULE}
 {{anti_jargon_block}}
 ${ALPHABET_RULE}

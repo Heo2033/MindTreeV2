@@ -120,4 +120,15 @@ describe("buildContentPrompt (контракт ответа от 02.10.2026)", (
       expect(prompt).toContain("# Фактическая дисциплина");
     }
   });
+
+  it("требует JSON-экранирование обратного слэша в LaTeX", () => {
+    // jsonDecode считает одиночные `\r`, `\t`, `\n`, `\b`, `\f` валидным escape
+    // и молча портит значение, поэтому промпт обязан требовать удвоенный слэш.
+    const prompt = buildContentPrompt({ ...base, knowledgeLevel: "intermediate" });
+    expect(prompt).toContain("КАЖДЫЙ обратный слэш удваивай");
+    expect(prompt).toContain(String.raw`пиши \\frac, \\text, \\rightarrow`);
+    // Ошибочный (неудвоенный) вариант показан только как антипример.
+    expect(prompt).toContain(String.raw`а не \frac`);
+    expect(prompt).not.toContain(String.raw`пиши \frac`);
+  });
 });

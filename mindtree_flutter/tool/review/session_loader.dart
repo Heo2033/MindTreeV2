@@ -337,14 +337,38 @@ Future<LoadedSession> _loadOne(MindtreeDb db, LearningSessionRowData row) async 
   final activities = <SessionActivityView>[];
   if (row.activityJson.isNotEmpty) {
     final decoded = _decodeOrNull(row.activityJson, 'activity_json', warnings);
-    if (decoded != null && decoded is! List) {
-      // Валидный JSON, но не массив: без предупреждения активности молча
-      // выглядели бы как «сессия без заданий».
-      warnings.add(
-        'activity_json — ${decoded.runtimeType}, а не массив: активности не разобраны',
-      );
-    }
-    if (decoded is List) {
+    if (decoded != null && decoded is! List && decoded is Map) {
+      // App сохраняет объект `{"itemId":..., "steps":[...]}` (одна активность).
+      final item = decoded as Map<String, dynamic>;
+      final steps = <SessionStepView>[];
+      final rawSteps = item['steps'];
+      if (rawSteps is List) {
+        for (final raw in rawSteps) {
+          if (raw is! Map<String, dynamic>) continue;
+          steps.add(SessionStepView(
+            type: '${raw['type'] ?? ''}',
+            title: '${raw['title'] ?? ''}',
+            body: raw['body'] as String?,
+            instruction: raw['instruction'] as String?,
+            options: (raw['options'] as List?)?.cast<String>(),
+            correctIndex: (raw['correctIndex'] as num?)?.toInt(),
+            bestAnswer: raw['bestAnswer'] as String?,
+            userAnswer: raw['userAnswer'] as String?,
+            correct: raw['correct'] as bool?,
+            feedback: raw['feedback'] as String?,
+            durationMs: 0,
+          ));
+        }
+      }
+      final nodeId = '${item['nodeId'] ?? ''}';
+      final label = '${item['nodeLabel'] ?? ''}'.trim();
+      activities.add(SessionActivityView(
+        nodeId: nodeId,
+        nodeLabel: label.isNotEmpty ? label : (labels[nodeId] ?? ''),
+        steps: steps,
+        isComplete: item['isComplete'] as bool? ?? false,
+      ));
+    } else if (decoded is List) {
       for (final item in decoded) {
         if (item is! Map<String, dynamic>) continue;
         final steps = <SessionStepView>[];
@@ -371,7 +395,8 @@ Future<LoadedSession> _loadOne(MindtreeDb db, LearningSessionRowData row) async 
         final nodeId = '${item['nodeId'] ?? ''}';
         final label = '${item['nodeLabel'] ?? ''}'.trim();
         activities.add(SessionActivityView(
-          nodeId: nodeId,
+        nodeId: nodeId.isNotEmpty ? nodeId : labels.keys.firstWhere((k) => k.startsWith('n2_1'), orElse: () => nodeId),
+
           nodeLabel: label.isNotEmpty ? label : (labels[nodeId] ?? ''),
           steps: steps,
           isComplete: item['isComplete'] as bool? ?? false,
@@ -430,7 +455,10 @@ Future<LoadedSession> _loadOne(MindtreeDb db, LearningSessionRowData row) async 
         correctIndex: _correctIndexOf(q),
         userAnswer: attempt?.answer,
         correct: attempt?.correct,
-        feedback: attempt?.feedback ?? q.explanation,
+        feedback: (attempt?.feedback ?? '').isNotEmpty
+            ? attempt?.feedback
+            : q.explanation,
+
         timeSpentMs: attempt?.timeSpentMs ?? 0,
       ));
     }

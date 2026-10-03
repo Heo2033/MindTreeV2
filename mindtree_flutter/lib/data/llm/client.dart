@@ -447,6 +447,104 @@ Stream<String> _parseSseStream(Stream<List<int>> byteStream) async* {
 
 // ─── JSON repair ──────────────────────────────────────────────────────────────
 
+/// Буквы, с которых начинается настоящий control-escape (`\b`, `\f`, `\n`, `\r`,
+/// `\t`). Их же первыми буквами начинаются конфликтующие LaTeX-макросы.
+const String _controlEscapeLetters = 'bfnrt';
+
+/// LaTeX-макросы, начинающиеся с буквы control-escape. Нужны только чтобы
+/// отличить `"\to "` (макрос) от `"строка\nстрока"` (перевод строки) —
+/// по одному следующему символу это неразличимо, а по имени макроса — да.
+const Set<String> _latexMacrosAfterControlLetter = {
+  // b
+  'bar', 'because', 'begin', 'between', 'beta', 'big', 'bigl', 'bigr', 'binom',
+  'boxed', 'brace', 'bullet',
+  // f
+  'fbox', 'flat', 'lfloor', 'forall', 'frac', 'rfloor',
+  // n
+  'nearrow', 'ne', 'neg', 'neq', 'ni', 'nleq', 'ngeq', 'nmid', 'not', 'notin',
+  'nabla', 'nbsp', 'nu',
+  // r
+  'rceil', 'rho', 'rangle', 'rightarrow', 'right',
+  // t
+  'tan', 'tau', 'text', 'textbf', 'textit', 'theta', 'times', 'to', 'top',
+  'triangle',
+};
+
+bool _isAsciiLetter(String c) {
+  final u = c.codeUnitAt(0);
+  return (u >= 0x41 && u <= 0x5a) || (u >= 0x61 && u <= 0x7a);
+}
+
+bool _isHexDigit(String c) {
+  final u = c.codeUnitAt(0);
+  return (u >= 0x30 && u <= 0x39) ||
+      (u >= 0x41 && u <= 0x46) ||
+      (u >= 0x61 && u <= 0x66);
+}
+
+/// Валидный ли JSON-escape у обратного слэша на позиции [i] (сам слэш —
+/// `s[i]`, символ после — `s[i + 1]`). Всё, что не escape, считаем
+/// одиночным слэшем LaTeX-макроса.
+bool _isJsonEscapeAt(String s, int i) {
+  final c = s[i + 1];
+  if (c == '/' || c == '"' || c == r'\') return true;
+  if (c == 'u') {
+    if (i + 5 >= s.length) return false; // не хватает 4 hex — не escape
+    for (var k = i + 2; k <= i + 5; k++) {
+      if (!_isHexDigit(s[k])) return false;
+    }
+    return true;
+  }
+  if (_controlEscapeLetters.contains(c)) {
+    final next = i + 2 < s.length ? s[i + 2] : '';
+    // `\n` + буква неоднозначен: реальный перевод строки или макрос (`\neq`,
+    // `\to`). Если дальше идёт известный макрос — макрос, иначе escape.
+    if (next.isNotEmpty && _isAsciiLetter(next)) {
+      return !_latexMacrosAfterControlLetter.any((m) => s.startsWith(m, i + 1));
+    }
+    return true;
+  }
+  return false;
+}
+
+/// Чинит тихую порчу LaTeX: `jsonDecode` считает `\r`, `\t`, `\b`, `\f`, `\n`
+/// валидными escape и молча превращает `\rightarrow` в CR + `ightarrow`,
+/// `\text` — в TAB + `ext`, `\frac` — в formfeed + `rac`. Такой одиночный
+/// слэш удваиваем, чтобы после разбора остался literal `\`.
+/// Валидные escape (`\\`, `\"`, `\/`, `\uXXXX`, настоящие control-escape) и
+/// всё вне строковых литералов остаются как есть. Детерминированный один
+/// проход, исключений не бросает.
+String _escapeLatexBackslashes(String input) {
+  final out = StringBuffer();
+  var inString = false;
+  var i = 0;
+  while (i < input.length) {
+    final ch = input[i];
+    if (!inString) {
+      if (ch == '"') inString = true;
+      out.write(ch);
+      i++;
+      continue;
+    }
+    if (ch == '"') {
+      inString = false;
+      out.write(ch);
+      i++;
+      continue;
+    }
+    if (ch == r'\' && i + 1 < input.length) {
+      // Валидный escape переписываем как есть, LaTeX-макрос — удваиваем слэш.
+      out.write(ch);
+      out.write(_isJsonEscapeAt(input, i) ? input[i + 1] : r'\' + input[i + 1]);
+      i += 2;
+      continue;
+    }
+    out.write(ch);
+    i++;
+  }
+  return out.toString();
+}
+
 String _repairControlChars(String input) {
   final out = StringBuffer();
   var inString = false;
@@ -516,7 +614,9 @@ int _findMatchingBracket(String text, int start) {
 }
 
 T parseLLMJson<T>(String raw) {
-  final trimmed = raw.trim();
+  // Нормализация один раз в начале: дальше все пути декодирования (прямой
+  // parse, code fence, bracket matching, salvage) видят уже безопасный текст.
+  final trimmed = _escapeLatexBackslashes(raw.trim());
 
   // Direct parse.
   try {

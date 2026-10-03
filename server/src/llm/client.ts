@@ -959,6 +959,111 @@ export function findMatchingBracket(text: string, start: number): number {
   return -1;
 }
 
+// Буквы, с которых начинается настоящий control-escape (`\b`, `\f`, `\n`, `\r`,
+// `\t`). Их же первыми буквами начинаются конфликтующие LaTeX-макросы.
+const CONTROL_ESCAPE_LETTERS = "bfnrt";
+
+// LaTeX-макросы, начинающиеся с буквы control-escape. Нужны только чтобы
+// отличить `"\to "` (макрос) от `"строка\nстрока"` (перевод строки) —
+// по одному следующему символу это неразличимо, а по имени макроса — да.
+const LATEX_MACROS_AFTER_CONTROL_LETTER: readonly string[] = [
+  // b
+  "bar", "because", "begin", "between", "beta", "big", "bigl", "bigr", "binom",
+  "boxed", "brace", "bullet",
+  // f
+  "fbox", "flat", "lfloor", "forall", "frac", "rfloor",
+  // n
+  "nearrow", "ne", "neg", "neq", "ni", "nleq", "ngeq", "nmid", "not", "notin",
+  "nabla", "nbsp", "nu",
+  // r
+  "rceil", "rho", "rangle", "rightarrow", "right",
+  // t
+  "tan", "tau", "text", "textbf", "textit", "theta", "times", "to", "top",
+  "triangle",
+];
+
+function isAsciiLetter(c: string): boolean {
+  if (c.length === 0) return false;
+  const u = c.charCodeAt(0);
+  return (u >= 0x41 && u <= 0x5a) || (u >= 0x61 && u <= 0x7a);
+}
+
+function isHexDigit(c: string): boolean {
+  if (c.length === 0) return false;
+  const u = c.charCodeAt(0);
+  return (
+    (u >= 0x30 && u <= 0x39) || (u >= 0x41 && u <= 0x46) || (u >= 0x61 && u <= 0x66)
+  );
+}
+
+// Валидный ли JSON-escape у обратного слэша на позиции i (сам слэш — s[i],
+// символ после — s[i + 1]). Всё, что не escape, считаем одиночным слэшем
+// LaTeX-макроса.
+function isJsonEscapeAt(s: string, i: number): boolean {
+  const c = s[i + 1];
+  if (c === "/" || c === '"' || c === "\\") return true;
+  if (c === "u") {
+    if (i + 5 >= s.length) return false; // не хватает 4 hex — не escape
+    for (let k = i + 2; k <= i + 5; k++) {
+      if (!isHexDigit(s[k])) return false;
+    }
+    return true;
+  }
+  if (CONTROL_ESCAPE_LETTERS.includes(c)) {
+    const next = i + 2 < s.length ? s[i + 2] : "";
+    // `\n` + буква неоднозначен: реальный перевод строки или макрос (`\neq`,
+    // `\to`). Если дальше идёт известный макрос — макрос, иначе escape.
+    if (next !== "" && isAsciiLetter(next)) {
+      return !LATEX_MACROS_AFTER_CONTROL_LETTER.some((m) => s.startsWith(m, i + 1));
+    }
+    return true;
+  }
+  return false;
+}
+
+// Чинит тихую порчу LaTeX: JSON.parse считает `\r`, `\t`, `\b`, `\f`, `\n`
+// валидными escape и молча превращает `\rightarrow` в CR + `ightarrow`,
+// `\text` — в TAB + `ext`, `\frac` — в formfeed + `rac`. Такой одиночный
+// слэш удваиваем, чтобы после разбора остался literal `\`. Валидные escape
+// (`\\`, `\"`, `\/`, `\uXXXX`, настоящие control-escape) и всё вне строковых
+// литералов остаются как есть. Зеркало mindtree_flutter/lib/data/llm/client.dart.
+function escapeLatexBackslashes(input: string): string {
+  let out = "";
+  let inString = false;
+  let i = 0;
+
+  while (i < input.length) {
+    const ch = input[i];
+
+    if (!inString) {
+      if (ch === '"') inString = true;
+      out += ch;
+      i++;
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = false;
+      out += ch;
+      i++;
+      continue;
+    }
+
+    if (ch === "\\" && i + 1 < input.length) {
+      // Валидный escape переписываем как есть, LaTeX-макрос — удваиваем слэш.
+      out += ch;
+      out += isJsonEscapeAt(input, i) ? input[i + 1] : "\\" + input[i + 1];
+      i += 2;
+      continue;
+    }
+
+    out += ch;
+    i++;
+  }
+
+  return out;
+}
+
 function repairControlChars(input: string): string {
   let out = "";
   let inString = false;
@@ -1008,7 +1113,7 @@ function parseCandidate(candidate: string): unknown {
 }
 
 export function parseLLMJson<T = unknown>(raw: string): T {
-  const trimmed = raw.trim();
+  const trimmed = escapeLatexBackslashes(raw.trim());
 
   try {
     return JSON.parse(trimmed) as T;

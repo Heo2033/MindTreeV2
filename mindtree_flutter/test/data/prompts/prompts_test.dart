@@ -141,6 +141,26 @@ void main() {
       expect(expert, contains('# Фактическая дисциплина'));
     });
 
+    test('buildContentPrompt требует JSON-экранирование слэша в LaTeX', () {
+      // jsonDecode считает одиночные `\r`, `\t`, `\n`, `\b`, `\f` валидным
+      // escape и молча портит значение, поэтому промпт обязан требовать
+      // удвоенный слэш в макросах. Проверяем ИТОГОВУЮ строку, не литерал.
+      final p = buildContentPrompt(
+        rootTopic: 'Диффузионные модели',
+        nodePath: const ['Корень', 'DDIM'],
+        nodeId: 'n3_ddim',
+        nodeLabel: 'DDIM',
+        siblings: const [],
+        knowledgeLevel: 'intermediate',
+        goal: 'deep',
+      );
+      expect(p, contains(r'КАЖДЫЙ обратный слэш удваивай'));
+      expect(p, contains(r'пиши \\frac, \\text, \\rightarrow'));
+      // Ошибочный (неудвоенный) вариант показан только как антипример.
+      expect(p, contains(r'а не \frac'));
+      expect(p, isNot(contains(r'пиши \frac')));
+    });
+
     test('buildValidatePrompt embeds the real tree JSON', () {
       final p = buildValidatePrompt([
         {

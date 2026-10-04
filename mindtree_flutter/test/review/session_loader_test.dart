@@ -654,14 +654,20 @@ void main() {
           ),
         );
 
-    // `learner_models` хранит только текущее состояние мастерства, поэтому
+// `learner_models` хранит только текущее состояние мастерства, поэтому
     // `masteryBefore` у загрузчика всегда пуст и `checkMasteryDelta` выдаёт info
-    // «нет снимка ДО». Это недостаток данных, а не дефект обучения: assert'им
-    // его явно, чтобы в кейс не проскочила никакая другая info и не пришлось
-    // фильтровать находки «на всякий случай».
+    // «нет снимка ДО». Второй допустимый info — незакрытая по учёту сессия при
+    // пройденном плане. Оба — недостаток данных/учёта, а не дефект обучения:
+    // assert'им их явно, чтобы в кейс не проскочила никакая другая info и не
+    // пришлось фильтровать находки «на всякий случай».
     List<String> tagsFromDb(List<Finding> findings) {
-      expect(infoTagsOf(findings), <String>['${SessionCheckCode.masteryDelta}/info'],
-          reason: 'единственная допустимая info из БД — про снимок mastery «до»:\n'
+      const allowed = <String>{
+        '${SessionCheckCode.masteryDelta}/info',
+        '${SessionCheckCode.completion}/info',
+      };
+      expect(infoTagsOf(findings), everyElement(isIn(allowed)),
+          reason: 'из БД допустимы только info о нехватке данных (снимок mastery '
+              '«до») и о незакрытой сессии при пройденном плане:\n'
               '${findings.map((f) => f.toString()).join('\n')}');
       return problemTagsOf(findings);
     }
@@ -827,10 +833,10 @@ void main() {
       expect(hit.single.message, contains('correctAnswer не совпал ни с одним'));
     });
 
-    test('незавершённый статус при незавершённых шагах → session_completion (warn ×2)',
+test('незавершённый статус при пройденном плане → session_completion (info)',
         () async {
       final answered = [
-        for (var i = 0; i < kEnoughAnswersForCompletion; i++)
+        for (var i = 0; i < 3; i++)
           '{"type":"apply","title":"Задача $i",'
               '"instruction":"Опиши остановку своими словами",'
               '"bestAnswer":"Программа не завершится за конечное время",'
@@ -844,13 +850,12 @@ void main() {
       ));
       final hit = withCode(findings, SessionCheckCode.completion);
 
-      expect(tagsFromDb(findings), <String>[
-        '${SessionCheckCode.completion}/warn',
-        '${SessionCheckCode.completion}/warn',
-      ]);
-      expect(hit.first.message, contains('просто статус не переключили'));
-      expect(hit.first.data?['answeredSteps'], kEnoughAnswersForCompletion);
-      expect(hit.last.message, contains('isComplete == false'));
+      // Ни одного warn: незакрытая строка сессии в приложении норма.
+      expect(tagsFromDb(findings), isEmpty);
+      expect(hit.single.severity, FindingSeverity.info);
+      expect(hit.single.message, contains('осталась незакрытой'));
+      expect(hit.single.data?['plannedItemsCompleted'], 1);
+      expect(hit.single.data?['plannedItemsTotal'], 1);
     });
 
     test('шаг с ответом, но без вердикта → session_answer_not_scored (warn)', () async {

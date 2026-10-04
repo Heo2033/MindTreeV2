@@ -24,9 +24,13 @@
 //   `explanation`, поэтому рубрика попадает в `SessionQuestionView.rubric`.
 //
 // ─── Чего в БД нет ───────────────────────────────────────────────────────────
-// * Тайминга по шагам активности: `ActivityStep` не хранит длительность,
-//   события — хранят. Поэтому `SessionStepView.durationMs` остаётся 0, а
-//   проверка `session_step_duration` честно ругается на отсутствие замера.
+// * Тайминга по шагам активности В САМОМ `activity_json`: `ActivityStep` не
+//   хранит длительность. Но он есть рядом — в `learning_events.duration_ms`, по
+//   событию `activity_answer`/`activity_step_done` на шаг (узел в `node_id`, тип
+//   шага в `data_json.step`). Загрузчик восстанавливает время по шагам из
+//   событий (`_withStepTimings`); без этого проверка `session_step_duration`
+//   ругалась бы на шаг, который на самом деле отработал секунды. Если события
+//   нет — замера действительно не было, и это `timingKnown == false`, а не «0 мс».
 // * `nodeId` и `isComplete` в `activity_json`: приложение пишет объект
 //   `{"itemId": ..., "steps": [...]}` (`learning_activity_service.dart`).
 //   Узел восстанавливается по `itemId` через план, а завершение — по
@@ -46,6 +50,9 @@
 //   смещения, поэтому при смене часового пояса или DST возможен сдвиг на часы.
 //   Мисконцепции вне окна и без `detectedAt` в отчёт не идут, но считаются в
 //   warnings.
+// * Закрытой сессии по полю `status`: приложение его не переключает никогда, так
+//   что признак «пройдена» берётся из `curriculum_json` (все пункты
+//   `completed`), а незакрытая строка сессии — это info, а не дефект.
 
 import 'dart:convert';
 import 'dart:io';
@@ -383,6 +390,8 @@ Future<LoadedSession> _loadOne(
   // без этого соответствия узел активности не восстановить. Строим целиком,
   // но по тем же непустым `nodeId`, что и `plannedNodeIds`.
   var nodeByCurriculumItemId = <String, String>{};
+  var plannedItemsCompleted = 0;
+  var plannedItemsTotal = 0;
   if (row.curriculumJson.isNotEmpty) {
     try {
       final curriculum =
@@ -395,10 +404,31 @@ Future<LoadedSession> _loadOne(
         for (final item in curriculum.items)
           if (item.id.isNotEmpty && item.nodeId.isNotEmpty) item.id: item.nodeId,
       };
+      plannedItemsTotal = curriculum.items.length;
+      plannedItemsCompleted =
+          curriculum.items.where((i) => i.status == CurriculumItemStatus.completed).length;
     } on Object catch (e) {
       warnings.add('curriculum_json не разобран: $e');
     }
   }
+
+  // ─── События ───────────────────────────────────────────────────────────────
+  // Читаются ДО активностей: по ним восстанавливается время шагов — в
+  // `activity_json` его нет by design (`ActivityStep` его не сериализует).
+  final eventRows = await (db.select(db.learningEvents)
+        ..where((t) => t.sessionId.equals(row.id))
+        ..orderBy([(t) => OrderingTerm.asc(t.timestamp)]))
+      .get();
+  final events = [
+    for (final e in eventRows)
+      SessionEventView(
+        type: e.type,
+        durationMs: e.durationMs,
+        nodeId: e.nodeId ?? '',
+        stepType: _eventStepType(e.dataJson),
+        isStepTiming: _isStepTimingEvent(e.type),
+      ),
+  ];
 
   // ─── Активности ────────────────────────────────────────────────────────────
   final activities = <SessionActivityView>[];
@@ -435,12 +465,14 @@ Future<LoadedSession> _loadOne(
       }
       if (nodeId.isEmpty || parsed.isEmpty) continue;
 
+      // Время по шагам берём из событий узла: blob активности его не хранит.
+      final timed = _withStepTimings(parsed, events, nodeId);
       final label = '${raw['nodeLabel'] ?? ''}'.trim();
       activities.add(SessionActivityView(
         nodeId: nodeId,
         nodeLabel: label.isNotEmpty ? label : (labels[nodeId] ?? ''),
-        steps: [for (final step in parsed) step.view],
-        isComplete: _activityIsComplete(raw, parsed),
+        steps: [for (final step in timed) step.view],
+        isComplete: _activityIsComplete(raw, timed),
       ));
     }
   }
@@ -508,16 +540,6 @@ Future<LoadedSession> _loadOne(
       ));
     }
   }
-
-  // ─── События ───────────────────────────────────────────────────────────────
-  final eventRows = await (db.select(db.learningEvents)
-        ..where((t) => t.sessionId.equals(row.id))
-        ..orderBy([(t) => OrderingTerm.asc(t.timestamp)]))
-      .get();
-  final events = [
-    for (final e in eventRows)
-      SessionEventView(type: e.type, durationMs: e.durationMs),
-  ];
 
   // ─── Mastery и мисконцепции ────────────────────────────────────────────────
   // `learner_models` — одна строка на тему, поэтому мисконцепции достаются все.
@@ -640,6 +662,8 @@ Future<LoadedSession> _loadOne(
     masteryAfter: masteryAfter,
     misconceptions: misconceptions,
     plannedNodeIds: plannedNodeIds,
+    plannedItemsCompleted: plannedItemsCompleted,
+    plannedItemsTotal: plannedItemsTotal,
     misconceptionsByNode: misconceptionsByNode,
     assessments: assessmentViews,
   );
@@ -663,6 +687,25 @@ class _ParsedStep {
   final SessionStepView view;
   final bool answered;
   const _ParsedStep(this.view, this.answered);
+
+  /// Копия с подставленным замером времени.
+  _ParsedStep withTiming(int durationMs, {required bool known}) => _ParsedStep(
+        SessionStepView(
+          type: view.type,
+          title: view.title,
+          body: view.body,
+          instruction: view.instruction,
+          options: view.options,
+          correctIndex: view.correctIndex,
+          bestAnswer: view.bestAnswer,
+          userAnswer: view.userAnswer,
+          correct: view.correct,
+          feedback: view.feedback,
+          durationMs: durationMs,
+          timingKnown: known,
+        ),
+        answered,
+      );
 }
 
 /// Разбор `steps` активности. Пустой результат — шагов нет или они не объекты.
@@ -683,13 +726,100 @@ List<_ParsedStep> _parseActivitySteps(Object? rawSteps) {
         userAnswer: raw['userAnswer'] as String?,
         correct: raw['correct'] as bool?,
         feedback: raw['feedback'] as String?,
-        // Тайминга по шагам в БД нет — см. шапку файла.
+        // Времени по шагам в blob нет — его восстанавливает `_withStepTimings`.
         durationMs: 0,
       ),
       _rawStepAnswered(raw),
     ));
   }
   return out;
+}
+
+/// Записывает ли событие замер времени по шагу.
+///
+/// Тип нормализуется через `LearningEventType.fromString`, потому что в базе
+/// встречаются и `activity_step_done` (wire, так пишет приложение), и
+/// `activityStepDone` (имя enum'а, так писали старые выгрузки).
+bool _isStepTimingEvent(String type) {
+  final wire = LearningEventType.fromString(type).wire;
+  return wire == kEventActivityAnswer || wire == kEventActivityStepDone;
+}
+
+/// Тип шага из payload'а события (`learning_events.data_json.step`).
+///
+/// Пусто, если payload'а нет или он не разбирается: у `activity_started` шага
+/// нет by design, у старых строк — тоже. Это норма, а не ошибка разбора.
+String _eventStepType(String? dataJson) {
+  if (dataJson == null || dataJson.isEmpty) return '';
+  Object? decoded;
+  try {
+    decoded = jsonDecode(dataJson);
+  } on FormatException {
+    return '';
+  }
+  if (decoded is! Map<String, dynamic>) return '';
+  return '${decoded['step'] ?? ''}'.trim();
+}
+
+/// Подставляет в шаги активности замеры времени из событий узла.
+///
+/// Где живёт время: `activity_json` сериализует `ActivityStep`, а в модели у
+/// шага времени нет; его пишет `EventBus` в `learning_events.duration_ms` —
+/// по одному событию `activity_answer`/`activity_step_done` на шаг, с узлом в
+/// `node_id` и типом шага в `data_json.step`. Поэтому, читая blob и забыв про
+/// события, ревью получает «нулевое время» у шага, который на самом деле
+/// отработал две секунды, — и ругается на то, что замеров «не велось».
+///
+/// Сопоставление двухпроходное, чтобы не спутать шаги с одинаковым типом и не
+/// оставить реальные замеры неиспользованными:
+/// 1. по `data_json.step` — точное совпадение типа шага (боевой путь);
+/// 2. остатком — позиционно, по порядку шагов, для событий без указания шага.
+///
+/// Шаги без найденного события остаются с `timingKnown == false`: это честное
+/// «замера нет», и находка про пропущенный замер их по-прежнему увидит.
+List<_ParsedStep> _withStepTimings(
+  List<_ParsedStep> steps,
+  List<SessionEventView> events,
+  String nodeId,
+) {
+  if (steps.isEmpty || nodeId.isEmpty) return steps;
+  final candidates = <SessionEventView>[
+    for (final e in events)
+      if (e.nodeId == nodeId && e.isStepTiming && e.durationMs > 0) e,
+  ];
+  if (candidates.isEmpty) return steps;
+
+  final taken = <bool>[for (var i = 0; i < candidates.length; i++) false];
+  final durations = <int?>[for (final _ in steps) null];
+
+  for (var s = 0; s < steps.length; s++) {
+    for (var i = 0; i < candidates.length; i++) {
+      if (taken[i]) continue;
+      if (candidates[i].stepType != steps[s].view.type) continue;
+      taken[i] = true;
+      durations[s] = candidates[i].durationMs;
+      break;
+    }
+  }
+  var rest = 0;
+  for (var s = 0; s < steps.length; s++) {
+    if (durations[s] != null) continue;
+    while (rest < candidates.length && taken[rest]) {
+      rest++;
+    }
+    if (rest >= candidates.length) break;
+    if (candidates[rest].stepType.isNotEmpty) continue;
+    taken[rest] = true;
+    durations[s] = candidates[rest].durationMs;
+    rest++;
+  }
+
+  return [
+    for (var s = 0; s < steps.length; s++)
+      durations[s] == null
+          ? steps[s]
+          : steps[s].withTiming(durations[s]!, known: true),
+  ];
 }
 
 /// Отвечен ли шаг по сырому JSON.

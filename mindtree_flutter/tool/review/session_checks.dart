@@ -87,11 +87,17 @@ const int kMaxRecallOptions = 4;
 const double kSessionDurationWarnRatio = 2.0;
 const double kSessionDurationFailRatio = 5.0;
 
-/// Сколько ответов считается «сессия фактически пройдена».
-const int kEnoughAnswersForCompletion = 3;
-
-/// Длина текста шага (в символах), при которой нулевое время — подозрительно.
+/// Длина текста шага (в символах), при которой ОТСУТСТВИЕ замера — подозрительно.
 const int kLongStepTextChars = 400;
+
+/// Выше этого значения `time_spent_ms`/длительность шага — уже не длительность.
+///
+/// Момент, в который ученик закончил вопрос, физически не может отстоять от
+/// его начала на два часа: это либо сломанный таймер (в UI старт не инициализирован,
+/// поэтому пишется абсолютное время в epoch-мс), либо сутки простоя приложения в
+/// фоне. Такие значения — техническая находка, а не «медленно отвечал», и в
+/// сумму времени против бюджета они не идут.
+const int kImplausibleAnswerMs = 2 * 60 * 60 * 1000;
 
 /// Подряд совпавших с эталом apply-ответов, начиная с которого это подозрительно.
 const int kApplyEchoRun = 3;
@@ -129,6 +135,14 @@ const String kStepApply = 'apply';
 /// Статусы сессии (`SessionStatus` в `lib/domain/models/learning.dart`).
 const String kStatusCompleted = 'completed';
 
+/// События с замером времени по шагу (`LearningEventType.wire`).
+const String kEventActivityAnswer = 'activity_answer';
+const String kEventActivityStepDone = 'activity_step_done';
+
+/// Статус пункта плана, при котором он считается закрытым
+/// (`CurriculumItemStatus.wire`).
+const String kPlanItemCompleted = 'completed';
+
 // ─── DTO ─────────────────────────────────────────────────────────────────────
 
 /// Шаг активности в виде плоских данных (без БД).
@@ -145,8 +159,19 @@ class SessionStepView {
   final bool? correct;
   final String? feedback;
 
-  /// Затраченное на шаг время, мс (0 — неизвестно).
+  /// Затраченное на шаг время, мс.
+  ///
+  /// В `activity_json` времени по шагам нет by design: тайминг живёт в
+  /// `learning_events.duration_ms` (`activity_answer` / `activity_step_done`),
+  /// и загрузчик восстанавливает его оттуда. Пока замера нет — 0.
   final int durationMs;
+
+  /// Есть ли замер времени шага в данных.
+  ///
+  /// `false` — «в БД нет события по этому шагу», и это НЕ то же самое, что «шаг
+  /// занял 0 мс»: незавершённый шаг замера не имеет по построению, и называть
+  /// его нулевым нельзя (иначе любая незакрытая активность выглядит битой).
+  final bool timingKnown;
 
   const SessionStepView({
     required this.type,
@@ -160,6 +185,7 @@ class SessionStepView {
     this.correct,
     this.feedback,
     this.durationMs = 0,
+    this.timingKnown = false,
   });
 
   /// Ответ ученика непустой — по нему и судим, что шаг отвечен.
@@ -268,13 +294,38 @@ class SessionQuestionView {
   }
 }
 
-/// Событие сессии: тип + длительность (остальное ревью не интересует).
+/// Событие сессии: тип, длительность и (для событий активности) привязка к шагу.
+///
+/// Узел и тип шага нужны, чтобы восстановить время по шагам: длительность
+/// лежит в событии, а не в `activity_json` (см. [SessionStepView.timingKnown]).
 class SessionEventView {
-  /// `LearningEventType.wire`.
+  /// Тип события как записан в БД (`learning_events.type`).
   final String type;
   final int durationMs;
 
-  const SessionEventView({required this.type, this.durationMs = 0});
+  /// `learning_events.node_id`; пусто у событий без узла (`session_started`).
+  final String nodeId;
+
+  /// Тип шага из `learning_events.data_json.step` (`explain` | ... | `apply`).
+  ///
+  /// Пусто, если payload'а с шагом нет (например, у `activity_started`).
+  final String stepType;
+
+  /// Событие, в котором записан замер времени по конкретному шагу.
+  ///
+  /// Не требует непустого [stepType]: событие без указания шага тоже замер, но
+  /// привязать его к шагу можно только позиционно (см. загрузчик). Считается
+  /// загрузчиком, потому что он единственный знает про нормализацию типа
+  /// события (`LearningEventType.fromString`).
+  final bool isStepTiming;
+
+  const SessionEventView({
+    required this.type,
+    this.durationMs = 0,
+    this.nodeId = '',
+    this.stepType = '',
+    this.isStepTiming = false,
+  });
 }
 
 /// Одна оценка сессии: что записано в БД и что получилось по попыткам.
@@ -334,6 +385,15 @@ class SessionView {
   /// Узлы учебного плана/curriculum.
   final List<String> plannedNodeIds;
 
+  /// Сколько пунктов плана помечено `completed` и сколько их всего.
+  ///
+  /// Отдельные числа, а не производные от [plannedNodeIds]: один узел может
+  /// встречаться в плане несколько раз, а закрыт пункт или нет — определяется
+  /// его статусом. Это единственный признак «план пройден», который приложение
+  /// реально пишет.
+  final int plannedItemsCompleted;
+  final int plannedItemsTotal;
+
   /// `nodeId → текст мисконцепции`: та же информация, но с узлом.
   ///
   /// Нужна для `session_misconception_without_remediation`: без узла нельзя
@@ -362,6 +422,8 @@ class SessionView {
     this.masteryAfter = const {},
     this.misconceptions = const [],
     this.plannedNodeIds = const [],
+    this.plannedItemsCompleted = 0,
+    this.plannedItemsTotal = 0,
     this.misconceptionsByNode = const {},
     this.assessments = const [],
   });
@@ -400,6 +462,25 @@ String _squeeze(String s) => s
 String _squeezedAnswer(String? s) => _squeeze(s ?? '');
 
 String _nonEmpty(String? s) => (s ?? '').trim();
+
+/// Длительность в человекочитаемом виде: «2 ч 0 мин», «1.5 с», «250 мс».
+///
+/// Для неправдоподобных замеров важно не «1753000000000 мс», а «55 лет»: такой
+/// масштаб сразу показывает, что в базу попало абсолютное время.
+String _fmtMs(int ms) {
+  if (ms >= 24 * 60 * 60 * 1000) return '${(ms / (24 * 60 * 60 * 1000)).toStringAsFixed(1)} сут';
+  if (ms >= 60 * 60 * 1000) return '${(ms / (60 * 60 * 1000)).toStringAsFixed(1)} ч';
+  if (ms >= 60 * 1000) return '${(ms / (60 * 1000)).toStringAsFixed(1)} мин';
+  if (ms >= 1000) return '${(ms / 1000).toStringAsFixed(1)} с';
+  return '$ms мс';
+}
+
+/// Текст в одну строку и не длиннее [limit] символов — для сообщений.
+String _short(String s, int limit) {
+  final oneLine = s.replaceAll(RegExp(r'\s+'), ' ').trim();
+  if (oneLine.length <= limit) return oneLine;
+  return '${oneLine.substring(0, limit)}…';
+}
 
 /// Короткий список для сообщения: сортировка + ограничение длины.
 String _idList(Iterable<String> ids, {int limit = 8}) {
@@ -671,24 +752,79 @@ List<Finding> checkApplyDegenerate(SessionView view) {
   return out;
 }
 
-/// Время шагов против бюджета сессии + нулевое время при длинных текстах.
+/// Время против бюджета сессии + качество самих замеров.
+///
+/// Проверка составная, и это важно: «медленно» и «неправдоподобно» — разные
+/// вещи, а сливать их в одно число нельзя.
+///
+/// 1. Неправдоподобный замер (fail) — `time_spent_ms` или длительность шага
+///    больше [kImplausibleAnswerMs]. Это сломанный таймер (в UI момент старта
+///    не инициализирован, поэтому в базу уходит абсолютное время), а не медленный
+///    ученик. Такие значения исключаются из суммы: иначе одна битая запись
+///    превращает любую сессию в «55 лет при бюджете 60 минут».
+/// 2. Превышение бюджета (warn/fail) — сумма ПРАВДОПОДОБНЫХ замеров против
+///    `time_budget_minutes`. Порог прежний, просто сумма теперь честная.
+/// 3. Пропущенный замер (warn) — отвеченный шаг с длинным текстом, для которого
+///    в `learning_events` нет события. Незавершённый шаг сюда не попадает: его
+///    отсутствие замера — норма, а не дефект.
 List<Finding> checkStepDuration(SessionView view) {
   final budgetMs = view.timeBudgetMinutes * 60 * 1000;
+  final out = <Finding>[];
+
+  // ─── 1. Неправдоподобный замер ──────────────────────────────────────────────
+  final impossible = <String>[];
+  final questionImpossible = <int>[];
   var totalMs = 0;
-  for (final step in view.allSteps) {
-    totalMs += step.durationMs;
+  for (var i = 0; i < view.questions.length; i++) {
+    final q = view.questions[i];
+    if (q.timeSpentMs > kImplausibleAnswerMs) {
+      questionImpossible.add(i);
+      impossible.add('вопрос №${i + 1} «${_short(q.question, 40)}» — '
+          '${_fmtMs(q.timeSpentMs)}');
+    } else {
+      totalMs += q.timeSpentMs;
+    }
   }
-  for (final q in view.questions) {
-    totalMs += q.timeSpentMs;
+  final stepsImpossible = <String>[];
+  for (final a in view.activities) {
+    for (var i = 0; i < a.steps.length; i++) {
+      final step = a.steps[i];
+      if (!step.timingKnown) continue;
+      if (step.durationMs > kImplausibleAnswerMs) {
+        stepsImpossible.add('${a.nodeId}#${i + 1} — ${_fmtMs(step.durationMs)}');
+      } else {
+        totalMs += step.durationMs;
+      }
+    }
+  }
+  if (impossible.isNotEmpty || stepsImpossible.isNotEmpty) {
+    out.add(Finding(
+      code: SessionCheckCode.stepDuration,
+      severity: FindingSeverity.fail,
+      message: 'Неправдоподобный замер времени (больше '
+          '${_fmtMs(kImplausibleAnswerMs)}): ${[...impossible, ...stepsImpossible].join('; ')}. '
+          'Это не «медленно отвечал», а неработающий таймер: в '
+          'assessment_attempts.time_spent_ms попало абсолютное время '
+          '(UI стартует отсчёт при первом вопросе, а не при показе экрана), '
+          'либо приложение было открыто сутки. Метрика Learning Gain / Time '
+          'по такой записи недостоверна, и сумма времени её исключает',
+      data: {
+        'implausibleQuestions': questionImpossible.length,
+        'implausibleSteps': stepsImpossible.length,
+        'maxPlausibleMs': kImplausibleAnswerMs,
+      },
+    ));
   }
 
-  final out = <Finding>[];
+  // ─── 2. Превышение бюджета ──────────────────────────────────────────────────
   if (budgetMs > 0 && totalMs > 0) {
     final ratio = totalMs / budgetMs;
-    if (ratio > kSessionDurationFailRatio) {
+    if (ratio > kSessionDurationWarnRatio) {
       out.add(Finding(
         code: SessionCheckCode.stepDuration,
-        severity: FindingSeverity.fail,
+        severity: ratio > kSessionDurationFailRatio
+            ? FindingSeverity.fail
+            : FindingSeverity.warn,
         message: 'Сумма времени шагов и вопросов — '
             '${(totalMs / 60000).toStringAsFixed(1)} мин при бюджете '
             '${view.timeBudgetMinutes} мин ('
@@ -701,27 +837,15 @@ List<Finding> checkStepDuration(SessionView view) {
           'ratio': double.parse(ratio.toStringAsFixed(4)),
         },
       ));
-    } else if (ratio > kSessionDurationWarnRatio) {
-      out.add(Finding(
-        code: SessionCheckCode.stepDuration,
-        severity: FindingSeverity.warn,
-        message: 'Сумма времени шагов и вопросов — '
-            '${(totalMs / 60000).toStringAsFixed(1)} мин при бюджете '
-            '${view.timeBudgetMinutes} мин (${ratio.toStringAsFixed(1)}x)',
-        data: {
-          'totalMs': totalMs,
-          'budgetMinutes': view.timeBudgetMinutes,
-          'ratio': double.parse(ratio.toStringAsFixed(4)),
-        },
-      ));
     }
   }
 
-  // «Нулевое» время при длинных текстах: значит, замер не вёлся вовсе.
+  // ─── 3. Пропущенный замер у отвеченного шага ─────────────────────────────────
   for (final a in view.activities) {
     final silent = <String>[
       for (var i = 0; i < a.steps.length; i++)
-        if (a.steps[i].durationMs == 0 &&
+        if (a.steps[i].isAnswered &&
+            !a.steps[i].timingKnown &&
             a.steps[i].fullText.trim().length >= kLongStepTextChars)
           '${a.nodeId}#${i + 1}',
     ];
@@ -730,54 +854,53 @@ List<Finding> checkStepDuration(SessionView view) {
       code: SessionCheckCode.stepDuration,
       severity: FindingSeverity.warn,
       nodeId: a.nodeId,
-      message: '${silent.length} шагов с нулевым временем при тексте от '
-          '$kLongStepTextChars символов (${_idList(silent)}) — тайминг не '
-          'записывался, метрика Learning Gain / Time недостоверна',
+      message: '${silent.length} отвеченных шагов без замера времени при тексте '
+          'от $kLongStepTextChars символов (${_idList(silent)}) — в '
+          'learning_events нет события activity_answer / activity_step_done '
+          'по этим шагам, метрика Learning Gain / Time по ним недостоверна',
       data: {'silentSteps': silent.length},
     ));
   }
   return out;
 }
 
-/// Статус сессии согласован с ответами и флагом завершения активностей.
+/// Состояние сессии против состояния плана.
+///
+/// Что здесь важно: у приложения НЕТ контракта закрытия сессии.
+/// `LearningSessionEngine` завершает оценку, но строку `learning_sessions` не
+/// трогает — `status` остаётся `active`, а `completed_at` пуст даже после
+/// `finalize()`. Поэтому ориентироваться на `status`/`completed_at` как на
+/// признак «пройдена» нельзя: так сработает на каждой здоровой сессии, а раньше
+/// проверка именно это и делала (находила сессию по числу ответов и по
+/// производному флагу `isComplete`, которого в боевом blob'е нет вовсе).
+///
+/// Единственное, что реально пишется и чему можно верить, — статусы пунктов
+/// `curriculum_json`. Если план закрыт целиком, сессия фактически пройдена и
+/// осталась незакрытой по учётным записям. Это не дефект обучения, поэтому
+/// severity — info: найдёт внимательного человека, но не поставит прогон в
+/// красный статус. Противоречие в другую сторону (`completed` при незакрытом
+/// плане) не проверяем: ранний `finalize` — поддерживаемый сценарий, и
+/// «преждевременный completed» по данным неотличим от него.
 List<Finding> checkSessionCompletion(SessionView view) {
-  final answered = view.answeredSteps.length;
-  final activitiesWithAnswers = <SessionActivityView>[
-    for (final a in view.activities)
-      if (a.steps.any((s) => s.isAnswered)) a,
-  ];
-  final out = <Finding>[];
+  final total = view.plannedItemsTotal;
+  final done = view.plannedItemsCompleted;
+  if (view.status == kStatusCompleted) return const [];
+  if (total <= 0 || done < total) return const [];
 
-  if (view.status != kStatusCompleted &&
-      answered >= kEnoughAnswersForCompletion &&
-      activitiesWithAnswers.length == view.activities.length &&
-      view.activities.isNotEmpty) {
-    out.add(Finding(
+  return <Finding>[
+    Finding(
       code: SessionCheckCode.completion,
-      severity: FindingSeverity.warn,
-      message: 'status = «${view.status}», но отвечено $answered шагов во всех '
-          '${view.activities.length} активностях и записано '
-          '${view.events.length} событий — сессия выглядит завершённой, '
-          'просто статус не переключили',
-      data: {'answeredSteps': answered, 'events': view.events.length},
-    ));
-  }
-
-  final incomplete = [
-    for (final a in view.activities)
-      if (!a.isComplete) a.nodeId,
+      severity: FindingSeverity.info,
+      message: 'Все $total пунктов плана помечены «$kPlanItemCompleted», но '
+          'status = «${view.status}» и completedAt пуст — сессия пройдена и '
+          'осталась незакрытой по учёту (приложение статус сессии не переключает)',
+      data: {
+        'plannedItemsCompleted': done,
+        'plannedItemsTotal': total,
+        'status': view.status,
+      },
+    ),
   ];
-  if (answered > 0 && incomplete.length == view.activities.length) {
-    out.add(Finding(
-      code: SessionCheckCode.completion,
-      severity: FindingSeverity.warn,
-      message: 'Ни одна из ${view.activities.length} активностей не помечена '
-          'завершённой (isComplete == false), хотя ответы есть: прогресс '
-          'потеряется при перезапуске',
-      data: {'activities': view.activities.length},
-    ));
-  }
-  return out;
 }
 
 /// Мастерство выросло только на тех узлах, которые были в сессии.

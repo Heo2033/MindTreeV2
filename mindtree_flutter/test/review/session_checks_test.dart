@@ -1,6 +1,6 @@
 // Детерминированные проверки ПРОЖИТОЙ учебной сессии.
 //
-// Файл закрывает `tool/review/session_checks.dart` — набор из 13 проверок,
+// Файл закрывает `tool/review/session_checks.dart` — набор из 15 проверок,
 // которые ревьюер применяет к плоскому `SessionView`. БД, drift и сеть не
 // нужны: на вход DTO, на выход — список `Finding`.
 //
@@ -10,6 +10,13 @@
 //   * что здоровая сессия не даёт НИ ОДНОЙ находки (защита от ложных
 //     срабатываний — иначе ревью превратится в шум);
 //   * что порядок и тексты находок детерминированы между вызовами.
+//
+// ФИКСТУРА «ЗДОРОВАЯ» ДОЛЖНА БЫТЬ ПОЛНОЙ. `learner_models` хранит только
+// текущее состояние мастерства, поэтому снимка «до» в боевых данных нет и
+// `checkMasteryDelta` на таком входе честно выдаёт info. Чтобы защитный тест
+// «ни одной находки» оставался строгим, `cleanView` задаёт НЕПУСТОЙ
+// `masteryBefore`; кейс «снимка ДО нет» проверяется отдельно и явно —
+// фильтровать info в helper'ах значило бы прятать дефект проверки.
 //
 // Пороги проверок не «подстраиваются» под тест: константы импортируются из
 // самого `session_checks.dart`, поэтому правка порога в продакшене уронит
@@ -75,7 +82,9 @@ SessionView cleanView({
   List<String> plannedNodeIds = const <String>['n1'],
   List<SessionActivityView> activities = const <SessionActivityView>[goodActivity],
   List<SessionQuestionView> questions = const <SessionQuestionView>[goodQuestion],
-  Map<String, double> masteryBefore = const <String, double>{},
+  // Снимок mastery «до» обязателен: без него `checkMasteryDelta` выдаёт info,
+  // и «здоровая» фикстура перестаёт быть эталоном чистого отчёта.
+  Map<String, double> masteryBefore = const <String, double>{'n1': 0.25},
   Map<String, double> masteryAfter = const <String, double>{'n1': 0.625},
   List<String> misconceptions = const <String>[],
   Map<String, String> misconceptionsByNode = const <String, String>{},
@@ -189,7 +198,12 @@ SessionView dirtyView() => SessionView(
 void main() {
   group('здоровая сессия', () {
     test('не даёт ни одной находки (защита от ложных срабатываний)', () {
-      final findings = runSessionChecks(cleanView());
+      final view = cleanView();
+      expect(view.masteryBefore, isNotEmpty,
+          reason: 'здоровая фикстура обязана быть полной: без снимка «до» '
+              'checkMasteryDelta честно выдаёт info, и строгая проверка '
+              'перестала бы что-то защищать');
+      final findings = runSessionChecks(view);
 
       expect(findings, isEmpty,
           reason: 'согласованная сессия не должна попадать в отчёт:\n'
@@ -232,6 +246,9 @@ void main() {
           SessionActivityView(nodeId: 'n1'),
         ],
         questions: const <SessionQuestionView>[],
+        // Про узел не знает никто: ни план, ни mastery до/после — это и есть
+        // условие ветки «проверить нечем».
+        masteryBefore: const <String, double>{},
         masteryAfter: const <String, double>{},
       ));
 
@@ -288,6 +305,26 @@ void main() {
       ));
 
       expect(withCode(findings, SessionCheckCode.stepMix), isEmpty);
+    });
+
+    test('активность вовсе без шагов → warn с пустым списком типов', () {
+      // Загрузчик такую активность выбрасывает (судить о прохождении не по
+      // чему), но проверка обязана корректно описывать и такой DTO. Кейс
+      // «пустой steps в activity_json» проверяется на загрузчике, здесь
+      // фиксируется поведение самой проверки.
+      final findings = runSessionChecks(cleanView(
+        activities: const <SessionActivityView>[
+          SessionActivityView(nodeId: 'n1', nodeLabel: 'Остановка'),
+        ],
+        questions: const <SessionQuestionView>[],
+      ));
+
+      expect(const SessionActivityView(nodeId: 'n1').stepsOfType(kStepRecall), isEmpty);
+      expect(tagsOf(findings), <String>['${SessionCheckCode.stepMix}/warn']);
+      final hit = withCode(findings, SessionCheckCode.stepMix).single;
+      expect(hit.data?['stepTypes'], isEmpty, reason: 'типов шагов нет вообще');
+      expect(hit.message, contains('типы: )'),
+          reason: 'косметический дефект текста: пустые скобки в сообщении');
     });
   });
 
@@ -725,6 +762,9 @@ void main() {
   });
 
   group('session_mastery_delta', () {
+    // Контракт: рост утверждается ТОЛЬКО когда известно состояние «до». Раньше
+    // `before` не читался вовсе, и каждый новый для сессии узел давал warn —
+    // на боевых данных это были десятки ложных срабатываний.
     test('нет данных ПОСЛЕ → info', () {
       final hit = withCode(
         runSessionChecks(cleanView(masteryAfter: const <String, double>{})),
@@ -732,19 +772,52 @@ void main() {
       );
 
       expect(hit.single.severity, FindingSeverity.info);
+      expect(hit.single.message, contains('дельту проверить нечем'));
     });
 
-    test('рост на узле вне сессии → warn', () {
+    test('снимка ДО нет, а ПОСЛЕ есть → ровно одна info, без per-node находок', () {
+      final findings = runSessionChecks(cleanView(
+        masteryBefore: const <String, double>{},
+        masteryAfter: const <String, double>{'n1': 0.625, 'n-прочь': 0.9},
+      ));
+
+      expect(tagsOf(findings), <String>['${SessionCheckCode.masteryDelta}/info']);
+      final hit = withCode(findings, SessionCheckCode.masteryDelta).single;
+      expect(hit.nodeId, isNull, reason: 'находка про данные, а не про узел');
+      expect(hit.data, isNull);
+      expect(hit.message, contains('Нет снимка мастерства ДО'));
+    });
+
+    test('рост на узле вне сессии при известном «до» → warn с before/after', () {
       final hit = withCode(
-        runSessionChecks(cleanView(masteryAfter: const <String, double>{'n-прочь': 0.9})),
+        runSessionChecks(cleanView(
+          masteryBefore: const <String, double>{'n-прочь': 0.2},
+          masteryAfter: const <String, double>{'n-прочь': 0.9},
+        )),
         SessionCheckCode.masteryDelta,
       );
 
       expect(hit, hasLength(1));
       expect(hit.single.severity, FindingSeverity.warn);
       expect(hit.single.nodeId, 'n-прочь');
-      expect(hit.single.data?['before'], isNull);
+      expect(hit.single.data?['before'], 0.2);
+      expect(hit.single.data?['after'], 0.9);
+      expect(hit.single.message, contains('0.200 → 0.900'));
       expect(hit.single.message, contains('не было ни в плане'));
+    });
+
+    test('узел новый (before == null), но он был в сессии → молчим', () {
+      expect(
+        withCode(
+          runSessionChecks(cleanView(
+            masteryBefore: const <String, double>{'n-другой': 0.4},
+            masteryAfter: const <String, double>{'n1': 0.9},
+          )),
+          SessionCheckCode.masteryDelta,
+        ),
+        isEmpty,
+        reason: 'без состояния «до» рост не доказан, а узел был в плане',
+      );
     });
 
     test('mastery не выросла (после <= до) → молчим', () {

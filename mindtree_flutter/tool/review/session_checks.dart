@@ -45,21 +45,27 @@ abstract final class SessionCheckCode {
   static const misconceptionWithoutRemediation =
       'session_misconception_without_remediation';
 
-  /// Вопрос без пояснения правильного ответа / без эталона.
+  /// У вопроса нечем оценить ответ: у закрытого — нечем объяснить правильный
+  /// вариант, у открытого — нет рубрики. Неразрешимый правильный вариант сюда
+  /// НЕ попадает: это отдельная находка [questionAnswerUnresolved].
   static const questionShallow = 'session_question_shallow';
 
   /// Доля повторов одного типа шага подряд слишком велика.
   static const progression = 'session_progression';
 
-  /// `correctAnswer` не совпал ни с одним вариантом: правильный ответ
+  /// `correctAnswer` не сопоставился ни с одним вариантом: правильный ответ
   /// неизвестен, поэтому проверить фидбек и оценку нечем.
+  ///
+  /// Резолв индекса/текста общий с движком (`lib/domain/lib/option_matching.dart`),
+  /// так что сюда попадают только действительно битые данные.
   static const questionAnswerUnresolved = 'session_question_answer_unresolved';
 
   /// Балл assessment не сходится с долей верных попыток.
   static const scoreMismatch = 'session_score_mismatch';
 
-  /// Вердикт противоречит ответу: ученик выбрал правильный вариант (или
-  /// дословно дал эталон), а в БД `correct = false`.
+  /// Вердикт противоречит ответу: ученик выбрал правильный вариант (по контракту
+  /// — тем же индексом, что и `correctAnswer`; для старых записей — дословно
+  /// текстом варианта), а в БД `correct = false`.
   ///
   /// Такой ответ портит mastery и мисконцепции — это уже не «тонкий материал»,
   /// а испорченный учебный след.
@@ -178,7 +184,10 @@ class SessionActivityView {
   final String nodeLabel;
   final List<SessionStepView> steps;
 
-  /// Флаг завершения из БД (`LearningActivity.isComplete`).
+  /// Флаг завершения активности.
+  ///
+  /// Приоритет у явного `isComplete` из данных. Приложение его не пишет, поэтому
+  /// при отсутствии флага загрузчик выводит завершение из отвеченности шагов.
   final bool isComplete;
 
   const SessionActivityView({
@@ -208,9 +217,21 @@ class SessionQuestionView {
 
   final List<String>? options;
 
-  /// Эталонный ответ для открытых вопросов (`AssessmentQuestion.correctAnswer`).
+  /// `AssessmentQuestion.correctAnswer`: у закрытого вопроса — строковый
+  /// ИНДЕКС правильного варианта («"0".."3"»), у открытого — пуст по
+  /// построению (эталон ему не нужен, см. [rubric]).
   final String? correctAnswer;
   final int? correctIndex;
+
+  /// Рубрика открытого вопроса (`AssessmentQuestion.explanation`).
+  ///
+  /// По контракту оценки эталон открытому вопросу не нужен и не существует:
+  /// `gradeOpenEnded(answer, rubric: explanation)` — единственный способ его
+  /// проверить, а пустая рубрика засчитывает любой непустой ответ как верный.
+  /// Поэтому рубрика лежит отдельным полем, а не подменяется `feedback`: у
+  /// попытки свой текст фидбека.
+  final String? rubric;
+
   final String? userAnswer;
   final bool? correct;
   final String? feedback;
@@ -223,6 +244,7 @@ class SessionQuestionView {
     this.options,
     this.correctAnswer,
     this.correctIndex,
+    this.rubric,
     this.userAnswer,
     this.correct,
     this.feedback,
@@ -233,6 +255,9 @@ class SessionQuestionView {
 
   /// Открытый вопрос — на него отвечают текстом, а не выбором.
   bool get isOpen => !hasOptions;
+
+  /// Есть чем оценивать открытый ответ — непустая рубрика.
+  bool get hasRubric => (rubric ?? '').trim().isNotEmpty;
 
   /// Тип, по которому решаем, «вопрос это или прикидка»: явный тип важнее
   /// структуры, но `recall`/`application` подставляются по форме, если загрузчик
@@ -286,7 +311,7 @@ class SessionView {
   final String targetLevel;
   final int timeBudgetMinutes;
 
-  /// ISO-время старта/финиша. Никаких «сейчас»: только то, что записано.
+  /// ISO-время старта/финиша. Никакого «сейчас»: только то, что записано.
   final String startedAt;
   final String completedAt;
 
@@ -757,6 +782,12 @@ List<Finding> checkSessionCompletion(SessionView view) {
 
 /// Мастерство выросло только на тех узлах, которые были в сессии.
 ///
+/// Рост можно утверждать ТОЛЬКО когда известно состояние «до». Узла, которого
+/// не было в `masteryBefore`, это обычное дело (он новый для сессии), и любая
+/// ненулевая mastery на нём выглядела бы как «выросло с нуля» — это шум, а не
+/// дефект. Снимка «до» в БД нет by design (`learner_models` хранит только
+/// текущее состояние), поэтому такой случай честно отдаётся одной info.
+///
 /// Рост на узле, которого не было ни в плане, ни в активностях, — признак
 /// либо баги в разборе событий, либо подмены id.
 List<Finding> checkMasteryDelta(SessionView view) {
@@ -770,22 +801,34 @@ List<Finding> checkMasteryDelta(SessionView view) {
       ),
     ];
   }
+  if (view.masteryBefore.isEmpty) {
+    return const [
+      Finding(
+        code: SessionCheckCode.masteryDelta,
+        severity: FindingSeverity.info,
+        message: 'Нет снимка мастерства ДО сессии: learner_models хранит '
+            'только текущее состояние, поэтому оценить, выросло ли мастерство, '
+            'нельзя',
+      ),
+    ];
+  }
   final known = view.touchedNodeIds;
   final out = <Finding>[];
   for (final nodeId in view.masteryAfter.keys.toList()..sort()) {
     final after = view.masteryAfter[nodeId]!;
     final before = view.masteryBefore[nodeId];
-    final grew = before == null || after > before;
-    if (!grew) continue;
+    // Узел новый для сессии: «до» не знаем, а значит и рост не доказан.
+    if (before == null) continue;
+    if (after <= before) continue;
     if (known.contains(nodeId)) continue;
     out.add(Finding(
       code: SessionCheckCode.masteryDelta,
       severity: FindingSeverity.warn,
       nodeId: nodeId,
       message: 'Мастерство на узле «$nodeId» выросло '
-          '(${before?.toStringAsFixed(3) ?? 'нет данных'} → '
-          '${after.toStringAsFixed(3)}), но этого узла не было ни в плане, ни '
-          'в активностях, ни в вопросах сессии',
+          '(${before.toStringAsFixed(3)} → ${after.toStringAsFixed(3)}), '
+          'но этого узла не было ни в плане, ни в активностях, ни в вопросах '
+          'сессии',
       data: {
         'before': before,
         'after': double.parse(after.toStringAsFixed(4)),
@@ -850,11 +893,21 @@ List<Finding> checkMisconceptionRemediation(SessionView view) {
   return out;
 }
 
-/// Вопросы объясняют правильный ответ.
+/// Вопросы дают чем оценить ответ и объясняют правильный ответ.
 ///
-/// Закрытый вопрос: фидбек обязан либо процитировать правильный вариант, либо
-/// содержать связку («верно», «потому что»). Открытый (apply-вопрос): нужен
-/// эталонный ответ — иначе сравнивать ответ ученика не с чем.
+/// Контракт боевой оценки (`assessment_engine.dart` + экраны quiz/final):
+/// * ЗАКРЫТЫЙ вопрос (`options` непустой) проверяется сверкой индексов
+///   `selected.toString() == q.correctAnswer`, поэтому неразрешимый правильный
+///   вариант — это отдельная находка [SessionCheckCode.questionAnswerUnresolved]
+///   (дефект данных), и здесь она НЕ дублируется: пока вариант неизвестен,
+///   «фидбека нет» и «фидбек плохой» — одно и то же рассуждение, скажем один
+///   раз. При известном варианте фидбек обязан либо процитировать его, либо
+///   содержать оценочную связку («верно», «потому что»).
+/// * ОТКРЫТЫЙ вопрос (`options` пуст) эталона не имеет и по контракту иметь не
+///   должен: `correctAnswer` у него пуст по построению, а оценивает
+///   `gradeOpenEnded` по рубрике из `explanation`. Поэтому проверяем РУБРИКУ, а
+///   не `correctAnswer`; рубрики нет — такой вопрос действительно неоцениваем,
+///   засчитывался бы как верный на любой непустой ответ, и это warn, а не info.
 List<Finding> checkQuestionDepth(SessionView view) {
   final out = <Finding>[];
   for (var i = 0; i < view.questions.length; i++) {
@@ -864,6 +917,34 @@ List<Finding> checkQuestionDepth(SessionView view) {
     final feedback = _squeezedAnswer(q.feedback);
 
     if (q.hasOptions) {
+      final options = q.options!;
+      final index = q.correctIndex;
+      // Правильный вариант не сопоставили (или индекс вне диапазона): без него
+      // неизвестно, процитировала ли обратная связь ответ, и оценка в самом
+      // приложении тоже не сойдётся. Это дефект данных, а не shallow-фидбека —
+      // и второй раз обсуждать его здесь нельзя.
+      if (index == null || index < 0 || index >= options.length) {
+        final raw = _nonEmpty(q.correctAnswer);
+        final how = index == null
+            ? 'индекс не разрешён'
+            : 'индекс $index вне диапазона 0..${options.length - 1}';
+        out.add(Finding(
+          code: SessionCheckCode.questionAnswerUnresolved,
+          severity: FindingSeverity.warn,
+          nodeId: q.nodeId,
+          message: '$label ($type): correctAnswer не совпал ни с одним из '
+              '${options.length} вариантов (в базе «$raw», $how; резолв — сначала '
+              'индекс, потом нормализованный текст) — правильный ответ не '
+              'определён, поэтому ни фидбек, ни оценку проверить нельзя',
+          data: {
+            'correctAnswer': q.correctAnswer,
+            'optionCount': options.length,
+            'correctIndex': index,
+          },
+        ));
+        continue;
+      }
+
       if (feedback.isEmpty) {
         out.add(Finding(
           code: SessionCheckCode.questionShallow,
@@ -874,38 +955,15 @@ List<Finding> checkQuestionDepth(SessionView view) {
         ));
         continue;
       }
-      // Правильный вариант цитируется в фидбеке ИЛИ фидбек содержит
-      // оценочную связку («верно», «потому что») — второе считаем пояснением
-      // только если вариант известен: иначе непонятно, ЧТО объясняется.
-      final index = q.correctIndex;
-      final option = (index != null &&
-              index >= 0 &&
-              index < q.options!.length &&
-              _nonEmpty(q.options![index]).length >= kMinOptionLengthForExplain)
-          ? q.options![index]
-          : null;
-      final citesOption =
-          option != null && feedback.contains(_squeezedAnswer(option));
+
+      // Правильный вариант цитируется в фидбеке ИЛИ фидбек содержит оценочную
+      // связку («верно», «потому что») — второе засчитываем как пояснение: раз
+      // вариант известен, понятно, ЧТО объясняется.
+      final option = _nonEmpty(options[index]);
+      final citesOption = option.length >= kMinOptionLengthForExplain &&
+          feedback.contains(_squeezedAnswer(option));
       final hasVerdict =
           _kFeedbackAffirmations.any((w) => feedback.contains(_squeeze(w)));
-      if (option == null) {
-        // Правильный вариант не сопоставили: без него неизвестно, процитировала
-        // ли обратная связь ответ. Раньше такое проходило как «есть вердикт» —
-        // false negative. Это дефект данных, а не shallow-фидбека.
-        out.add(Finding(
-          code: SessionCheckCode.questionAnswerUnresolved,
-          severity: FindingSeverity.warn,
-          nodeId: q.nodeId,
-          message: '$label ($type): correctAnswer не совпал ни с одним из '
-              '${q.options!.length} вариантов — правильный ответ не определён, '
-              'поэтому ни фидбек, ни оценку проверить нельзя',
-          data: {
-            'correctAnswer': q.correctAnswer,
-            'optionCount': q.options!.length,
-          },
-        ));
-        continue;
-      }
       if (citesOption || hasVerdict) continue;
       out.add(Finding(
         code: SessionCheckCode.questionShallow,
@@ -918,14 +976,15 @@ List<Finding> checkQuestionDepth(SessionView view) {
       continue;
     }
 
-    // Открытый вопрос: нужен эталон (в `options == null` эталон — только он).
-    if (_nonEmpty(q.correctAnswer).isEmpty) {
+    // Открытый вопрос: эталона нет и не должно быть — нужна рубрика.
+    if (!q.hasRubric) {
       out.add(Finding(
         code: SessionCheckCode.questionShallow,
         severity: FindingSeverity.warn,
         nodeId: q.nodeId,
-        message: '$label ($type): открытый вопрос без эталонного ответа '
-            '(correctAnswer) — ответ ученика не с чем сравнить',
+        message: '$label ($type): открытый вопрос без рубрики (explanation) — '
+            'без эталонного ответа оценивать нечем: gradeOpenEnded с пустой '
+            'рубрикой засчитывает любой непустой ответ как верный',
       ));
     }
   }
@@ -987,13 +1046,14 @@ List<Finding> runSessionChecks(SessionView view) {
 
 /// Вердикт не согласован с самим ответом.
 ///
-/// Кейс из архива сессии: `userAnswer` дословно равен эталону (или совпал с
-/// правильным вариантом), а попытка записана как неверная. Раньше это проходило
-/// молча — «неверно» попадало в mastery и в мисконцепции.
+/// Кейс из архива сессии: `userAnswer` — это правильный вариант (по контракту
+/// тем же индексом, что и `correctAnswer`, для старых записей — дословно его
+/// текстом), а попытка записана как неверная. Раньше это проходило молча —
+/// «неверно» попадало в mastery и в мисконцепции.
 ///
 /// Проверяем только закрытые вопросы с известным правильным вариантом: для
-/// открытых ответов вердикт может быть rubric-оценкой, и сравнение текстов
-/// даёт ложные срабатывания.
+/// открытых ответов вердикт ставит `gradeOpenEnded` по рубрике, и сравнение
+/// текстов даёт ложные срабатывания.
 List<Finding> checkVerdictConsistency(SessionView view) {
   final out = <Finding>[];
   for (var i = 0; i < view.questions.length; i++) {
@@ -1008,9 +1068,13 @@ List<Finding> checkVerdictConsistency(SessionView view) {
     final idx = q.correctIndex!;
     if (idx < 0 || idx >= q.options!.length) continue;
 
-    final matchesText = _nonEmpty(q.correctAnswer) == answer;
-    final matchesIndex = answer == q.options![idx].trim();
-    if (!matchesText && !matchesIndex) continue;
+    // По контракту и `correctAnswer`, и `userAnswer` закрытого вопроса — индексы
+    // вариантов строкой, так что первое сравнение и есть проверка по контракту.
+    // Второе оставлено для данных, где ученикский ответ записан текстом
+    // варианта (старые сессии, ручные правки БД).
+    final matchesAnswer = _nonEmpty(q.correctAnswer) == answer;
+    final matchesOptionText = answer == q.options![idx].trim();
+    if (!matchesAnswer && !matchesOptionText) continue;
 
     out.add(Finding(
       code: SessionCheckCode.verdictContradictsAnswer,

@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import 'package:mindtree_flutter/domain/engines/assessment_engine.dart';
+import 'package:mindtree_flutter/domain/lib/grading.dart';
 import 'package:mindtree_flutter/domain/models/models.dart';
 import 'package:mindtree_flutter/providers/app_providers.dart';
 import 'package:mindtree_flutter/providers/ui_stores.dart';
@@ -142,7 +143,11 @@ class _QuizScreenState extends ConsumerState<QuizScreen> {
       correct = selected.toString() == q.correctAnswer;
     } else {
       answer = _answerController.text.trim();
-      correct = answer.isNotEmpty;
+      // Открытый вопрос оценивается по рубрике (explanation) детерминированно,
+      // как в `final_assessment_screen`. Раньше здесь стояло
+      // `correct = answer.isNotEmpty`, то есть ЛЮБОЙ непустой ответ засчитывался
+      // как верный: размытые вопросы на понимание раздували mastery и SRS.
+      correct = gradeOpenEnded(answer, rubric: q.explanation ?? '');
     }
 
     // Exam mode: collect answers, reveal at end

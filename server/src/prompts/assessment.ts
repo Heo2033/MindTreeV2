@@ -1,4 +1,6 @@
 import { ALPHABET_RULE, NO_META_RULE } from "./rules.js";
+import { resolveCorrectAnswerIndex } from "../lib/optionMatching.js";
+import { shortIdWith } from "../domain/shortIds.js";
 
 export interface AssessmentPromptContext {
   topic: string;
@@ -7,97 +9,47 @@ export interface AssessmentPromptContext {
   includeApplication: boolean;
 }
 
-export const PROMPT_ASSESSMENT = `# Роль
-Ты — экзаменатор. Проверь, действительно ли пользователь достиг заявленного уровня понимания темы.
+export const PROMPT_ASSESSMENT = `#            »    
+                             ·   °       µ       °             .                    µ        ,        µ                              µ   »                »                »       ·           °        µ   »                                  ·   °           »   µ                                                                     °                     µ         .
 
-# Контекст
-Тема: "{{topic}}"
-Цель пользователя: {{goal}}
-Изученные понятия (в рамках сессии):
+#                     µ             
+       µ       °: "{{topic}}"
+   ¦   µ   »                »       ·           °        µ   »    : {{goal}}
+       ·            µ                µ                               (            °           °    ¦        µ                ):
 {{session_items}}
 
-# Типы вопросов (всего их 6)
-Сгенерируй финальную проверку, используя следующие типы:
-- **recognition** — узнавание: выбери корректный вариант из четырёх (формулировка, а не заучивание)
-- **recall** — припоминание: воспроизведи определение или ключевой факт (multiple choice)
-- **explanation** — объясни механизм своими словами (structure matters; rubric обязателен)
-- **diagnosis** — найди и объясни ошибку/несоответствие в приведённом утверждении (rubric обязателен)
-- **application** — примени знание к новой конкретной ситуации (rubric обязателен)
-- **transfer** — перенеси знание на смежную/нестандартную ситуацию (rubric обязателен)
+#                                                    (           µ                 ¦ 6)
+           µ       µ                                      °   »                                    µ            ,                    »       ·                »   µ                °       µ                   :
+- **recognition**                ·       °       °           µ:             ±   µ                            µ                               °           °                 ·         µ                       ¦ (                        »                       °,    °        µ    ·   °                    °           µ)
+- **recall**                                            °           µ:                                ·       µ                        µ       µ   »   µ           µ        »            »            µ                      °          (multiple choice)
+- **explanation**                ±                            µ    ¦   °           ·                                     »           °         (structure matters; rubric        ±       ·   °        µ   »   µ    )
+- **diagnosis**                °                          ±                             ¬       ±        /       µ                        µ                         µ                         µ                                          µ       ¶       µ             (rubric        ±       ·   °        µ   »   µ    )
+- **application**                            µ            ·       °           µ                                                   µ                                       °              (rubric        ±       ·   °        µ   »   µ    )
+- **transfer**                µ       µ       µ            ·       °           µ        °            µ   ¶            /       µ            °           °                                          °              (rubric        ±       ·   °        µ   »   µ    )
 
-Всего {{question_count}} вопросов. Обеспечь разнообразие типов: это должен быть честный замер, а не только фактология.
-Для recognition/recall укажи options и correctAnswer (индекс корректного варианта, начиная с 0).
-Для explanation/diagnosis/application/transfer — options=[] и correctAnswer=""; explanation (рубрика) содержит конкретные критерии оценивания: какие элементы должны присутствовать в свободном ответе.
+            µ         {{question_count}}                                 .        ±   µ           µ                 °   ·               ±       °   ·       µ                      :                          »   ¶   µ        ±                       µ                           ·   °       µ    ,    °        µ             »                     °                »                .
+        »     recognition/recall            °   ¶     options      correctAnswer (               µ                            µ                                 °           °            °,        °                °          0).
+        »     explanation/diagnosis/application/transfer         options=[]      correctAnswer=""; explanation (           ±               °)                µ       ¶                                 µ                 µ                     µ                         µ               °            :        °           µ        »   µ       µ                          »   ¶                                                           °                              ±                                     µ        µ.
 
-# Формат ответа
-Строгий JSON-объект:
-{"questions":[{"id":"a1","type":"recall","nodeId":"n2_a","question":"...","options":["A","B","C","D"],"correctAnswer":"0","explanation":"..."},{"id":"a2","type":"explanation","nodeId":"n2_b","question":"Объясните своими словами, как работает X (порядок шагов, причинно-следственные связи).","options":[],"correctAnswer":"","explanation":"Ключевые элементы ответа: 1) ..., 2) ..."}]}
+#    ¤               °                      µ        °
+                               JSON-       ±       µ         :
+{"questions":[{"id":"a1","type":"recall","nodeId":"n2_a","question":"...","options":["A","B","C","D"],"correctAnswer":"0","explanation":"..."},{"id":"a2","type":"explanation","nodeId":"n2_b","question":"       ±                            µ                                 »           °        ,        °            °   ±            °   µ      X (                                 ¬   °            ,                                  -       »   µ                    µ                µ                ·    ).","options":[],"correctAnswer":"","explanation":"       »            µ            µ        »   µ       µ                               µ        °: 1) ..., 2) ..."}]}
 
-# Примечания
-- correctAnswer для recognition/recall — ИНДЕКС правильного варианта (строка "0","1","2","3").
-- Вопросы проверяют глубокое понимание, не поверхностную фактологию.
+#                    µ        °            
+- correctAnswer        »     recognition/recall                                               °           »                            °           °            ° (                        ° "0","1","2","3").
+-                                                   µ                         »       ±               µ                        °           µ,        µ                µ        ¦                                      °                »                .
 
 ${NO_META_RULE}
 ${ALPHABET_RULE}
 
-# Язык
-Отвечай СТРОГО на русском языке. Вопросы, варианты, рубрики — на русском.
+#        ·         
+                µ        °                                       °                                     ·            µ.                               ,        °           °              ,            ±                                °                             .
 
-Никакого текста вне JSON. Без \`\`\`json и без пояснений.
+               °                         µ                °            µ JSON.         µ   · \`\`\`json         ±   µ   ·                        µ             .
 
-# Проверь перед ответом
-- [ ] Ровно {{question_count}} вопросов
-- [ ] Есть вопросы с options (recognition/recall) и открытые вопросы (explanation/diagnosis/application/transfer)
-- [ ] У всех открытых вопросов rubric (explanation) содержит конкретные критерии
-- [ ] Вопросы проверяют глубокое понимание, не поверхностную фактологию
-- [ ] Формат — строго JSON с ключом "questions"`;
-
-export function buildAssessmentPrompt(
-  ctx: AssessmentPromptContext,
-  questionCount: number,
-): string {
-  const itemsJson = JSON.stringify(
-    ctx.sessionItems.map((s) => ({
-      nodeId: s.nodeId,
-      label: s.label,
-      oneLiner: s.oneLiner,
-      details: s.details?.slice(0, 400),
-    })),
-  );
-
-  return PROMPT_ASSESSMENT
-    .replace("{{topic}}", ctx.topic)
-    .replace("{{goal}}", ctx.goal)
-    .replace("{{session_items}}", itemsJson)
-    .replace(/\{\{question_count\}\}/g, String(questionCount))
-    .replace(
-      "{{include_application}}",
-      ctx.includeApplication ? "true" : "false",
-    );
-}
-
-export interface AssessmentQuestionResult {
-  id: string;
-  type: string;
-  nodeId: string;
-  question: string;
-  options: string[];
-  correctAnswer: string;
-  explanation: string;
-}
-
-export function parseAssessmentResult(data: unknown): AssessmentQuestionResult[] {
-  const obj = data as Record<string, unknown>;
-  if (!Array.isArray(obj.questions)) return [];
-  return (obj.questions as Array<Record<string, unknown>>).map((q) => ({
-    id: typeof q.id === "string" ? q.id : `a_${Math.random().toString(36).slice(2, 8)}`,
-    type: typeof q.type === "string" ? q.type : "recall",
-    nodeId: typeof q.nodeId === "string" ? q.nodeId : "",
-    question: typeof q.question === "string" ? q.question : "",
-    options: Array.isArray(q.options)
-      ? (q.options as unknown[]).filter((o): o is string => typeof o === "string")
-      : [],
-    correctAnswer: typeof q.correctAnswer === "string" ? q.correctAnswer : "",
-    explanation: typeof q.explanation === "string" ? q.explanation : "",
-  }));
-}
+#                    µ                µ       µ                     µ             
+- [ ]                      {{question_count}}                                 
+- [ ]                                                       options (recognition/recall)                                         µ                               (explanation/diagnosis/application/transfer)
+- [ ]                 µ    ¦                                     ¦                                  rubric (explanation)                µ       ¶                                 µ                 µ                     µ            
+- [ ]                                                   µ                         »       ±               µ                        °           µ,        µ                µ        ¦                                      °                »                
+- [ ]    ¤               °                                        JSON             »                  "questions"`;

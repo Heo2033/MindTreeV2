@@ -15,14 +15,26 @@
 //   5. Снимок БД: незакрытая WAL-база читается, оригинал не меняется,
 //      временный каталог копии убирается.
 //   6. Детерминизм: два прогона одной базы дают одинаковые байты.
-//   7. Отдельная группа «неустойчивости загрузчика» — поведение, которое сейчас
-//      НЕ устойчивое. Оно зафиксировано как есть: чинить нужно осознанно, и
-//      тест напомнит об этом.
+//   7. Устойчивость загрузчика: мусор вместо базы, дубли journey/learner_model
+//      и битые записи не должны ронять ревью или молча терять данные.
+//   8. БОЕВОЙ формат `activity_json` (`{"itemId", "steps"}`) и legacy-список:
+//      как восстанавливается узел и флаг завершения. Отдельная группа —
+//      именно на ней держался каскад ложных находок на боевых данных.
 //
-// ДЕТЕРМИНИЗМ. Все метки времени заданы явно (`DateTime.utc`), «сейчас» не
-// используется. Порядок строк тоже не случаен: сам загрузчик сортирует
+// ДЕТЕРМИНИЗМ. Все метки времени заданы явно, «сейчас» не используется.
+// Порядок строк тоже не случаен: сам загрузчик сортирует
 // (`startedAt DESC`, узлы по `level ASC`, события по `timestamp ASC`), а в
 // фикстурах id ставятся так, чтобы порядок вставки совпадал с порядком чтения.
+//
+// ЧАСОВОЙ ПОЯС. Метки сессий заданы ЛОКАЛЬНЫМИ (`DateTime(2024, 5, 1, 10)`),
+// а `detectedAt` мисконцепций — локальной строкой без смещения: ровно так их
+// пишет приложение (`DateTime.now().toIso8601String()`). drift хранит
+// `started_at` как epoch-секунды и читает через
+// `DateTime.fromMillisecondsSinceEpoch` без `isUtc`, то есть возвращает
+// локальное время с тем же настенным часом, что записали. Поэтому вхождение
+// мисконцепции в окно сессии не зависит от TZ машины. С `DateTime.utc` такая
+// фикстура ломалась бы на любой машине, чей TZ ≠ UTC: окно съехало бы на
+// разницу поясов, а локальная строка `detectedAt` оказалась бы до его начала.
 
 import 'dart:convert';
 import 'dart:io';
@@ -38,6 +50,11 @@ import '../../tool/review/session_loader.dart';
 
 const String kTopicId = 't1';
 const String kNodeId = 'n1';
+
+/// Второй узел дерева. Нужен, чтобы отличить приоритет явного `nodeId` в
+/// `activity_json` от резолва узла по `itemId` через план.
+const String kSecondNodeId = 'n2';
+
 const String kJourneyId = 'j1';
 const String kSessionId = 's1';
 
@@ -62,9 +79,37 @@ const String kActivityJson = '[{"nodeId":"n1","isComplete":true,'
 const String kLectureOnlyJson = '[{"nodeId":"n1","isComplete":false,'
     '"steps":[{"type":"explain","title":"Лекция","body":"Введение в тему."}]}]';
 
+/// Recall-шаг БОЕВОГО blob'а: `status` проставлен — `ActivityStep.toJson`
+/// сериализует его всегда (`status` ∈ pending|current|answered).
+const String kBattleRecallJson = '{"type":"recall","title":"Что такое остановка?",'
+    '"options":["Верно: останавливается","Неверно: работает вечно"],'
+    '"correctIndex":0,"status":"answered","userAnswer":"Верно: останавливается",'
+    '"correct":true,"feedback":"верно: это и есть определение остановки"}';
+
+/// Apply-шаг боевого blob'а: есть инструкция и этал, ответ отличается от этала.
+const String kBattleApplyJson = '{"type":"apply","title":"Своими словами",'
+    '"instruction":"Объясни своими словами, что такое остановка.",'
+    '"bestAnswer":"Программа не завершится за конечное время.",'
+    '"status":"answered","userAnswer":"Любая программа рано или поздно зависнет.",'
+    '"correct":true,"feedback":"верно, формулировка близка к эталону"}';
+
+/// БОЕВОЙ формат `learning_sessions.activity_json`: ОДИН объект активности
+/// `{"itemId", "steps"}` — ровно то, что пишет `learning_activity_service.dart`
+/// (строки 68 и 305). Ни `nodeId`, ни `isComplete` в этот blob не попадают.
+const String kBattleActivityJson =
+    '{"itemId":"i1","steps":[$kBattleRecallJson,$kBattleApplyJson]}';
+
 const String kCurriculumJson = '{"sessionId":"s1","items":['
     '{"id":"i1","nodeId":"n1","order":0,"type":"explain","estimatedMinutes":5,'
     '"status":"completed"}]}';
+
+/// План из двух элементов: без второго элемента нельзя отличить резолв узла по
+/// `itemId` от приоритета явного `nodeId` в blob'е.
+const String kTwoItemCurriculumJson = '{"sessionId":"s1","items":['
+    '{"id":"i1","nodeId":"n1","order":0,"type":"explain","estimatedMinutes":5,'
+    '"status":"completed"},'
+    '{"id":"i2","nodeId":"$kSecondNodeId","order":1,"type":"explain",'
+    '"estimatedMinutes":5,"status":"pending"}]}';
 
 const String kQuestionsJson = '[{"id":"q1","type":"recall","nodeId":"n1",'
     '"question":"Что такое остановка?",'
@@ -75,12 +120,42 @@ const String kQuestionsJson = '[{"id":"q1","type":"recall","nodeId":"n1",'
 const String kConceptMasteriesJson = '[{"nodeId":"n1","understanding":0.8,'
     '"recall":0.6,"application":0.7,"transfer":0.4,"errors":['
     '{"nodeId":"n1","type":"mechanism_error",'
-    '"description":"Путает остановку с бесконечным циклом","resolved":false}]}]';
+    '"description":"Путает остановку с бесконечным циклом","resolved":false,'
+    // Внутри окна сессии фикстуры (01.05 10:00—10:30), поэтому атрибутируется.
+    '"detectedAt":"2024-05-01T10:15:00"}]}]';
 
 /// Тот же mastery, но БЕЗ мисконцепций: кейсы проверок не должны тонуть в
 /// находке «мисконцепция без отработки».
 const String kMasteryNoMisconceptionsJson = '[{"nodeId":"n1","understanding":0.8,'
     '"recall":0.6,"application":0.7,"transfer":0.4}]';
+
+/// Описание мисконцепции, которой набиты все фикстуры окна атрибуции.
+const String kMisconceptionText = 'Путает остановку с бесконечным циклом';
+
+/// `concept_masteries` с ОДНОЙ мисконцепцией, зафиксированной в [detectedAt].
+///
+/// Метка времени — локальная строка без смещения, ровно как пишет приложение
+/// (`DateTime.now().toIso8601String()`); `null` — мисконцепция без метки, её
+/// невозможно отнести ни к одной сессии.
+String _masteriesAt(String? detectedAt) {
+  final stamp = detectedAt == null ? '' : ',"detectedAt":"$detectedAt"';
+  return '[{"nodeId":"n1","understanding":0.8,"recall":0.6,"application":0.7,'
+      '"transfer":0.4,"errors":[{"nodeId":"n1","type":"mechanism_error",'
+      '"description":"$kMisconceptionText","resolved":false$stamp}]}]';
+}
+
+/// Вторая сессия той же темы: старт 01.05.2024 11:00 — то есть верхняя граница
+/// окна первой сессии фикстуры. Завершённость задаётся [status].
+LearningSessionsCompanion _secondSession(String status) =>
+    LearningSessionsCompanion.insert(
+      id: 's2',
+      journeyId: kJourneyId,
+      topicId: kTopicId,
+      startedAt: Value(DateTime(2024, 5, 1, 11)),
+      completedAt:
+          Value(status == 'completed' ? DateTime(2024, 5, 1, 11, 30) : null),
+      status: Value(status),
+    );
 
 /// Наполнение фикстуры: вставляет строки в свежую БД.
 typedef SessionFill = Future<void> Function(MindtreeDb db);
@@ -125,9 +200,9 @@ Future<void> fillFullSession(
       journeyId: kJourneyId,
       topicId: kTopicId,
       timeBudgetMinutes: const Value(45),
-      startedAt: Value(DateTime.utc(2024, 5, 1, 10)),
+startedAt: Value(DateTime(2024, 5, 1, 10)),
       completedAt:
-          Value(status == 'completed' ? DateTime.utc(2024, 5, 1, 10, 30) : null),
+          Value(status == 'completed' ? DateTime(2024, 5, 1, 10, 30) : null),
       status: Value(status),
       activityJson: Value(activityJson),
       curriculumJson: Value(curriculumJson)));
@@ -194,6 +269,17 @@ List<String> tagsOf(Iterable<Finding> findings) =>
 List<String> problemTagsOf(Iterable<Finding> findings) => <String>[
       for (final f in findings)
         if (f.severity != FindingSeverity.info) '${f.code}/${f.severity.name}',
+    ];
+
+/// Только `info`-находки в порядке выдачи.
+///
+/// В БД нет снимка mastery «до» (`learner_models` хранит текущее состояние),
+/// поэтому `checkMasteryDelta` на данных из базы честно выдаёт ровно одну info.
+/// Проверять её надо явно: молча отфильтровать info значило бы не заметить
+/// сломанную проверку, молча пропустить warn — потерять дефект обучения.
+List<String> infoTagsOf(Iterable<Finding> findings) => <String>[
+      for (final f in findings)
+        if (f.severity == FindingSeverity.info) '${f.code}/${f.severity.name}',
     ];
 
 /// Загрузка сессии + проверки — тот же путь, что у CLI (`_reviewSession`).
@@ -392,6 +478,10 @@ void main() {
         isEmpty,
         reason: 'находки: $findings',
       );
+      // Единственная info — про отсутствие снимка mastery «до»: в БД его нет by
+      // design, и это не должно выглядеть как плохое обучение.
+      expect(infoTagsOf(findings), <String>['${SessionCheckCode.masteryDelta}/info']);
+      expect(loaded.view.masteryBefore, isEmpty, reason: 'и правда неоткуда его взять');
     });
 
     test('toJson рендерится: машинный отчёт собирается без исключений', () async {
@@ -564,34 +654,64 @@ void main() {
           ),
         );
 
-    test('пустая сессия без шагов → ни одной находки', () async {
+    // `learner_models` хранит только текущее состояние мастерства, поэтому
+    // `masteryBefore` у загрузчика всегда пуст и `checkMasteryDelta` выдаёт info
+    // «нет снимка ДО». Это недостаток данных, а не дефект обучения: assert'им
+    // его явно, чтобы в кейс не проскочила никакая другая info и не пришлось
+    // фильтровать находки «на всякий случай».
+    List<String> tagsFromDb(List<Finding> findings) {
+      expect(infoTagsOf(findings), <String>['${SessionCheckCode.masteryDelta}/info'],
+          reason: 'единственная допустимая info из БД — про снимок mastery «до»:\n'
+              '${findings.map((f) => f.toString()).join('\n')}');
+      return problemTagsOf(findings);
+    }
+
+    test('пустая сессия без шагов → ни warn, ни fail (только info про снимок mastery)',
+        () async {
       final findings = await checksOf(await db('пусто.json', activityJson: '[]'));
 
-      expect(findings, isEmpty,
+      expect(findings, hasLength(1),
           reason: 'сессия без активностей — это «ничего не прошли», а не плохое обучение:\n'
               '${findings.map((f) => f.toString()).join('\n')}');
+      expect(tagsFromDb(findings), isEmpty);
+      expect(findings.single.message, contains('Нет снимка мастерства ДО'));
     });
 
     test('активность без recall/apply → session_step_mix (warn)', () async {
       final findings = await checksOf(await db('лекция.json', activityJson: kLectureOnlyJson));
       final hit = withCode(findings, SessionCheckCode.stepMix);
 
-      expect(tagsOf(findings), <String>['${SessionCheckCode.stepMix}/warn']);
+      expect(tagsFromDb(findings), <String>['${SessionCheckCode.stepMix}/warn']);
       expect(hit.single.nodeId, kNodeId);
       expect(hit.single.data?['stepTypes'], <String>[kStepExplain]);
     });
 
-    test('активность с пустым списком шагов → session_step_mix (warn)', () async {
-      final findings = await checksOf(await db(
-        'без-шагов.json',
-        activityJson: '[{"nodeId":"n1","isComplete":false,"steps":[]}]',
-      ));
-      final hit = withCode(findings, SessionCheckCode.stepMix);
+    test('активность с пустым списком шагов → выпадает с warning, а не ловит step_mix',
+        () async {
+      // Раньше такая активность доезжала до проверок и давала
+      // `session_step_mix`. По новому контракту судить о прохождении не по
+      // чему, поэтому она выпадает из отчёта, а потеря видна в warnings.
+      final loaded = await loadSession(
+        dbPath: await db(
+          'без-шагов.json',
+          activityJson: '{"itemId":"i1","steps":[]}',
+        ),
+        sessionId: kSessionId,
+      );
 
-      expect(tagsOf(findings), <String>['${SessionCheckCode.stepMix}/warn']);
-      expect(hit.single.data?['stepTypes'], isEmpty, reason: 'типов шагов нет вообще');
-      expect(hit.single.message, contains('типы: )'),
-          reason: 'косметический дефект текста: пустые скобки в сообщении');
+      expect(loaded.view.activities, isEmpty);
+      expect(loaded.view.allSteps, isEmpty, reason: 'ни одного шага не осталось');
+      expect(
+        warningsWith(loaded.warnings, 'activity_json: у активности нет шагов'),
+        hasLength(1),
+      );
+      expect(
+        warningsWith(loaded.warnings, 'у активности не нашёлся узел'),
+        isEmpty,
+        reason: 'itemId «i1» разрешается через план — узел потерян не из-за него',
+      );
+      expect(tagsFromDb(runSessionChecks(loaded.view)), isEmpty,
+          reason: 'выпавшая активность не должна превращаться в каскад находок');
     });
 
     test('активность на узле вне плана → session_activity_node_unknown (fail)', () async {
@@ -603,7 +723,7 @@ void main() {
       ));
       final hit = withCode(findings, SessionCheckCode.activityNodeUnknown);
 
-      expect(tagsOf(findings), <String>['${SessionCheckCode.activityNodeUnknown}/fail']);
+      expect(tagsFromDb(findings), <String>['${SessionCheckCode.activityNodeUnknown}/fail']);
       expect(hit.single.nodeId, 'n-alien');
       expect(hit.single.data?['knownCount'], 1, reason: 'в плане один узел — n1');
     });
@@ -617,7 +737,7 @@ void main() {
       ));
       final hit = withCode(findings, SessionCheckCode.recallOptions);
 
-      expect(tagsOf(findings), <String>['${SessionCheckCode.recallOptions}/fail']);
+      expect(tagsFromDb(findings), <String>['${SessionCheckCode.recallOptions}/fail']);
       expect(hit.single.message, contains('не задан correctIndex'));
     });
 
@@ -630,7 +750,7 @@ void main() {
       ));
       final hit = withCode(findings, SessionCheckCode.recallOptions);
 
-      expect(tagsOf(findings), <String>['${SessionCheckCode.recallOptions}/fail']);
+      expect(tagsFromDb(findings), <String>['${SessionCheckCode.recallOptions}/fail']);
       expect(hit.single.data?['correctIndex'], 5);
     });
 
@@ -643,7 +763,7 @@ void main() {
       ));
       final hit = withCode(findings, SessionCheckCode.applyContract);
 
-      expect(tagsOf(findings), <String>[
+      expect(tagsFromDb(findings), <String>[
         '${SessionCheckCode.applyContract}/fail',
         '${SessionCheckCode.applyContract}/fail',
       ]);
@@ -661,7 +781,7 @@ void main() {
             '"bestAnswer":"$text"}]}]',
       ));
 
-      expect(tagsOf(findings), <String>['${SessionCheckCode.applyDegenerate}/warn']);
+      expect(tagsFromDb(findings), <String>['${SessionCheckCode.applyDegenerate}/warn']);
       expect(withCode(findings, SessionCheckCode.applyDegenerate).single.message,
           contains('дословно совпадает с инструкцией'));
     });
@@ -675,7 +795,7 @@ void main() {
       ));
       final hit = withCode(findings, SessionCheckCode.questionShallow);
 
-      expect(tagsOf(findings), <String>['${SessionCheckCode.questionShallow}/warn']);
+      expect(tagsFromDb(findings), <String>['${SessionCheckCode.questionShallow}/warn']);
       expect(hit.single.nodeId, kNodeId);
       expect(hit.single.message, contains('без эталонного ответа'));
     });
@@ -700,9 +820,9 @@ void main() {
       expect(question.hasOptions, isTrue, reason: 'варианты есть, вопрос закрытый');
       // Правильный вариант не определён — это дефект данных, а не shallow-фидбек
       // (раньше тест ждал questionShallow и пропускал настоящую проблему).
-      final hit = withCode(runSessionChecks(loaded.view),
-          SessionCheckCode.questionAnswerUnresolved);
-      expect(tagsOf(runSessionChecks(loaded.view)),
+      final findings = runSessionChecks(loaded.view);
+      final hit = withCode(findings, SessionCheckCode.questionAnswerUnresolved);
+      expect(tagsFromDb(findings),
           <String>['${SessionCheckCode.questionAnswerUnresolved}/warn']);
       expect(hit.single.message, contains('correctAnswer не совпал ни с одним'));
     });
@@ -724,7 +844,7 @@ void main() {
       ));
       final hit = withCode(findings, SessionCheckCode.completion);
 
-      expect(tagsOf(findings), <String>[
+      expect(tagsFromDb(findings), <String>[
         '${SessionCheckCode.completion}/warn',
         '${SessionCheckCode.completion}/warn',
       ]);
@@ -743,7 +863,7 @@ void main() {
             '"userAnswer":"Ответ ученика","feedback":"близко"}]}]',
       ));
 
-      expect(tagsOf(findings), <String>['${SessionCheckCode.answerNotScored}/warn']);
+      expect(tagsFromDb(findings), <String>['${SessionCheckCode.answerNotScored}/warn']);
       expect(withCode(findings, SessionCheckCode.answerNotScored).single.message,
           contains('correct == null'));
     });
@@ -751,9 +871,193 @@ void main() {
     test('здоровая фикстура из БД не даёт ни warn, ни fail', () async {
       final findings = await checksOf(await db('здоровая.db'));
 
-      expect(problemTagsOf(findings), isEmpty,
+      expect(tagsFromDb(findings), isEmpty,
           reason: 'дефектов нет — находок быть не должно, ни кроме info:\n'
               '${findings.map((f) => f.toString()).join('\n')}');
+    });
+  });
+
+  // ─── Боевой формат activity_json ────────────────────────────────────────────
+  // Приложение пишет в `learning_sessions.activity_json` НЕ массив, а ОДИН объект
+  // активности: `{"itemId": "<id элемента curriculum>", "steps": [...]}`
+  // (`learning_activity_service.dart`, строки 68 и 305). Ни `nodeId`, ни
+  // `isComplete` в этот blob не попадают. Раньше загрузчик брал `nodeId` только
+  // из самого blob'а, и на боевых данных каскадом шли ложные находки: 6 ×
+  // `session_activity_node_unknown` уровня fail и десятки
+  // `session_misconception_without_remediation`.
+  //
+  // Контракт, который здесь закрепляется:
+  //   * `nodeId` = явный `nodeId` из blob'а, иначе `itemId` через план;
+  //   * неразрешимый узел или активность без шагов → выпадение из отчёта с
+  //     warning'ом (а не каскад находок по пустому `nodeId`);
+  //   * `isComplete` = явный флаг из blob'а, иначе «все шаги отвечены».
+  group('боевой формат activity_json: {itemId, steps}', () {
+    /// Тема с двумя узлами в дереве и двумя элементами в плане: без второго
+    /// узла нельзя отличить приоритет явного `nodeId` от резолва по `itemId`.
+    Future<LoadedSession> load(String name, String activityJson) async {
+      final path = await writeDb(dir, name, (raw) async {
+        await fillFullSession(
+          raw,
+          activityJson: activityJson,
+          curriculumJson: kTwoItemCurriculumJson,
+          conceptMasteriesJson: kMasteryNoMisconceptionsJson,
+        );
+        await raw.into(raw.knowledgeNodes).insert(KnowledgeNodesCompanion.insert(
+            id: kSecondNodeId,
+            topicId: kTopicId,
+            label: 'Бесконечный цикл',
+            oneLiner: const Value('Программа может крутиться вечно.'),
+            level: const Value(3),
+            leaf: const Value(true)));
+      });
+      return loadSession(dbPath: path, sessionId: kSessionId);
+    }
+
+    test('itemId резолвится в nodeId элемента плана: label из дерева, ложных находок нет',
+        () async {
+      final loaded = await load('боевой-формат.db', kBattleActivityJson);
+
+      expect(loaded.view.activities, hasLength(1));
+      final activity = loaded.view.activities.single;
+      expect(activity.nodeId, kNodeId,
+          reason: 'в blob нет nodeId — резолвим itemId «i1» через curriculum_json');
+      expect(activity.nodeLabel, 'Остановка',
+          reason: 'label подтягивается из дерева темы, а не из JSON активности');
+      expect(activity.steps.map((s) => s.type), <String>[kStepRecall, kStepApply]);
+      expect(warningsWith(loaded.warnings, 'activity_json'), isEmpty);
+
+      // Главное ради этого фикса: ложных session_activity_node_unknown быть
+      // не должно, иначе на боевых базах ревью утонет в них.
+      final findings = runSessionChecks(loaded.view);
+      expect(withCode(findings, SessionCheckCode.activityNodeUnknown), isEmpty);
+      expect(problemTagsOf(findings), isEmpty, reason: 'находки: $findings');
+      expect(infoTagsOf(findings),
+          <String>['${SessionCheckCode.masteryDelta}/info']);
+    });
+
+    test('явный nodeId в blob важнее itemId из плана', () async {
+      final loaded = await load(
+        'приоритет-nodeId.json',
+        '{"nodeId":"$kSecondNodeId","itemId":"i1","steps":[$kBattleRecallJson]}',
+      );
+
+      expect(loaded.view.activities, hasLength(1));
+      final activity = loaded.view.activities.single;
+      expect(activity.nodeId, kSecondNodeId,
+          reason: 'itemId «i1» вёл бы на n1 — явный nodeId важнее');
+      expect(activity.nodeId, isNot(kNodeId));
+      expect(activity.nodeLabel, 'Бесконечный цикл');
+      expect(
+        withCode(runSessionChecks(loaded.view), SessionCheckCode.activityNodeUnknown),
+        isEmpty,
+        reason: 'оба узла есть в плане — разрешённый через blob узел тоже известен',
+      );
+    });
+
+    test('itemId, которого нет в плане → активности нет, warning с activity_json и itemId',
+        () async {
+      final loaded = await load(
+        'чужой-itemId.json',
+        '{"itemId":"i-не-из-плана","steps":[$kBattleRecallJson]}',
+      );
+
+      expect(loaded.view.activities, isEmpty,
+          reason: 'активность без узла проверкам только мешает — выпадает');
+      final hit =
+          warningsWith(loaded.warnings, 'activity_json: у активности не нашёлся узел');
+      expect(hit, hasLength(1));
+      expect(hit.single, contains('i-не-из-плана'),
+          reason: 'в warning обязателен сам itemId — иначе потеря не диагностируется');
+      expect(warningsWith(loaded.warnings, 'у активности нет шагов'), isEmpty,
+          reason: 'шаги у активности были — предупреждение другое');
+
+      final findings = runSessionChecks(loaded.view);
+      expect(withCode(findings, SessionCheckCode.activityNodeUnknown), isEmpty,
+          reason: 'выпавшая активность не должна превращаться в каскад находок');
+      expect(problemTagsOf(findings), isEmpty, reason: 'находки: $findings');
+    });
+
+    test('isComplete выводится из шагов: все answered → активность завершена', () async {
+      final loaded = await load('все-отвечены.json', kBattleActivityJson);
+
+      final activity = loaded.view.activities.single;
+      expect(activity.steps, hasLength(2));
+      expect(activity.isComplete, isTrue,
+          reason: 'у обоих шагов status = answered');
+    });
+
+    test('частично отвеченные шаги → активность не завершена', () async {
+      final loaded = await load(
+        'частично-отвечены.json',
+        '{"itemId":"i1","steps":[$kBattleRecallJson,'
+        '{"type":"apply","title":"Своими словами",'
+        '"instruction":"Объясни своими словами, что такое остановка.",'
+        '"bestAnswer":"Программа не завершится за конечное время.",'
+        '"status":"current"}]}',
+      );
+
+      final activity = loaded.view.activities.single;
+      expect(activity.isComplete, isFalse,
+          reason: 'apply ещё в статусе current — активность не пройдена');
+      expect(activity.stepsOfType(kStepApply).single.userAnswer, isNull);
+    });
+
+    test('шаги без status: отвеченность по userAnswer/correct (legacy-выгрузка)',
+        () async {
+      // В боевом blob `status` есть у каждого шага, но в выгрузках его может не
+      // быть: тогда шаг отвечен, если есть непустой ответ ИЛИ выставлен вердикт.
+      final withAnswers = await load(
+        'без-status-ответы.json',
+        '[{"itemId":"i1","steps":['
+        '{"type":"recall","title":"Проверка","options":["да","нет"],'
+        '"correctIndex":0,"userAnswer":"да","correct":true,"feedback":"верно"},'
+        '{"type":"explain","title":"Лекция","body":"Коротко о главном",'
+        '"userAnswer":"прочитал","correct":true}]}]',
+      );
+      final withPending = await load(
+        'без-status-неотвечен.json',
+        '[{"itemId":"i1","steps":['
+        '{"type":"recall","title":"Проверка","options":["да","нет"],'
+        '"correctIndex":0,"userAnswer":"да","correct":true,"feedback":"верно"},'
+        '{"type":"explain","title":"Лекция","body":"Коротко о главном"}]}]',
+      );
+
+      expect(withAnswers.view.activities.single.isComplete, isTrue,
+          reason: 'у обоих шагов есть ответ или вердикт');
+      expect(withPending.view.activities.single.isComplete, isFalse,
+          reason: 'шаг без ответа и вердикта считается неотвеченным');
+    });
+
+    test('явный isComplete в blob не переопределяется выводом из шагов', () async {
+      final loaded = await load(
+        'явный-isComplete.json',
+        '[{"itemId":"i1","isComplete":true,"steps":['
+        '{"type":"explain","title":"Лекция","body":"Коротко о главном",'
+        '"status":"pending"}]},'
+        '{"itemId":"i2","isComplete":false,"steps":[$kBattleRecallJson]}]',
+      );
+
+      expect(loaded.view.activities, hasLength(2));
+      expect(loaded.view.activities.first.isComplete, isTrue,
+          reason: 'явный true при pending-шаге — флаг из данных главнее вывода');
+      expect(loaded.view.activities.last.isComplete, isFalse,
+          reason: 'явный false при отвеченном шаге — вывод его не переопределяет');
+    });
+
+    test('legacy-формат (список активностей) разбирается тем же кодом', () async {
+      final loaded = await load(
+        'legacy-список.json',
+        '[{"nodeId":"$kSecondNodeId","steps":[$kBattleRecallJson]},'
+        '{"itemId":"i1","steps":[$kBattleApplyJson]}]',
+      );
+
+      expect(loaded.view.activities.map((a) => a.nodeId),
+          <String>[kSecondNodeId, kNodeId],
+          reason: 'и явный nodeId, и резолв по itemId работают и в списке');
+      expect(loaded.view.activities.map((a) => a.nodeLabel),
+          <String>['Бесконечный цикл', 'Остановка']);
+      expect(loaded.view.allSteps, hasLength(2));
+      expect(warningsWith(loaded.warnings, 'activity_json'), isEmpty);
     });
   });
 
@@ -820,6 +1124,189 @@ void main() {
   });
 
   // ─── Снимок БД ─────────────────────────────────────────────────────────────
+  group('окно атрибуции мисконцепций к сессии', () {
+    // `learner_models` уникален по (userId, topicId) — строка одна на тему, так
+    // что привязки к сессии в БД нет. Загрузчик выводит её из окна
+    // [startedAt, completedAt ?? старт следующей сессии темы). Без этого все
+    // мисконцепции темы доставались каждой её сессии (18 ложных находок на
+    // боевой БД). Ниже — границы этого окна.
+
+    /// Вторая сессия той же темы — окно первой закрывается 01.05 11:00.
+    Future<void> fillWithSecondSession(
+      MindtreeDb db, {
+      String conceptMasteriesJson = kConceptMasteriesJson,
+      String secondStatus = 'active',
+    }) async {
+      await fillFullSession(
+        db,
+        conceptMasteriesJson: conceptMasteriesJson,
+        status: 'active',
+      );
+      await db.into(db.learningSessions).insert(_secondSession(secondStatus));
+    }
+
+    test('мисконцепция внутри окна попадает в сессию', () async {
+      final path = await writeDb(dir, 'в-окне.db', (db) => fillFullSession(
+            db,
+            status: 'active',
+            conceptMasteriesJson: _masteriesAt('2024-05-01T10:15:00'),
+          ));
+
+      final loaded = await loadSession(dbPath: path, sessionId: kSessionId);
+
+      expect(loaded.view.misconceptions, <String>[kMisconceptionText]);
+      expect(warningsWith(loaded.warnings, 'вне окна сессии'), isEmpty);
+      expect(warningsWith(loaded.warnings, 'без detectedAt'), isEmpty);
+    });
+
+    test('мисконцепция позже следующей сессии темы не достаётся первой', () async {
+      final path = await writeDb(
+          dir,
+          'соседняя.db',
+          (db) => fillWithSecondSession(
+                db,
+                conceptMasteriesJson: _masteriesAt('2024-05-01T12:00:00'),
+              ));
+
+      final first = await loadSession(dbPath: path, sessionId: kSessionId);
+      final second = await loadSession(dbPath: path, sessionId: 's2');
+
+      expect(first.view.misconceptions, isEmpty,
+          reason: 'мисконцепция зафиксирована уже после старта следующей сессии');
+      expect(second.view.misconceptions, <String>[kMisconceptionText]);
+      // Верхняя граница выведена из старта соседней сессии, а не бесконечна.
+      final warned = warningsWith(first.warnings, 'вне окна сессии');
+      expect(warned, hasLength(1));
+      expect(warned.single, contains('01.05.2024 11:00'));
+    });
+
+    test('последняя сессия темы: верхней границы нет (∞)', () async {
+      final path = await writeDb(dir, 'последняя.db', (db) => fillFullSession(
+            db,
+            status: 'active',
+            conceptMasteriesJson: _masteriesAt('2024-06-01T10:15:00'),
+          ));
+
+      final loaded = await loadSession(dbPath: path, sessionId: kSessionId);
+
+      expect(loaded.view.misconceptions, <String>[kMisconceptionText]);
+      expect(warningsWith(loaded.warnings, 'вне окна сессии'), isEmpty);
+    });
+
+    test('границы окна: на старте входит, на старте следующей — уже нет', () async {
+      // Ровно на `startedAt` первой сессии.
+      final atStart = await writeDb(dir, 'на-старте.db', (db) => fillFullSession(
+            db,
+            status: 'active',
+            conceptMasteriesJson: _masteriesAt('2024-05-01T10:00:00'),
+          ));
+      // Ровно на `startedAt` следующей сессии: верхняя граница исключена.
+      final atNext = await writeDb(
+          dir,
+          'на-старте-соседней.db',
+          (db) => fillWithSecondSession(
+                db,
+                conceptMasteriesJson: _masteriesAt('2024-05-01T11:00:00'),
+              ));
+
+      expect((await loadSession(dbPath: atStart, sessionId: kSessionId)).view.misconceptions,
+          <String>[kMisconceptionText], reason: 'нижняя граница включена');
+      expect((await loadSession(dbPath: atNext, sessionId: kSessionId)).view.misconceptions,
+          isEmpty, reason: 'верхняя граница исключена');
+      expect((await loadSession(dbPath: atNext, sessionId: 's2')).view.misconceptions,
+          <String>[kMisconceptionText], reason: 'нижняя граница следующей включена');
+    });
+
+    test('completedAt важнее старта следующей сессии', () async {
+      // Сессия закрылась в 11:30, следующая началась в 11:00: окно всё равно
+      // закрывается в 11:30 — явное завершение авторитетнее соседа.
+      final path = await writeDb(dir, 'completed-важнее.db', (db) async {
+        await db.into(db.topics).insert(TopicsCompanion.insert(
+            id: kTopicId, name: 'Теорема остановки', timeBudgetMinutes: const Value(45)));
+        await db.into(db.knowledgeNodes).insert(KnowledgeNodesCompanion.insert(
+            id: kNodeId,
+            topicId: kTopicId,
+            label: 'Остановка',
+            oneLiner: const Value('Не все программы завершаются.'),
+            level: const Value(2),
+            leaf: const Value(true)));
+        await db.into(db.learningJourneys)
+            .insert(LearningJourneysCompanion.insert(id: kJourneyId, topicId: kTopicId));
+        await db.into(db.learningSessions).insert(LearningSessionsCompanion.insert(
+            id: kSessionId,
+            journeyId: kJourneyId,
+            topicId: kTopicId,
+            startedAt: Value(DateTime(2024, 5, 1, 10)),
+            completedAt: Value(DateTime(2024, 5, 1, 11, 30)),
+            status: const Value('completed'),
+            activityJson: const Value(kActivityJson),
+            curriculumJson: const Value(kCurriculumJson)));
+        await db.into(db.learningSessions).insert(_secondSession('active'));
+        await db.into(db.learnerModels).insert(LearnerModelsCompanion.insert(
+            id: 'lm1',
+            topicId: kTopicId,
+            conceptMasteriesJson: Value(_masteriesAt('2024-05-01T11:15:00'))));
+      });
+
+      final loaded = await loadSession(dbPath: path, sessionId: kSessionId);
+
+      expect(loaded.view.misconceptions, <String>[kMisconceptionText],
+          reason: '11:15 попадает в [10:00, 11:30), хотя сосед начался в 11:00: '
+              'значит верхняя граница — собственный completedAt, а не старт соседа');
+      // Сессии в реальности пересеклись (первая закрылась в 11:30, вторая
+      // началась в 11:00), поэтому окна перекрываются и мисконцепция видна
+      // обеим. Это честнее, чем отбрасывать её по границе соседа.
+      expect((await loadSession(dbPath: path, sessionId: 's2')).view.misconceptions,
+          <String>[kMisconceptionText],
+          reason: '11:15 попадает и в окно соседа [11:00, …)');
+    });
+
+    test('без detectedAt мисконцепция не достаётся, но потеря видна', () async {
+      final path = await writeDb(dir, 'без-detectedAt.db', (db) => fillFullSession(
+            db,
+            status: 'active',
+            conceptMasteriesJson: _masteriesAt(null),
+          ));
+
+      final loaded = await loadSession(dbPath: path, sessionId: kSessionId);
+
+      expect(loaded.view.misconceptions, isEmpty);
+      expect(loaded.view.misconceptionsByNode, isEmpty);
+      expect(warningsWith(loaded.warnings, 'без detectedAt'), hasLength(1));
+    });
+
+    test('checkMisconceptionRemediation по-прежнему ловит неотработанную', () async {
+      // Лекция вместо apply: узел есть, отработки нет → warn должен остаться.
+      final path = await writeDb(dir, 'не-отработана.db', (db) => fillFullSession(
+            db,
+            activityJson: kLectureOnlyJson,
+            conceptMasteriesJson: _masteriesAt('2024-05-01T10:15:00'),
+          ));
+
+      final findings = await checksOf(path);
+
+      expect(
+        tagsOf(withCode(findings, SessionCheckCode.misconceptionWithoutRemediation)),
+        <String>['${SessionCheckCode.misconceptionWithoutRemediation}/warn'],
+      );
+    });
+
+    test('warnings детерминированы: два прогона дают одинаковый список', () async {
+      final path = await writeDb(
+          dir,
+          'детерминизм-окна.db',
+          (db) => fillWithSecondSession(
+                db,
+                conceptMasteriesJson: _masteriesAt('2024-05-01T12:00:00'),
+              ));
+
+      final first = await loadSession(dbPath: path, sessionId: kSessionId);
+      final second = await loadSession(dbPath: path, sessionId: kSessionId);
+
+      expect(second.warnings, first.warnings);
+    });
+  });
+
   group('снимок БД: оригинал не трогаем', () {
     test('WAL: сессия, записанная только в -wal, видна загрузчику', () async {
       final path = '${dir.path}${Platform.pathSeparator}wal.db';

@@ -55,18 +55,15 @@ export class AssessmentEngine {
         () => prompt,
         (raw) => parseAssessmentResult(parseLLMJson(raw)),
       );
-      questions = res.result.slice(0, questionCount);
+      if (res.result.length > 0) {
+        questions = res.result.slice(0, questionCount);
+      }
     } catch {
-      // fallback minimal quiz
-      questions = items.slice(0, questionCount).map((i, idx) => ({
-        id: `fa_${idx}`,
-        type: "recall",
-        nodeId: i.nodeId,
-        question: `Что такое "${i.label}"?`,
-        options: [],
-        correctAnswer: "",
-        explanation: i.oneLiner,
-      }));
+      // fall through to fallback
+    }
+
+    if (questions.length === 0) {
+      questions = this.buildFallback(items, questionCount);
     }
 
     const id = shortIdWith("asmt_");
@@ -78,6 +75,35 @@ export class AssessmentEngine {
       .run(id, sessionId, type, JSON.stringify(questions), new Date().toISOString());
 
     return { id, sessionId, type, questions };
+  }
+
+  private buildFallback(items: AssessmentItem[], questionCount: number): AssessmentQuestionResult[] {
+    if (questionCount <= 0 || items.length === 0) return [];
+    const result: AssessmentQuestionResult[] = [];
+    let idx = 0;
+    for (const i of items) {
+      if (result.length >= questionCount) break;
+      const rubricOneLiner = i.oneLiner.trim();
+      const rubricDetails = i.details.trim();
+      const rubric = rubricOneLiner.length > 0 ? rubricOneLiner : rubricDetails;
+      const label = i.label.trim();
+      const questionText =
+        label.length > 0 ? `Объясните своими словами, что такое "${label}"` : "Объясните своими словами изученный материал";
+      if (rubric.length === 0) {
+        continue;
+      }
+      result.push({
+        id: `fa_${idx++}`,
+        type: "recall",
+        nodeId: i.nodeId,
+        question: questionText,
+        options: [],
+        correctAnswer: "",
+        explanation: rubric,
+      });
+    }
+    if (result.length === 0) return [];
+    return result.slice(0, questionCount);
   }
 
   recordAttempt(
@@ -134,8 +160,6 @@ export class AssessmentEngine {
     const row = getDb()
       .prepare(`SELECT name, goal FROM topics WHERE id = ?`)
       .get(topicId) as Record<string, unknown> | undefined;
-    return row
-      ? { name: String(row.name), goal: String(row.goal) }
-      : undefined;
+    return row ? { name: String(row.name), goal: String(row.goal) } : undefined;
   }
 }

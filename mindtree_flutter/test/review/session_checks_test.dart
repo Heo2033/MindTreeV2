@@ -80,6 +80,12 @@ SessionView cleanView({
   String status = kStatusCompleted,
   int timeBudgetMinutes = 45,
   List<String> plannedNodeIds = const <String>['n1'],
+
+  /// Состояние плана: эталонная сессия его прошла целиком. Пока плана в
+  /// `SessionView` нет (0 пунктов), `checkSessionCompletion` молчит — иначе любая
+  /// сессия без curriculum в отчёте получала бы находку.
+  int plannedItemsCompleted = 1,
+  int plannedItemsTotal = 1,
   List<SessionActivityView> activities = const <SessionActivityView>[goodActivity],
   List<SessionQuestionView> questions = const <SessionQuestionView>[goodQuestion],
   // Снимок mastery «до» обязателен: без него `checkMasteryDelta` выдаёт info,
@@ -99,6 +105,8 @@ SessionView cleanView({
       completedAt: '2024-05-01T10:30:00.000',
       status: status,
       plannedNodeIds: plannedNodeIds,
+      plannedItemsCompleted: plannedItemsCompleted,
+      plannedItemsTotal: plannedItemsTotal,
       activities: activities,
       questions: questions,
       masteryBefore: masteryBefore,
@@ -158,6 +166,8 @@ SessionView dirtyView() => SessionView(
             SessionStepView(
               type: kStepExplain,
               title: 'Лекция',
+              // Отвечен, но замера нет: ровно тот случай, который ловит проверка.
+              userAnswer: 'понял',
               body: 'Очень длинный текст лекции, который никто не замерял '
                   'и потому время шага осталось нулевым, а это уже больше '
                   'четырёхсот символов в одной строке, чтобы проверка времени '
@@ -611,7 +621,7 @@ void main() {
       expect(hit, hasLength(1));
       expect(hit.single.severity, FindingSeverity.warn);
       expect(hit.single.data?['ratio'], 2.5);
-      expect(hit.single.message, contains('2.5x)'));
+      expect(hit.single.message, contains('2.5x;'));
       expect(kSessionDurationWarnRatio, 2.0);
     });
 
@@ -636,7 +646,35 @@ void main() {
       expect(kSessionDurationFailRatio, 5.0);
     });
 
-    test('нулевое время при длинном тексте → warn со списком шагов', () {
+    test('абсолютное время вместо длительности → fail и оно исключено из суммы', () {
+      // Боевой дефект: UI стартует отсчёт не при показе экрана, поэтому в
+      // `time_spent_ms` уезжает DateTime.now().millisecondsSinceEpoch. Такое
+      // значение — не «медленно отвечал», и в сумму против бюджета оно не идёт.
+      final findings = runSessionChecks(cleanView(
+        timeBudgetMinutes: 1,
+        questions: const <SessionQuestionView>[
+          SessionQuestionView(
+            nodeId: 'n1',
+            question: 'Что такое остановка?',
+            correctAnswer: 'остановка',
+            userAnswer: 'остановка',
+            correct: true,
+            timeSpentMs: 1753128000000,
+          ),
+        ],
+      ));
+
+      final hit = withCode(findings, SessionCheckCode.stepDuration);
+      expect(hit, hasLength(1), reason: 'битый замер не должен ещё и превышать '
+          'бюджет второй находкой');
+      expect(hit.single.severity, FindingSeverity.fail);
+      expect(hit.single.message, contains('неработающий таймер'));
+      expect(hit.single.data?['implausibleQuestions'], 1);
+      expect(hit.single.data?['maxPlausibleMs'], kImplausibleAnswerMs);
+      expect(kImplausibleAnswerMs, 2 * 60 * 60 * 1000);
+    });
+
+    test('отвеченный длинный шаг без замера → warn со списком шагов', () {
       final findings = runSessionChecks(cleanView(
         activities: <SessionActivityView>[
           SessionActivityView(
@@ -647,6 +685,7 @@ void main() {
                 type: kStepExplain,
                 title: 'Длинная лекция',
                 body: 'я' * (kLongStepTextChars + 10),
+                userAnswer: 'понял',
               ),
               goodRecall,
             ],
@@ -660,6 +699,30 @@ void main() {
       expect(hit.single.data?['silentSteps'], 1);
       expect(hit.single.message, contains('n1#1'));
       expect(hit.single.message, contains('$kLongStepTextChars символов'));
+    });
+
+    test('незавершённый длинный шаг — не находка: его не начали, замера нет по сути', () {
+      // Раньше шаг с нулём ловился независимо от статуса, поэтому любая живая
+      // сессия с непрочитанной лекцией выглядела битой.
+      final findings = runSessionChecks(cleanView(
+        activities: <SessionActivityView>[
+          SessionActivityView(
+            nodeId: 'n1',
+            nodeLabel: 'Остановка',
+            isComplete: false,
+            steps: <SessionStepView>[
+              SessionStepView(
+                type: kStepExplain,
+                title: 'Длинная лекция',
+                body: 'я' * (kLongStepTextChars + 10),
+              ),
+              goodRecall,
+            ],
+          ),
+        ],
+      ));
+
+      expect(withCode(findings, SessionCheckCode.stepDuration), isEmpty);
     });
 
     test('короткий шаг без замера — не находка', () {
@@ -680,80 +743,79 @@ void main() {
   });
 
   group('session_completion', () {
-    SessionView viewWithAnswers(int answered, {bool isComplete = false}) => cleanView(
-          status: 'active',
-          activities: <SessionActivityView>[
-            SessionActivityView(
-              nodeId: 'n1',
-              nodeLabel: 'Остановка',
-              isComplete: isComplete,
-              steps: <SessionStepView>[
-                for (var i = 0; i < answered; i++)
-                  SessionStepView(
-                    type: kStepApply,
-                    title: 'Задача $i',
-                    instruction: 'Опиши остановку',
-                    bestAnswer: 'не завершится',
-                    userAnswer: 'зависнет',
-                    correct: true,
-                    feedback: 'верно',
-                  ),
-                if (answered == 0) const SessionStepView(type: kStepExplain, title: 'Лекция'),
-              ],
-            ),
-          ],
-          questions: const <SessionQuestionView>[],
-        );
-
-    test('обе ветви: статус не переключили и флаг isComplete не выставлен', () {
-      final hit =
-          withCode(runSessionChecks(viewWithAnswers(kEnoughAnswersForCompletion)),
-              SessionCheckCode.completion);
-
-      expect(hit, hasLength(2));
-      expect(hit.every((f) => f.severity == FindingSeverity.warn), isTrue);
-      expect(hit.first.message, contains('просто статус не переключили'));
-      expect(hit.first.data?['answeredSteps'], kEnoughAnswersForCompletion);
-      expect(hit.last.message, contains('isComplete == false'));
-    });
-
-    test('порог ответов: двух мало, трёх достаточно', () {
-      // Ветка «статус не переключили» срабатывает от числа ответов, а ветка
-      // про isComplete — от самого факта ответов. Поэтому границу проверяем
-      // на активности, где флаг завершения уже выставлен.
-      expect(kEnoughAnswersForCompletion, 3);
-      expect(
-        withCode(
-          runSessionChecks(
-              viewWithAnswers(kEnoughAnswersForCompletion - 1, isComplete: true)),
-          SessionCheckCode.completion,
-        ),
-        isEmpty,
-        reason: 'двух ответов недостаточно, чтобы считать сессию завершённой',
-      );
-      expect(
-        withCode(
-          runSessionChecks(viewWithAnswers(kEnoughAnswersForCompletion, isComplete: true)),
-          SessionCheckCode.completion,
-        ),
-        hasLength(1),
-      );
-    });
-
-    test('isComplete выставлен — вторая ветка молчит', () {
+    test('план пройден, а сессия осталась активной → info, не warn', () {
       final hit = withCode(
-        runSessionChecks(viewWithAnswers(kEnoughAnswersForCompletion, isComplete: true)),
+        runSessionChecks(cleanView(
+          status: 'active',
+          plannedItemsCompleted: 3,
+          plannedItemsTotal: 3,
+        )),
         SessionCheckCode.completion,
       );
 
       expect(hit, hasLength(1));
-      expect(hit.single.message, contains('просто статус не переключили'));
+      // info, а не warn: незакрытая строка сессии в приложении норма, и warn
+      // здесь срабатывал бы на каждой здоровой пройденной сессии.
+      expect(hit.single.severity, FindingSeverity.info);
+      expect(hit.single.message, contains('Все 3'));
+      expect(hit.single.message, contains('осталась незакрытой'));
+      expect(hit.single.data?['plannedItemsCompleted'], 3);
+      expect(hit.single.data?['plannedItemsTotal'], 3);
     });
 
-    test('completed без активностей — чисто', () {
+    test('план в процессе — молчим: незакрытая сессия это норма', () {
       expect(
         withCode(
-          runSessionChecks(cleanView(status: kStatusCompleted, activities: const [])),
+          runSessionChecks(cleanView(
+            status: 'active',
+            plannedItemsCompleted: 2,
+            plannedItemsTotal: 3,
+          )),
+          SessionCheckCode.completion,
+        ),
+        isEmpty,
+        reason: 'приложение статус сессии не переключает, поэтому незакрытая '
+            'сессия — не дефект, а нормальный промежуточный статус',
+      );
+    });
+
+    test('плана в данных нет — молчим, а не гадаем', () {
+      expect(
+        withCode(
+          runSessionChecks(cleanView(
+            status: 'active',
+            plannedItemsCompleted: 0,
+            plannedItemsTotal: 0,
+          )),
+          SessionCheckCode.completion,
+        ),
+        isEmpty,
+        reason: 'без curriculum_json судить о завершении не по чему',
+      );
+    });
+
+    test('completed при незакрытом плане — молчим: ранний finalize законен', () {
+      expect(
+        withCode(
+          runSessionChecks(cleanView(
+            status: kStatusCompleted,
+            plannedItemsCompleted: 1,
+            plannedItemsTotal: 4,
+          )),
+          SessionCheckCode.completion,
+        ),
+        isEmpty,
+      );
+    });
+
+    test('completed и план пройден — чисто', () {
+      expect(
+        withCode(
+          runSessionChecks(cleanView(
+            status: kStatusCompleted,
+            plannedItemsCompleted: 1,
+            plannedItemsTotal: 1,
+          )),
           SessionCheckCode.completion,
         ),
         isEmpty,

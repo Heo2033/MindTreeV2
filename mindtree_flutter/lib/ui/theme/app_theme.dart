@@ -72,8 +72,22 @@ ThemeData darkTheme() {
 /// `Scaffold`'s implicit `_ScaffoldSlot.floatingActionButton` (which is
 /// `NEEDS-LAYOUT`/`NEEDS-PAINT`, no size yet) during a route transition throws
 /// "Cannot hit test a render box that has never been laid out".
+///
+/// Transitions are not animated at all (the child is rendered as is), so the
+/// route durations are zeroed out as well: otherwise the outgoing route would
+/// stay in the overlay for the default 300 ms, still being built and painted
+/// under the incoming screen. On a `StatefulShellRoute` that meant a brief
+/// flash of the previous tab (e.g. `GraphScreen` when switching
+/// focus → session in the same branch, see
+/// `test/ui/nav/branch_switch_graph_flash_test.dart`).
 class IgnorePointerPageTransitionsBuilder extends PageTransitionsBuilder {
   const IgnorePointerPageTransitionsBuilder();
+
+  @override
+  Duration get transitionDuration => Duration.zero;
+
+  @override
+  Duration get reverseTransitionDuration => Duration.zero;
 
   @override
   Widget buildTransitions<T>(

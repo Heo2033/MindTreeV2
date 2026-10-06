@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import 'package:mindtree_flutter/domain/engines/assessment_engine.dart';
+import 'package:mindtree_flutter/domain/engines/review_scheduler.dart';
 import 'package:mindtree_flutter/domain/lib/grading.dart';
 import 'package:mindtree_flutter/domain/models/models.dart';
 import 'package:mindtree_flutter/providers/app_providers.dart';
@@ -39,7 +40,8 @@ class _QuizScreenState extends ConsumerState<QuizScreen> {
   int? _selectedOption;
   int _startedAt = 0;
 
-  // Exam mode: collect answers before reveal
+  // Аккумуляторы ответов текущей попытки: в режиме «Экзамен» питают разбор
+  // в конце, в обоих режимах — факт. результаты для SRS (`_applyQuizResultsToSRS`).
   final Map<String, String> _examAnswers = {};
   final Map<String, bool> _examResults = {};
 
@@ -115,6 +117,10 @@ class _QuizScreenState extends ConsumerState<QuizScreen> {
         _showingFeedback = false;
         _finished = false;
         _loading = false;
+        // Новая попытка — сбрасываем аккумуляторы, чтобы в SRS и разбор
+        // не уехали результаты прошлого прогона.
+        _examAnswers.clear();
+        _examResults.clear();
       });
       _startedAt = DateTime.now().millisecondsSinceEpoch;
     } catch (e) {
@@ -150,11 +156,13 @@ class _QuizScreenState extends ConsumerState<QuizScreen> {
       correct = gradeOpenEnded(answer, rubric: q.explanation ?? '');
     }
 
-    // Exam mode: collect answers, reveal at end
-    if (_mode == 'exam') {
-      _examAnswers[q.id] = answer;
-      _examResults[q.id] = correct;
-    }
+    // Накопляем в обоих режимах: в «Обучении» карты не показываются
+    // пользователю (результат виден по `_lastCorrect`, разбор — только в
+    // экзамене), но финализация читает их, чтобы увести факт. результат
+    // в SRS. Раньше запись была под `if (_mode == 'exam')` — и обучение
+    // всегда уходило в SRS как `incorrect`.
+    _examAnswers[q.id] = answer;
+    _examResults[q.id] = correct;
 
     setState(() {
       _lastCorrect = correct;
@@ -172,51 +180,56 @@ class _QuizScreenState extends ConsumerState<QuizScreen> {
     );
   }
 
-  void _nextQuestion() {
+  Future<void> _nextQuestion() async {
     setState(() {
       _showingFeedback = false;
       _selectedOption = null;
       _answerController.clear();
       _currentIndex++;
-      if (_currentIndex >= _totalQuestions) {
-        _finished = true;
-        final score = _totalQuestions > 0
-            ? _correctCount / _totalQuestions
-            : 0.0;
-        ref.read(assessmentEngineProvider).finalize(_assessment!.id, score);
-        // SRS integration: apply quiz results to learner model (mirrors web)
-        _applyQuizResultsToSRS();
-      }
+      if (_currentIndex >= _totalQuestions) _finished = true;
     });
+    // Таймер следующего вопроса сбрасывается сразу и не ждёт async-записей
+    // завершения (finalize/SRS).
     _startedAt = DateTime.now().millisecondsSinceEpoch;
+    if (_currentIndex >= _totalQuestions) {
+      final score = _totalQuestions > 0
+          ? _correctCount / _totalQuestions
+          : 0.0;
+      // Все ref.read — до первого await: после dispose виджета ref
+      // недоступен, а записи SRS должны дойти, даже если пользователь
+      // уже ушёл с экрана (внутри setState ничего не await-им).
+      final engine = ref.read(assessmentEngineProvider);
+      final reviewScheduler = ref.read(reviewSchedulerProvider);
+      final topicId = ref.read(graphStoreProvider).topic?.id ?? widget.topicId;
+      await engine.finalize(_assessment!.id, score);
+      // SRS integration: apply quiz results to learner model
+      await _applyQuizResultsToSRS(reviewScheduler, topicId);
+    }
   }
 
   /// Apply quiz results to SRS learner model.
-  void _applyQuizResultsToSRS() {
-    final reviewScheduler = ref.read(reviewSchedulerProvider);
-    final graph = ref.read(graphStoreProvider);
-    final topicId = graph.topic?.id ?? widget.topicId;
-    final allResults = _mode == 'exam' ? _examResults : <String, bool>{};
-    // If learning mode, use inline results
-    if (_mode == 'learning' && _assessment != null) {
-      for (final q in _assessment!.questions) {
-        reviewScheduler.onAnswered(
-          topicId,
-          q.nodeId,
-          _examResults[q.id] ?? false ? 'correct' : 'incorrect',
-        );
-      }
-    } else {
-      for (final entry in allResults.entries) {
-        final question = _assessment!.questions.where((q) => q.id == entry.key).firstOrNull;
-        if (question != null) {
-          reviewScheduler.onAnswered(
-            topicId,
-            question.nodeId,
-            entry.value ? 'correct' : 'incorrect',
-          );
-        }
-      }
+  ///
+  /// Один цикл по фактически накопленным результатам (`_examResults`
+  /// заполняется в `_checkAnswer` в обоих режимах): качество уходит ровно
+  /// тем, каким ответ был проверен. Вопрос без записи в аккумуляторе
+  /// в SRS не попадает — «неверно по умолчанию» здесь не бывает.
+  Future<void> _applyQuizResultsToSRS(
+    ReviewScheduler reviewScheduler,
+    String topicId,
+  ) async {
+    final assessment = _assessment;
+    if (assessment == null) return;
+    final nodeByQuestion = {
+      for (final q in assessment.questions) q.id: q.nodeId,
+    };
+    for (final entry in _examResults.entries) {
+      final nodeId = nodeByQuestion[entry.key];
+      if (nodeId == null) continue;
+      await reviewScheduler.onAnswered(
+        topicId,
+        nodeId,
+        entry.value ? 'correct' : 'incorrect',
+      );
     }
   }
 

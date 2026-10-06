@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import 'package:mindtree_flutter/domain/engines/assessment_engine.dart';
+import 'package:mindtree_flutter/domain/engines/review_scheduler.dart';
 import 'package:mindtree_flutter/domain/lib/grading.dart';
 import 'package:mindtree_flutter/domain/models/models.dart';
 import 'package:mindtree_flutter/providers/app_providers.dart';
@@ -146,6 +147,12 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
         _showingFeedback = false;
         _finished = false;
         _loading = false;
+        // Новая попытка — сбрасываем аккумуляторы, чтобы в SRS и в списке
+        // пробелов не уехали результаты прошлого прогона.
+        _answers.clear();
+        _results.clear();
+        _gaps = null;
+        _masteryLevel = null;
       });
       _startedAt = DateTime.now().millisecondsSinceEpoch;
     } catch (e) {
@@ -174,12 +181,17 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
       correct = gradeOpenEnded(answer, rubric: q.explanation ?? '');
     }
 
+    // Накапливаем БЕЗУСЛОВНО (вне зависимости от режима/длины теста):
+    // финализация читает `_results`, чтобы увести ФАКТИЧЕСКИЙ результат
+    // в SRS. Условная запись здесь означала бы «incorrect по умолчанию»
+    // для пропущенных вопросов — тот же баг, что был в `quiz_screen`.
+    _answers[q.id] = answer;
+    _results[q.id] = correct;
+
     setState(() {
       _lastCorrect = correct;
       _showingFeedback = true;
       if (correct) _correctCount++;
-      _answers[q.id] = answer;
-      _results[q.id] = correct;
     });
 
     engine.recordAttempt(
@@ -196,48 +208,68 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
   /// [gradeOpenEnded] in `domain/lib/grading.dart` (детерминированная,
   /// покрыта unit-тестами).
 
-  void _nextQuestion() {
+  Future<void> _nextQuestion() async {
     setState(() {
       _showingFeedback = false;
       _selectedOption = null;
       _answerController.clear();
       _currentIndex++;
-      if (_currentIndex >= _totalQuestions) {
-        _finished = true;
-        final score = _totalQuestions > 0
-            ? _correctCount / _totalQuestions
-            : 0.0;
-        ref.read(assessmentEngineProvider).finalize(_assessment!.id, score);
-        // Apply results to SRS (mirrors web: ReviewScheduler.onAnswered)
-        _applyResultsToSRS();
-        // Compute mastery level and gaps (как в web FinalAssessment.tsx)
-        _computeMasteryAndGaps();
-      }
+      if (_currentIndex >= _totalQuestions) _finished = true;
     });
+    // Таймер следующего вопроса сбрасывается сразу и не ждёт async-записей
+    // завершения (finalize/SRS).
     _startedAt = DateTime.now().millisecondsSinceEpoch;
+    if (_currentIndex >= _totalQuestions) {
+      final score = _totalQuestions > 0
+          ? _correctCount / _totalQuestions
+          : 0.0;
+      // Все ref.read — до первого await: после dispose виджета ref
+      // недоступен, а записи finalize/SRS должны дойти, даже если
+      // пользователь уже ушёл с экрана (внутри setState ничего не await-им).
+      final engine = ref.read(assessmentEngineProvider);
+      final reviewScheduler = ref.read(reviewSchedulerProvider);
+      final topicId = ref.read(graphStoreProvider).topic?.id ?? widget.topicId;
+      // Уровень мастерства и список пробелов — чисто экранный синхронный
+      // расчёт БЕЗ записей в БД, поэтому считается сразу, но уже вне setState.
+      _computeMasteryAndGaps();
+      await engine.finalize(_assessment!.id, score);
+      // Apply results to SRS (mirrors web: ReviewScheduler.onAnswered)
+      await _applyResultsToSRS(reviewScheduler, topicId);
+    }
   }
 
   /// Применяет результаты теста к SRS learner model.
-  void _applyResultsToSRS() {
-    final reviewScheduler = ref.read(reviewSchedulerProvider);
-    final topic = ref.read(graphStoreProvider).topic;
-    final topicId = topic?.id ?? widget.topicId;
+  ///
+  /// Один цикл по фактически накопленным результатам (`_results`
+  /// заполняется в `_checkAnswer` безусловно): качество уходит ровно тем,
+  /// каким ответ был проверен. Каждый вызов awaited — read-modify-write
+  /// всей строки `learner_models` в `LearnerModelService` без ожидания
+  /// конфликтует сам с собой, и часть инкрементов теряется.
+  Future<void> _applyResultsToSRS(
+    ReviewScheduler reviewScheduler,
+    String topicId,
+  ) async {
+    final assessment = _assessment;
+    if (assessment == null) return;
+    final nodeByQuestion = {
+      for (final q in assessment.questions) q.id: q.nodeId,
+    };
     for (final entry in _results.entries) {
-      final questionId = entry.key;
-      final correct = entry.value;
-      // Find the corresponding question
-      final question = _assessment!.questions.where((q) => q.id == questionId).firstOrNull;
-      if (question != null) {
-        reviewScheduler.onAnswered(
-          topicId,
-          question.nodeId,
-          correct ? 'correct' : 'incorrect',
-        );
-      }
+      final nodeId = nodeByQuestion[entry.key];
+      if (nodeId == null) continue;
+      await reviewScheduler.onAnswered(
+        topicId,
+        nodeId,
+        entry.value ? 'correct' : 'incorrect',
+      );
     }
   }
 
   /// Вычисляет уровень мастерства и список слабых мест по результатам теста.
+  ///
+  /// Только читает `graphStoreProvider` и пишет в экранные поля
+  /// [_masteryLevel]/[_gaps] — в БД ничего не сохраняет, поэтому вызов
+  /// синхронный и может идти до await-записей финиша.
   void _computeMasteryAndGaps() {
     final questions = _assessment!.questions;
     final score = _totalQuestions > 0 ? _correctCount / _totalQuestions : 0.0;

@@ -29,7 +29,12 @@ export class ReviewScheduler {
           understanding: Math.min(1, p.understanding + 0.1),
         });
       }
-    } else {
+    } else if (quality === "incorrect") {
+      // Ложная мисконцепция пишется только под 'incorrect' — про ответ на
+      // карточке повторения. 'again' означает «нужен повтор скоро» и это НЕ
+      // «небрежный ответ на повторении»: раньше ветка else ловила любое
+      // не-'correct' и засоряла модель выдуманной ошибкой.
+      // Зеркало: mindtree_flutter/lib/domain/engines/review_scheduler.dart
       this.learnerModel.addMisconception(
         topicId,
         nodeId,

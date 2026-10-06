@@ -49,7 +49,7 @@ model: opencode/big-pickle
 
 ## Примечания
 
-- Параллельный субагент `server` отвечает за LLM-слой TS (`server/src/llm/*.ts`) — он тоже
-  содержит зеркальные `scheduler.ts`/`cache.ts`/`telemetry.ts`/`client.ts`.
+- `server/src/llm/*.ts` (`scheduler.ts`/`cache.ts`/`telemetry.ts`/`client.ts`) —
+  историческое зеркало LLM-слоя; заморожено, синк не обязателен (AGENTS.md, 06.10.2026).
 - Используй skill `llm-pipeline` для паттернов scheduler/cache/telemetry и `prompt-engineering`
   для JSON-контрактов.

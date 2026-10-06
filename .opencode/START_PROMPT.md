@@ -16,12 +16,13 @@
 >    1. @flutter-domain — доменные движки/модели дерева знаний
 >    2. @flutter-data — drift-схема, mappers, repository
 >    3. @flutter-llm — TreeScheduler, client, cache, telemetry, config
->    4. @flutter-prompts — промпты (prompts.dart ↔ server/src/prompts/*.ts)
+>    4. @flutter-prompts — промпты (prompts.dart; server-зеркало заморожено)
 >    5. @flutter-ui — экраны, graph, сторы ui_stores
->    6. @server — TS/Node reference (prompts/domain/llm зеркала, роуты)
+>    6. @server — TS/Node reference (только по явной задаче; заморожен)
 >    7. @testing — детерминированные тесты (домен, промпты, граф)
-> 3. Следи за инвариантом «два параллельных стека»: промпты и движки 1:1 в flutter и server.
-> 4. Проверь результат (`flutter analyze`/`flutter test`, `npm run typecheck/lint/test`).
+> 3. Источник истины — `mindtree_flutter`: `server/` заморожен, зеркалирование только по
+>    явной просьбе пользователя; известные расхождения — `docs/server-mirror-known-divergence.md`.
+> 4. Проверь результат (`flutter analyze`/`flutter test`, при правках server — `npm run typecheck/lint/test`).
 
 ---
 
@@ -40,11 +41,13 @@
 
 > @flutter-llm Подправь TreeScheduler/retry для [операции]. Учти тиры strong/fast и fallback.
 
-> @flutter-prompts Измени [билдер промпта] и его зеркало server/src/prompts/*. Следуй skill prompt-engineering.
+> @flutter-prompts Измени [билдер промпта]. Следуй skill prompt-engineering (server-зеркало заморожено).
 
 > @flutter-ui Реализуй [экран/виджет]. Свяжи с провайдерами ui_stores.
 
-> @server Обнови TS-зеркала промптов/движков и роуты API по packages/types.
+> @server Обнови [конкретный файл server/src/...] как зеркало принятого flutter-решения (только если просил пользователь).
+
+> @product-reviewer Оцени готовность по §80 спеки (`/readiness`) или пройди UX-флоу (`/ux-review`).
 
 > @testing Напиши детерминированные тесты для [логики]. Без LLM в регрессиях (skill testing).
 
@@ -55,6 +58,9 @@
 - `/test-flutter` — flutter analyze + flutter test (mindtree_flutter)
 - `/gen-flutter` — кодогенерация build_runner (drift/freezed/riverpod)
 - `/test-server` — npm run typecheck + lint + test (vitest)
+- `/readiness` — аудит готовности продукта по §80–84 спеки (product-reviewer)
+- `/ux-review` — проход шести флоу глазами пользователя (product-reviewer)
+- `/review` — ревью дерева/сессии (content-reviewer)
 
 ---
 
@@ -62,6 +68,8 @@
 
 - Всегда стартуй с `@architect` для крупных задач — он сам разбивает и делегирует.
 - Узкие задачи — напрямую конкретному агенту (`@flutter-domain`, `@flutter-data` и т.д.).
-- `@testing` не может править код (edit: deny) — только расчёты и тесты.
-- Промпты и движки меняются синхронно в обоих стеках (flutter ↔ server), иначе расхождение фиксируется.
+- `@testing` не может править код (edit: deny) — только расчёты и тесты. Так же
+  `@product-reviewer` и `@content-reviewer` — только отчёты.
+- Промпты и движки правятся в `mindtree_flutter`; `server/` заморожен — зеркало только по
+  явной просьбе (AGENTS.md, 06.10.2026).
 - После изменения конфига opencode нужно перезапустить.

@@ -26,8 +26,9 @@ description: Используй когда нужно написать или с
 - Запуск: `npm run test` (vitest, конфиг `server/vitest.config.ts`), `npm run typecheck`,
   `npm run lint`.
 - Промпт-тесты: `server/src/prompts/__tests__/content.test.ts`, `structureStep.test.ts`.
-- Зеркальность: если тесты проверяют общий контракт — покрывай оба стека
-  (skill `mono-sync`).
+- `server/` заморожен (AGENTS.md, 06.10.2026): тесты эталона проверяют его поведение,
+  не требуя зеркальности с flutter. Общий контракт покрываешь в обоих стеках только когда
+  пользователь просил зеркалирование (skill `mono-sync`).
 
 ## E2E / live
 

@@ -1,11 +1,12 @@
 ---
 name: tree-generation
-description: Используй когда нужно реализовать, отладить или изменить генерацию дерева знаний: пайплайн L1/L2/L3, expand, validate, repair, content, NodeState-машина, scoped ids, лимиты one_liner, валидация дерева в mindtree_flutter/server.
+description: Используй когда нужно реализовать, отладить или изменить генерацию дерева знаний: пайплайн L1/L2/L3, expand, validate, repair, content, NodeState-машина, scoped ids, лимиты one_liner, валидация дерева в mindtree_flutter (server-зеркало заморожено).
 ---
 
 # Tree Generation — паттерны генерации дерева знаний
 
-Используй при работе с генерацией дерева знаний MindTree в обоих стеках.
+Используй при работе с генерацией дерева знаний MindTree (приоритетный стек —
+`mindtree_flutter`).
 
 ## Пайплайн (KnowledgeGraphEngine)
 
@@ -51,5 +52,6 @@ contentGenerated → needsReview → failed` (`lib/domain/models/knowledge_node.
 
 ## Синхронизация
 
-Любая правка промпта/движка дерева — в обоих стеках (flutter ↔ `server/src/prompts/*.ts`,
-`server/src/domain/*.ts`). См. skill `mono-sync`.
+Правки промпта/движка дерева делаются в `mindtree_flutter`. `server/src/prompts/*.ts` и
+`server/src/domain/*.ts` — замороженное зеркало: дублировать не обязательно, зеркало — по
+явной просьбе пользователя. См. skill `mono-sync` и `docs/server-mirror-known-divergence.md`.

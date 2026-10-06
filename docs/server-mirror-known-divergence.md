@@ -1,22 +1,23 @@
-# Отложенное зеркалирование server/
+# Известное расхождение `server/` с flutter (не зеркалируется)
 
-Чек-лист того, что нужно перенести из приоритетного стека `mindtree_flutter/`
-в замороженный reference `server/` (и `packages/types/`), когда `server`-агент снова станет доступен.
+Исторический чек-лист отложенного зеркалирования. **Статус: расхождение зафиксировано
+06.10.2026 и намеренно не зеркалируется** — `server/` заморожен как reference без
+обязательного синка (решение: вариант «заморозить», см. `AGENTS.md`, раздел
+«Статус `server/`»). Этот док — память о том, чем `server/` отличается от flutter,
+а не задание к выполнению.
 
-Источник истины при конфликте — **flutter**. Правило: `AGENTS.md`,
-раздел «Главный инвариант: два параллельных стека».
+Источник истины при конфликте — **flutter**. Пока `server/` не обслуживает клиента,
+поведение ниже намеренно расходится: новые фичи и изменения учебного поведения живут
+только в `mindtree_flutter/`.
 
-Статус: `server`-subagent сейчас падает с ошибкой провайдера
-(`This model is not available in your country`) — зеркалирование не выполнено.
-
-## Что уже зеркалировано вручную
+## Что уже зеркалировано вручную (до заморозки)
 
 | Правка | Файл |
 |---|---|
-| Мисконцепция `careless` пишется только при `quality === 'incorrect'`, а не при любом не-`correct` (раньше `'again'` создавал ложную запись) | `server/src/domain/ReviewScheduler.ts` |
+| Мисконцепция `careless` пишется только при `quality === 'incorrect'`, а не при любом не-`correct` (ранее `'again'` создавал ложную запись) | `server/src/domain/ReviewScheduler.ts` |
 | Восстановлены экспорты `buildAssessmentPrompt`, `parseAssessmentResult`, `AssessmentQuestionResult`, исправлена кириллица тела промпта, `Math.random()` → `shortIdWith("q_")`, резолв `correctAnswer` через `resolveCorrectAnswerIndex`, отбрасывание непроверяемых вариантов вопроса | `server/src/prompts/assessment.ts` |
 
-## Что перенести (начато в Flutter, в server ещё нет)
+## Известное расхождение (есть в flutter, нет в server)
 
 | # | Что меняется | Flutter | Server |
 |---|---|---|---|
@@ -29,7 +30,7 @@
 | 7 | `LearningActivityService` получает `FeedbackEngine`, приватные `_evaluateRecall`/`_evaluateApply` удалены; событие `activity_answer` несёт `evaluated`/`score` | `lib/domain/engines/learning_activity_service.dart` | `server/src/domain/LearningActivityService.ts` |
 | 8 | Тип-контракт: `AnswerFeedback.evaluated`, quality-литералы, `MisconceptionType.defaultDescription` | `lib/domain/models/mastery.dart` | `packages/types/src/mastery.ts`, `packages/types/src/learning.ts` |
 
-## Как завершить
+## Если зеркалирование всё же понадобится (по явной просьбе)
 
 1. Прочитать эквивалентный Dart-файл и воспроизвести поведение, а не приблизительно
    переписывать TypeScript.
@@ -39,7 +40,7 @@
    `test/domain/mark_item_completed_quality_test.dart`,
    `test/domain/completion_quality_test.dart`.
 
-## Открытые вопросы, требующие решения
+## Открытые вопросы (косметические, не влияют на приоритетный стек)
 
 - `partial` возвращает `AnswerFeedback.quality == 'incorrect'`, хотя для SRS он нейтрален
   (correct=false, score=0.5, evaluated=true). Косметика, не влияет на модель, но логичнее

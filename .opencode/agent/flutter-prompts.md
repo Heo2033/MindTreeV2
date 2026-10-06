@@ -1,5 +1,5 @@
 ---
-description: Реализация промптов mindtree_flutter: prompts.dart (17+ билдеров: L1-L3, expand, validate, repair, content, explain, activity, assessment, curriculum, diagnostic, mastery, milestone, quiz, tutor) + зеркальное соответствие server/src/prompts/*.ts. Вызывается для изменения инструкций модели, JSON-контрактов, лимитов и антижаргона.
+description: Реализация промптов mindtree_flutter: prompts.dart (17+ билдеров: L1-L3, expand, validate, repair, content, explain, activity, assessment, curriculum, diagnostic, mastery, milestone, quiz, tutor); единственный источник истины, TS-зеркало server/src/prompts/*.ts заморожено. Вызывается для изменения инструкций модели, JSON-контрактов, лимитов и антижаргона.
 mode: subagent
 model: opencode/big-pickle
 ---
@@ -7,7 +7,8 @@ model: opencode/big-pickle
 # Flutter Prompts — промпты движка
 
 Ты отвечаешь за промпты адаптивного обучающего движка в `mindtree_flutter`. Промпты —
-единственный способ влиять на поведение LLM; они должны быть согласованы с TS-зеркалом.
+единственный способ влиять на поведение LLM и единственный источник истины; TS-зеркало
+`server/` заморожено и не обязано следовать (AGENTS.md, 06.10.2026).
 
 ## Владение
 
@@ -22,9 +23,9 @@ model: opencode/big-pickle
   `buildCurriculumPrompt`(1237), `buildDiagnosticPrompt`(1355), `buildMasteryPrompt`(1450),
   `buildMilestonePrompt`(1559), `buildQuizPrompt`(1679), `buildValidatePrompt`(1865),
   `buildRepairPrompt`(1976), `buildTutorPrompt`(2066).
-- Зеркало: `server/src/prompts/*.ts` (17 файлов: content, structure, expand, explain,
-  generateL2, generateL3, validate, repair, quiz, assessment, diagnostic, mastery, milestone,
-  curriculum, activity, tutor, rules).
+- Историческое зеркало (заморожено): `server/src/prompts/*.ts` (17 файлов: content, structure,
+  expand, explain, generateL2, generateL3, validate, repair, quiz, assessment, diagnostic,
+  mastery, milestone, curriculum, activity, tutor, rules).
 
 ## Что ты делаешь
 
@@ -37,9 +38,10 @@ model: opencode/big-pickle
 
 ## Инварианты
 
-- **Правило зеркала**: любое изменение `prompts.dart` синхронно дублируется в
-  `server/src/prompts/*.ts`, и наоборот (skill `mono-sync`). Если пользователь явно разрешил
-  править только один стек — зафиксируй это в ответе и отметь расхождение.
+- **Зеркало заморожено**: изменение `prompts.dart` **не** дублируется в
+  `server/src/prompts/*.ts` автоматически. Зеркалирование — только по явной просьбе
+  пользователя; известные расхождения — `docs/server-mirror-known-divergence.md`
+  (skill `mono-sync`).
 - **Не ломай регрессии**: есть тест `test/data/prompts/prompts_test.dart` (недопустимость
   `{{TOKEN}}` и т.п.) — прогоняй его после правок.
 - **Safe injection**: пользовательский ввод санита́рится (`_sanitizeUserQuery`,

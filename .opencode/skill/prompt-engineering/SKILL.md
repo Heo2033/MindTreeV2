@@ -1,6 +1,6 @@
 ---
 name: prompt-engineering
-description: Используй когда нужно править или тестировать промпты MindTree: noMetaRule/alphabetRule, антижаргон, структурный JSON-вывод, тиры моделей strong/fast, JSON-репар, санитизация ввода, синк промптов flutter↔server.
+description: Используй когда нужно править или тестировать промпты MindTree: noMetaRule/alphabetRule, антижаргон, структурный JSON-вывод, тиры моделей strong/fast, JSON-репар, санитизация ввода. Источник истины — prompts.dart; server-зеркало заморожено.
 ---
 
 # Prompt Engineering — паттерны промптов MindTree
@@ -50,6 +50,8 @@ description: Используй когда нужно править или те
 
 ## Синхронизация
 
-Промпты дублируются 1:1: `mindtree_flutter/lib/data/prompts/prompts.dart` ↔
-`server/src/prompts/*.ts` (18 билдеров). Правка только одного стека — только с явного
-согласия пользователя (skill `mono-sync`).
+`mindtree_flutter/lib/data/prompts/prompts.dart` — единственный источник истины;
+`server/src/prompts/*.ts` (18 билдеров) — **замороженное** историческое зеркало
+(AGENTS.md, 06.10.2026). Правка flutter не обязывает зеркало; зеркалирование — только по
+явной просьбе пользователя (skill `mono-sync`), известные расхождения —
+`docs/server-mirror-known-divergence.md`.

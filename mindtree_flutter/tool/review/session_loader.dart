@@ -532,6 +532,16 @@ Future<LoadedSession> _loadOne(
         rubric: rubric.isEmpty ? null : rubric,
         userAnswer: attempt?.answer,
         correct: attempt?.correct,
+        // TODO(review): подстановка `q.explanation` в `feedback` смешивает два
+        // разных текста. Для заданного вопроса это фидбек по ответу ученика,
+        // для незаданного (нет строки в `assessment_attempts`) — объяснение
+        // самого вопроса, которое фидбеком не является. Проверки об этом не
+        // знают: `checkQuestionDepth` судит «объяснил ли фидбек выбор варианта»
+        // по тексту, который к выбору может и не относиться. На реальной БД это
+        // давало ложные срабатывания. Правильное решение — развести поля
+        // (`attempted` / `explanationOfQuestion`) и проверять «нет фидбека»
+        // только у заданных вопросов; здесь оставлено как есть, чтобы не
+        // плодить «нет фидбека» на незаданных вопросах.
         feedback: (attempt?.feedback ?? '').isNotEmpty
             ? attempt?.feedback
             : q.explanation,

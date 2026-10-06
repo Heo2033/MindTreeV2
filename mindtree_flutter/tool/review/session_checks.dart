@@ -111,6 +111,15 @@ const int kMinStepsForProgression = 4;
 /// Порог минимальной длины правильного варианта, который ищем в фидбеке.
 const int kMinOptionLengthForExplain = 8;
 
+/// Минимальная длина фидбека, при которой он считается пояснением «по существу».
+///
+/// Ниже порога остаются короткие метки («верно», «ок», «да, так»), которые не
+/// говорят, ПОЧЕМУ выбран вариант. По промпту фидбек — это 1–3 предложения.
+const int kMinFeedbackLenForExplain = 48;
+
+/// Минимальная длина русского слова, по которому узнаём общую тему.
+const int kMinDistinctiveTokenLength = 5;
+
 /// Минимальная длина ответа/эталона для сравнения «дословно совпал».
 const int kMinAnswerLengthForEcho = 12;
 
@@ -125,6 +134,22 @@ const List<String> _kFeedbackAffirmations = <String>[
   'следовательно',
   'поэтому',
 ];
+
+/// Слова-«прокладки»: длинные, но темы не несут. Общее такое слово не доказывает,
+/// что фидбек говорит о правильном варианте.
+const Set<String> _kTopiclessTokens = <String>{
+  'более', 'будет', 'была', 'были', 'было',
+  'важно', 'важный', 'должен', 'должна', 'должны', 'должно',
+  'затем', 'именно', 'каждый',
+  'которое', 'которые', 'который', 'которых', 'которая',
+  'лучше', 'может', 'можно', 'очень',
+  'потому', 'потом', 'почти', 'пример',
+  'свои', 'своих', 'свою', 'сейчас', 'слова', 'слово',
+  'также', 'теперь', 'того', 'тоже', 'только', 'тому',
+  'уже', 'хорошо', 'хороший', 'часто',
+  'чего', 'чем', 'через', 'чтобы',
+  'этих', 'это', 'этого', 'этом', 'этому',
+};
 
 /// Тип шага — как в `ActivityStep.type` (`lib/domain/models/activity.dart`).
 const String kStepExplain = 'explain';
@@ -460,6 +485,31 @@ String _squeeze(String s) => s
 /// и «ответ да» сравниваются как одно и то же — а именно совпадение целиком
 /// и есть подозрение на копипаст.
 String _squeezedAnswer(String? s) => _squeeze(s ?? '');
+
+final RegExp _tokenSplit = RegExp('[^0-9a-zа-я]+');
+
+final RegExp _hasLatinOrDigit = RegExp('[a-z0-9]');
+
+/// Содержательные слова текста: латиница и числа — любой длины (в учебных
+/// текстах это термины вроде `mse`, `elbo`, `ddpm`), русские — от
+/// [kMinDistinctiveTokenLength] символов и не из [_kTopiclessTokens].
+Set<String> _topicTokens(String squeezed) => squeezed
+    .split(_tokenSplit)
+    .where((t) => t.isNotEmpty)
+    .where((t) => _hasLatinOrDigit.hasMatch(t)
+        ? t.length >= 2
+        : t.length >= kMinDistinctiveTokenLength &&
+            !_kTopiclessTokens.contains(t))
+    .toSet();
+
+/// Говорит ли фидбек о той же теме, что и правильный вариант: есть хотя бы одно
+/// общее содержательное слово. Отвечает на вопрос «фидбек вообще про это?» —
+/// в отличие от цитаты, которая отвечает на более сильный вопрос «дословно?».
+bool _sharesTopicWith(String squeezedFeedback, String option) {
+  final fb = _topicTokens(squeezedFeedback);
+  if (fb.isEmpty) return false;
+  return _topicTokens(_squeezedAnswer(option)).any(fb.contains);
+}
 
 String _nonEmpty(String? s) => (s ?? '').trim();
 
@@ -1079,15 +1129,24 @@ List<Finding> checkQuestionDepth(SessionView view) {
         continue;
       }
 
-      // Правильный вариант цитируется в фидбеке ИЛИ фидбек содержит оценочную
-      // связку («верно», «потому что») — второе засчитываем как пояснение: раз
-      // вариант известен, понятно, ЧТО объясняется.
+      // Фидбек поясняет выбор, и пояснение принимается тремя способами:
+      //  1) дословная цитата правильного варианта — самый сильный признак;
+      //  2) оценочная связка («верно», «потому что») — раз вариант известен,
+      //     понятно, ЧТО объясняется;
+      //  3) содержательное пояснение своими словами: фидбек длиннее порога и
+      //     пересекается с вариантом по содержательным словам.
+      // Дословная цитата НЕ обязательна: по контракту (см. `promptAssessment`,
+      // `buildActivityFeedbackPrompt`) фидбек — объяснение, а не пересказ
+      // ответа. Реальные сессии это подтвердили: все срабатывания были на
+      // нормальных объяснениях, перефразирующих вариант своими словами.
       final option = _nonEmpty(options[index]);
       final citesOption = option.length >= kMinOptionLengthForExplain &&
           feedback.contains(_squeezedAnswer(option));
       final hasVerdict =
           _kFeedbackAffirmations.any((w) => feedback.contains(_squeeze(w)));
-      if (citesOption || hasVerdict) continue;
+      final explainsOwnWords = feedback.length >= kMinFeedbackLenForExplain &&
+          _sharesTopicWith(feedback, option);
+      if (citesOption || hasVerdict || explainsOwnWords) continue;
       out.add(Finding(
         code: SessionCheckCode.questionShallow,
         severity: FindingSeverity.warn,

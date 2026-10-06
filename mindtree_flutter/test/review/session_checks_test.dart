@@ -1067,6 +1067,124 @@ void main() {
     });
   });
 
+  group('session_question_shallow: парафраз вместо цитаты', () {
+    // Ложные срабатывания из реальной БД: фидбек объяснял вариант своими
+    // словами, без дословной цитаты — и попадал в warn.
+    test('перефразированное объяснение без цитаты и связки → не warn', () {
+      final hit = withCode(
+        runSessionChecks(cleanView(
+          questions: const <SessionQuestionView>[
+            SessionQuestionView(
+              nodeId: 'n1',
+              type: 'recognition',
+              question: 'Чем жёсткая версия VLB отличается от упрощённой?',
+              options: <String>[
+                'Она учитывает зависимость весов от времени',
+                'Упрощённая функция игнорирует зависящие от времени весовые '
+                    'коэффициенты, сводя задачу к минимизации MSE шума',
+                'Она использует другую сетку',
+                'Она обучается быстрее',
+              ],
+              correctIndex: 1,
+              userAnswer: 'Упрощённая функция игнорирует время',
+              correct: true,
+              feedback: 'Упрощённая целевая функция (используемая в DDPM) '
+                  'отбрасывает сложные зависящие от времени веса из VLB и '
+                  'сводится к простой среднеквадратичной ошибке (MSE) между '
+                  'предсказанным и реальным шумом, что делает обучение '
+                  'более стабильным.',
+            ),
+          ],
+        )),
+        SessionCheckCode.questionShallow,
+      );
+
+      expect(hit, isEmpty);
+    });
+
+    test('перефразированное объяснение латиницей → не warn', () {
+      final hit = withCode(
+        runSessionChecks(cleanView(
+          questions: const <SessionQuestionView>[
+            SessionQuestionView(
+              nodeId: 'n2',
+              type: 'recall',
+              question: 'Что минимизируется при обучении DDPM?',
+              options: <String>[
+                'Evidence Lower Bound (ELBO) или её упрощённый вариант MSE '
+                    'между шумами',
+                'Перекрёстная энтропия по всем шагам',
+                'KL между шумом и данными напрямую',
+                'Ничего не минимизируется',
+              ],
+              correctIndex: 0,
+              userAnswer: 'ELBO или MSE',
+              correct: true,
+              feedback: 'Обучение модели сводится к минимизации гауссовской '
+                  'целевой функции потерь (MSE), то есть вариационному '
+                  'ограничению снизу (ELBO), что делает процесс стабильным.',
+            ),
+          ],
+        )),
+        SessionCheckCode.questionShallow,
+      );
+
+      expect(hit, isEmpty);
+    });
+
+    test('короткая метка с общим словом → всё ещё warn', () {
+      // Общее слово есть, но до порога длины не хватает — это не объяснение.
+      final hit = withCode(
+        runSessionChecks(cleanView(
+          questions: const <SessionQuestionView>[
+            SessionQuestionView(
+              nodeId: 'n1',
+              type: 'application',
+              question: 'Как улучшить качество сэмплирования?',
+              options: <String>[
+                'Увеличить количество шагов диффузии при сэмплировании',
+                'Уменьшить размер батча',
+              ],
+              correctIndex: 0,
+              userAnswer: 'Увеличить количество шагов',
+              correct: true,
+              feedback: 'Шаги важны',
+            ),
+          ],
+        )),
+        SessionCheckCode.questionShallow,
+      );
+
+      expect(hit.single.message, contains('фидбек не объясняет'));
+    });
+
+    test('длинная вода без общей темы → всё ещё warn', () {
+      final hit = withCode(
+        runSessionChecks(cleanView(
+          questions: const <SessionQuestionView>[
+            SessionQuestionView(
+              nodeId: 'n1',
+              type: 'recall',
+              question: 'Что такое остановка?',
+              options: <String>[
+                'Верно: останавливается',
+                'Неверно: работает вечно',
+              ],
+              correctIndex: 0,
+              userAnswer: 'Верно: останавливается',
+              correct: true,
+              feedback: 'Спасибо за ваш ответ, попробуйте ещё раз чуть позже '
+                  'и перечитайте материал перед следующей попыткой.',
+            ),
+          ],
+        )),
+        SessionCheckCode.questionShallow,
+      );
+
+      expect(hit.single.message, contains('фидбек не объясняет'));
+    });
+  });
+
   group('session_question_shallow: зафиксированный дефект', () {
     test('этал не из вариантов + оценочная связка → проверка молчит', () {
       // Комментарий в коде проверки обещает, что связка («верно», «потому что»)

@@ -475,6 +475,13 @@ final graphStoreProvider = StateNotifierProvider<GraphNotifier, GraphState>(
 
 class SessionState {
   final LearningSession? session;
+
+  /// Незавершённая сессия темы, которую можно предложить продолжить
+  /// (карточка «Продолжить» на стартовом экране сессии).
+  ///
+  /// Живёт отдельно от [session]: после перезапуска приложения активной
+  /// сессии в памяти нет, но БД знает последнюю незавершённую.
+  final LearningSession? resumable;
   final CurriculumItem? currentItem;
   final int currentIndex;
   final AdaptiveDecision? adaptive;
@@ -487,6 +494,7 @@ class SessionState {
 
   const SessionState({
     this.session,
+    this.resumable,
     this.currentItem,
     this.currentIndex = 0,
     this.adaptive,
@@ -500,6 +508,10 @@ class SessionState {
 
   SessionState copyWith({
     LearningSession? session,
+    // Closure-паттерн (как у answeredStepView): обычный `?? this.resumable`
+    // не умеет явно сбросить поле в null, а это нужно после «Продолжить»
+    // и в reset().
+    LearningSession? Function()? resumable,
     CurriculumItem? currentItem,
     int? currentIndex,
     AdaptiveDecision? adaptive,
@@ -513,6 +525,7 @@ class SessionState {
   }) =>
       SessionState(
         session: session ?? this.session,
+        resumable: resumable != null ? resumable() : this.resumable,
         currentItem: currentItem ?? this.currentItem,
         currentIndex: currentIndex ?? this.currentIndex,
         adaptive: adaptive ?? this.adaptive,
@@ -562,6 +575,8 @@ class SessionNotifier extends StateNotifier<SessionState> {
       }
       state = state.copyWith(
         session: session,
+        // Новая сессия создана — предложение «Продолжить» устарело.
+        resumable: () => null,
         currentItem: current.item,
         currentIndex: current.index,
         loading: false,
@@ -638,6 +653,50 @@ class SessionNotifier extends StateNotifier<SessionState> {
 
   Future<void> resume() async {
     await loadCurrent();
+  }
+
+  /// Ищет последнюю незавершённую сессию темы — предложение «Продолжить»
+  /// на стартовом экране сессии (после перезапуска приложения id сессии
+  /// в памяти процесса уже нет, но данные лежат в БД).
+  ///
+  /// Не трогает `state.session` и не выставляет `loading`: проверка локальная,
+  /// блокировать ради неё экран нельзя. Ошибку в `state.error` не пишем —
+  /// карточка продолжения необязательна и не должна ломать идущую сессию.
+  Future<void> loadResumable(String topicId) async {
+    try {
+      final found = await _engine.latestUnfinishedSessionForTopic(topicId);
+      final prev = state;
+      // Общий copyWith в этом файле затирает error (параметр без `?? this`),
+      // поэтому сохраняем текущую ошибку явно.
+      state = prev.copyWith(resumable: () => found, error: prev.error);
+    } catch (e, st) {
+      developer.log(
+        '[loadResumable] topic $topicId failed',
+        error: e,
+        stackTrace: st,
+      );
+    }
+  }
+
+  /// Переносит предложенную сессию (`state.resumable`) в активную и дочитывает
+  /// через [loadCurrent] текущий пункт, индекс и адаптивное решение.
+  /// `resumable == null` — безопасный no-op.
+  Future<void> resumeSession() async {
+    final target = state.resumable;
+    if (target == null) return;
+    state = state.copyWith(
+      session: target,
+      resumable: () => null,
+      error: null,
+    );
+    try {
+      // Ошибки чтения обрабатывает сам loadCurrent (пишет state.error).
+      await loadCurrent();
+    } catch (e, st) {
+      // Страховка: исключению нельзя утечь из обработчика кнопки.
+      developer.log('[resumeSession] failed', error: e, stackTrace: st);
+      state = state.copyWith(error: '$e');
+    }
   }
 
   Future<void> startStudy(String nodeId) async {
@@ -724,7 +783,11 @@ class SessionNotifier extends StateNotifier<SessionState> {
     }
   }
 
-  Future<void> completeConcept(String itemId, {String? nodeId, String quality = 'correct'}) async {
+  /// [quality] намеренно не имеет дефолта: если вызывающий его не задал,
+  /// движок выводит качество детерминированно из шагов активности. Раньше здесь
+  /// стоял дефолт 'correct', и «Завершить концепт» всегда раздувал мастерство и
+  /// продлевал интервал SRS независимо от ответов ученика.
+  Future<void> completeConcept(String itemId, {String? nodeId, String? quality}) async {
     final sessionId = state.session?.id;
     if (sessionId == null) return;
     state = state.copyWith(loading: true, error: null, answeredStepView: () => null, advancing: true);
@@ -774,6 +837,8 @@ class SessionNotifier extends StateNotifier<SessionState> {
   }
 
   void reset() {
+    // Полный сброс: session, resumable (предложение «Продолжить»), activity
+    // и все флаги.
     state = const SessionState();
   }
 }

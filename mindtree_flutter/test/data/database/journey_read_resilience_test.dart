@@ -16,6 +16,11 @@
 //   * journey для темы нет → null, без исключения;
 //   * `getLearnerModel` на дублях отдаёт последнюю строку.
 //
+// Последняя группа файла — поиск незавершённой сессии темы (первый шаг фичи
+// «resume после перезапуска приложения»): фильтр по статусу, выбор ровно
+// одной сессии для UI и ДЕТЕРМИНИРОВАННЫЙ порядок при равных `startedAt`
+// (startedAt DESC, затем id ASC — выбор не зависит от порядка строк SQLite).
+//
 // Тесты детерминированы: in-memory drift, никаких часов и никакого LLM.
 // Время задаётся ЯВНО (`DateTime.utc(...)`), поэтому порядок строк не зависит
 // от порядка вызовов внутри одного тика.
@@ -70,6 +75,31 @@ Future<void> _insertMilestone(
           journeyId: journeyId,
           level: level,
           title: title,
+        ),
+      );
+}
+
+/// Вставляет сессию напрямую в таблицу с явными `startedAt` и `status`.
+///
+/// Обход `repo.createSession` обязателен: `Mappers.sessionToRow` НЕ передаёт
+/// `startedAt` (колонка остаётся на default `currentDateAndTime`), поэтому
+/// задать метку времени через доменную модель нельзя, а без явной метки
+/// порядок строк в тесте зависел бы от системных часов.
+Future<void> _insertSession(
+  MindtreeDb db, {
+  required String id,
+  required String journeyId,
+  required DateTime startedAt,
+  SessionStatus status = SessionStatus.active,
+  String topicId = _topicId,
+}) {
+  return db.into(db.learningSessions).insert(
+        LearningSessionsCompanion.insert(
+          id: id,
+          journeyId: journeyId,
+          topicId: topicId,
+          startedAt: Value(startedAt),
+          status: Value(status.raw),
         ),
       );
 }
@@ -325,6 +355,168 @@ void main() {
       expect(journey!.id, 'j_new');
       expect(journey.milestones, isNotEmpty,
           reason: 'прогресс вех не теряется из-за дублей journey');
+    });
+  });
+
+  // Первый шаг фичи «resume после перезапуска приложения»: сессия лежит
+  // в БД, а UI после перезапуска её не находит (id сессии жил только в
+  // памяти процесса). Нужен детерминированный поиск незавершённой сессии
+  // темы — ровно одной, потому что показывать пользователю две нельзя.
+  group('listUnfinishedSessionsForTopic: поиск незавершённой сессии', () {
+    // Scoped-иды: `~`-суффикс + 8 hex, как у узлов дерева. Второй скоуп —
+    // для сессий другой темы.
+    const scope = '1a2b3c4d';
+    const otherScope = '9f8e7d6c';
+    const journeyId = 'journey_1~1a2b3c4d';
+    const otherTopicId = 't2';
+
+    setUp(() async {
+      // Сессия ссылается на journey — создаём её честно, а не на «а вдруг».
+      await _insertJourney(db, id: journeyId, createdAt: DateTime.utc(2024, 1, 1));
+      await repo.createTopic(const Topic(id: otherTopicId, name: 'Другая тема'));
+    });
+
+    test('сессия со статусом active выдаётся', () async {
+      await _insertSession(db,
+          id: 'session_open~$scope', journeyId: journeyId, startedAt: DateTime.utc(2026, 3, 10));
+
+      final found = await repo.listUnfinishedSessionsForTopic(_topicId);
+
+      expect(found.map((s) => s.id), ['session_open~$scope']);
+      expect(found.single.status, SessionStatus.active);
+      expect((await repo.latestUnfinishedSessionForTopic(_topicId))!.id,
+          'session_open~$scope');
+    });
+
+    test('сессия со статусом completed не выдаётся', () async {
+      await _insertSession(
+        db,
+        id: 'session_done~$scope',
+        journeyId: journeyId,
+        startedAt: DateTime.utc(2026, 3, 10),
+        status: SessionStatus.completed,
+      );
+
+      expect(await repo.listUnfinishedSessionsForTopic(_topicId), isEmpty,
+          reason: 'completed считается завершённой');
+      expect(await repo.latestUnfinishedSessionForTopic(_topicId), isNull);
+    });
+
+    test('completed не вытесняет более старую активную сессию', () async {
+      // Самая свежая строка — completed. Если бы выбор шёл по одной метке
+      // времени без фильтра по статусу, UI предложил бы продолжить то, что
+      // уже закончено, и потерял настоящую незавершённую сессию.
+      await _insertSession(db,
+          id: 'session_open~$scope', journeyId: journeyId, startedAt: DateTime.utc(2026, 1, 10));
+      await _insertSession(
+        db,
+        id: 'session_done~$scope',
+        journeyId: journeyId,
+        startedAt: DateTime.utc(2026, 3, 10),
+        status: SessionStatus.completed,
+      );
+
+      final found = await repo.listUnfinishedSessionsForTopic(_topicId);
+
+      expect(found.map((s) => s.id), ['session_open~$scope']);
+    });
+
+    test('контракт зафиксирован: abandoned тоже выдаётся (правило «!= completed»)', () async {
+      // abandoned сейчас не пишется (единственная запись статуса — active при
+      // создании). Тест фиксирует действующее правило, чтобы будущая запись
+      // abandoned не изменила выбор молча.
+      await _insertSession(
+        db,
+        id: 'session_dropped~$scope',
+        journeyId: journeyId,
+        startedAt: DateTime.utc(2026, 3, 10),
+        status: SessionStatus.abandoned,
+      );
+
+      expect((await repo.listUnfinishedSessionsForTopic(_topicId)).map((s) => s.id),
+          ['session_dropped~$scope']);
+    });
+
+    test('из нескольких незавершённых выбирается самая свежая по startedAt', () async {
+      await _insertSession(db,
+          id: 'session_old~$scope', journeyId: journeyId, startedAt: DateTime.utc(2026, 1, 10));
+      await _insertSession(db,
+          id: 'session_mid~$scope', journeyId: journeyId, startedAt: DateTime.utc(2026, 2, 10));
+      await _insertSession(db,
+          id: 'session_new~$scope', journeyId: journeyId, startedAt: DateTime.utc(2026, 3, 10));
+
+      final found = await repo.listUnfinishedSessionsForTopic(_topicId);
+
+      expect(found.map((s) => s.id),
+          ['session_new~$scope', 'session_mid~$scope', 'session_old~$scope']);
+      expect((await repo.latestUnfinishedSessionForTopic(_topicId))!.id,
+          'session_new~$scope');
+    });
+
+    test('при одинаковом startedAt порядок детерминирован (id asc)', () async {
+      // Ключевой инвариант: выбор не должен зависеть от порядка строк в
+      // SQLite. Вставляем ЗАВЕДОМО в обратном порядке — так тест падает,
+      // если сортировка по id пропадёт (тогда вернётся порядок вставки).
+      final at = DateTime.utc(2026, 2, 2);
+      await _insertSession(db,
+          id: 'session_c~$scope', journeyId: journeyId, startedAt: at);
+      await _insertSession(db,
+          id: 'session_a~$scope', journeyId: journeyId, startedAt: at);
+      await _insertSession(db,
+          id: 'session_b~$scope', journeyId: journeyId, startedAt: at);
+
+      final byId = ['session_a~$scope', 'session_b~$scope', 'session_c~$scope'];
+      final insertionOrder = ['session_c~$scope', 'session_a~$scope', 'session_b~$scope'];
+
+      final found = await repo.listUnfinishedSessionsForTopic(_topicId);
+      expect(found.map((s) => s.id).toList(), byId,
+          reason: 'при равных startedAt выбор идёт по id asc');
+      expect(found.map((s) => s.id).toList(), isNot(insertionOrder),
+          reason: 'порядок вставки не является ответом');
+
+      // Повторное чтение той же базы обязано дать тот же порядок.
+      expect((await repo.listUnfinishedSessionsForTopic(_topicId)).map((s) => s.id).toList(),
+          byId);
+      expect((await repo.latestUnfinishedSessionForTopic(_topicId))!.id, 'session_a~$scope');
+    });
+
+    test('limit отдаёт ровно одну самую свежую сессию', () async {
+      // Продуктовое правило: UI показывает одну незавершённую сессию на тему.
+      await _insertSession(db,
+          id: 'session_old~$scope', journeyId: journeyId, startedAt: DateTime.utc(2026, 1, 10));
+      await _insertSession(db,
+          id: 'session_new~$scope', journeyId: journeyId, startedAt: DateTime.utc(2026, 3, 10));
+
+      expect(await repo.listUnfinishedSessionsForTopic(_topicId, limit: 1),
+          hasLength(1));
+      expect((await repo.listUnfinishedSessionsForTopic(_topicId, limit: 1)).single.id,
+          'session_new~$scope');
+    });
+
+    test('сессий по теме нет — пустой список и null', () async {
+      expect(await repo.listUnfinishedSessionsForTopic(_topicId), isEmpty);
+      expect(await repo.latestUnfinishedSessionForTopic(_topicId), isNull);
+    });
+
+    test('незавершённые сессии другой темы не подмешиваются', () async {
+      await _insertSession(db,
+          id: 'session_t1~$scope', journeyId: journeyId, startedAt: DateTime.utc(2026, 1, 10));
+      // Чужая сессия свежее нашей — иначе фильтр по теме проверялся бы по
+      // дате, а не по topicId.
+      await _insertSession(
+        db,
+        id: 'session_t2~$otherScope',
+        journeyId: journeyId,
+        topicId: otherTopicId,
+        startedAt: DateTime.utc(2030, 1, 1),
+      );
+
+      expect((await repo.listUnfinishedSessionsForTopic(_topicId)).map((s) => s.id),
+          ['session_t1~$scope']);
+      expect((await repo.latestUnfinishedSessionForTopic(_topicId))!.id,
+          'session_t1~$scope');
+      expect((await repo.latestUnfinishedSessionForTopic(otherTopicId))!.id,
+          'session_t2~$otherScope');
     });
   });
 }

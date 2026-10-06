@@ -47,7 +47,7 @@ class FakeSessionNotifier extends SessionNotifier {
   Future<void> completeConcept(
     String itemId, {
     String? nodeId,
-    String quality = 'correct',
+    String? quality,
   }) async {}
 
   @override

@@ -113,7 +113,7 @@ class _StatefulSessionNotifier extends SessionNotifier {
   Future<void> completeConcept(
     String itemId, {
     String? nodeId,
-    String quality = 'correct',
+    String? quality,
   }) async {
     state = state.copyWith(clearActivity: true, answeredStepView: () => null);
   }

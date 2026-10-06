@@ -50,6 +50,10 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     super.initState();
     Future.microtask(() {
       ref.read(graphStoreProvider.notifier).loadTopic(widget.topicId);
+      // Карточка «Продолжить»: ищем незавершённую сессию в БД — после
+      // перезапуска в памяти процесса её нет. Идёт отдельно от auto-resume
+      // активной сессии ниже и не зависит от его результата.
+      ref.read(sessionStoreProvider.notifier).loadResumable(widget.topicId);
       final ss = ref.read(sessionStoreProvider);
       if (ss.session != null && ss.session!.status == SessionStatus.active) {
         // Auto-resume: восстанавливаем сессию при входе
@@ -79,71 +83,151 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         ss.session != null && ss.session!.status == SessionStatus.active;
 
     if (!hasActiveSession) {
-      return _buildStartCard();
+      return _buildStartCard(ss);
     }
     return _buildActiveSession(ss);
   }
 
-  Widget _buildStartCard() {
+  /// Есть ли в предложенной сессии незакрытая работа: пока остаётся хоть один
+  /// пункт плана не со статусом [CurriculumItemStatus.completed], сессию есть
+  /// что продолжать. Если все пункты пройдена — сессия фактически завершена
+  /// и просто не помечена, предлагать продолжение бессмысленно.
+  static bool _hasUnfinishedWork(LearningSession session) {
+    final items = session.curriculum.items;
+    if (items.isEmpty) return false;
+    return items.any((i) => i.status != CurriculumItemStatus.completed);
+  }
+
+  /// Карточка «Продолжить» — предложение вернуться в незавершённую сессию.
+  /// Стоит НАД стартовой карточкой; «Начать сессию» ниже остаётся способом
+  /// проигнорировать предложение. Авто-навигации нет.
+  Widget _buildResumeCard(SessionState ss, LearningSession session) {
+    final items = session.curriculum.items;
+    final completed =
+        items.where((i) => i.status == CurriculumItemStatus.completed).length;
+    final total = items.length;
+    // currentIndex из БД указывает текущий пункт; клампим в границы плана,
+    // чтобы не упасть, если индекс ушёл за последний пункт.
+    final idx = session.currentIndex >= total ? total - 1 : session.currentIndex;
+    final nextLabel = idx >= 0 ? items[idx].label : null;
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'Продолжить сессию',
+              style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Пройдено $completed из $total разделов',
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: AppColors.textMuted(context),
+                  ),
+            ),
+            if (nextLabel != null) ...[
+              const SizedBox(height: 4),
+              Text(
+                'Остановились на «$nextLabel»',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: AppColors.textMuted(context),
+                    ),
+              ),
+            ],
+            const SizedBox(height: 16),
+            AppButton(
+              'Продолжить',
+              size: AppButtonSize.lg,
+              fullWidth: true,
+              icon: Icons.play_circle_outline,
+              busy: ss.loading,
+              onPressed: () => _session.resumeSession(),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStartCard(SessionState ss) {
+    final resumable = ss.resumable;
+    final offer =
+        resumable != null && _hasUnfinishedWork(resumable) ? resumable : null;
     return Center(
       child: SingleChildScrollView(
         padding: const EdgeInsets.all(24),
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 480),
-          child: Card(
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    'Сессия \u00b7 ${_graphState.topicName ?? widget.topicId}',
-                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                          fontWeight: FontWeight.w600,
-                        ),
-                  ),
-                  const SizedBox(height: 20),
-                  AppSelect(
-                    label: 'Цель',
-                    value: _goal,
-                    options: _goalOptions,
-                    onChanged: (v) => setState(() => _goal = v ?? _goal),
-                  ),
-                  const SizedBox(height: 16),
-                  AppField(
-                    label: 'Время',
-                    child: Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: [
-                        for (final opt in _timeOptions)
-                          ChoiceChip(
-                            label: Text(opt.label),
-                            selected: _timeBudget.toString() == opt.value,
-                            onSelected: (_) => setState(
-                              () => _timeBudget = int.parse(opt.value),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (offer != null) ...[
+                _buildResumeCard(ss, offer),
+                const SizedBox(height: 16),
+              ],
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        'Сессия \u00b7 ${_graphState.topicName ?? widget.topicId}',
+                        style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                              fontWeight: FontWeight.w600,
                             ),
-                          ),
-                      ],
-                    ),
+                      ),
+                      const SizedBox(height: 20),
+                      AppSelect(
+                        label: 'Цель',
+                        value: _goal,
+                        options: _goalOptions,
+                        onChanged: (v) => setState(() => _goal = v ?? _goal),
+                      ),
+                      const SizedBox(height: 16),
+                      AppField(
+                        label: 'Время',
+                        child: Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: [
+                            for (final opt in _timeOptions)
+                              ChoiceChip(
+                                label: Text(opt.label),
+                                selected: _timeBudget.toString() == opt.value,
+                                onSelected: (_) => setState(
+                                  () => _timeBudget = int.parse(opt.value),
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 24),
+                      AppButton(
+                        'Начать сессию',
+                        size: AppButtonSize.lg,
+                        fullWidth: true,
+                        icon: Icons.play_circle_outline,
+                        busy: _sessionState.loading,
+                        onPressed: () => _session.createSession(
+                          widget.topicId,
+                          goal: _goal,
+                          timeBudget: _timeBudget,
+                        ),
+                      ),
+                    ],
                   ),
-                  const SizedBox(height: 24),
-                  AppButton(
-                    'Начать сессию',
-                    size: AppButtonSize.lg,
-                    fullWidth: true,
-                    icon: Icons.play_circle_outline,
-                    busy: _sessionState.loading,
-                    onPressed: () => _session.createSession(
-                      widget.topicId,
-                      goal: _goal,
-                      timeBudget: _timeBudget,
-                    ),
-                  ),
-                ],
+                ),
               ),
-            ),
+            ],
           ),
         ),
       ),
@@ -737,20 +821,12 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   Future<void> _completeCurrentConcept(SessionState ss) async {
     final item = ss.currentItem;
     if (item == null) return;
-    final stepsCorrect = ss.activity?.steps
-            .where((s) => s.isAnswered && s.correct == true)
-            .length ??
-        0;
-    final totalSteps = ss.activity?.steps.length ?? 1;
-    final quality = totalSteps > 0 && stepsCorrect / totalSteps >= 0.5
-        ? 'correct'
-        : 'incorrect';
-
-    await _session.completeConcept(
-      item.id,
-      nodeId: item.nodeId,
-      quality: quality,
-    );
+    // Качество НЕ считаем здесь: движок выводит его из шагов активности
+    // (свидетельство — только шаги с оценкой `correct`). Локальная эвристика
+    // «доля верных шагов >= 0.5» делила на общее число шагов, то есть read-шаги
+    // (у них `correct == null`) тянули оценку вниз и роняли активность в
+    // 'incorrect' — а это пишет ложную мисконцепцию «неверно при повторении».
+    await _session.completeConcept(item.id, nodeId: item.nodeId);
 
     final updated = ref.read(sessionStoreProvider);
     final allDone = updated.currentItem == null;

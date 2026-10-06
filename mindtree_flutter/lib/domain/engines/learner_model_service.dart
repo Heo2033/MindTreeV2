@@ -9,6 +9,22 @@ const String dimRecall = 'recall';
 const String dimApplication = 'application';
 const String dimTransfer = 'transfer';
 
+/// Вес одного свидетельства в инкрементальном накоплении измерения.
+///
+/// Формула накопления в проекте ровно одна:
+/// `new = prev * (1 - w) + score * w`. Константа зафиксирована, чтобы результат
+/// зависел только от входа, а не от того, кто именно пишет измерение.
+const double kEvidenceWeight = 0.5;
+
+/// Приор измерения, которое ещё ни разу не оценивали: «не измерено».
+///
+/// Раньше диагностика и mastery-прогон писали выдуманные `0.6/0.6/0.4/0.3` всем
+/// «известным» концептам сразу, и в БД восемь узлов получали одинаковый профиль
+/// независимо от ответов. Теперь «нет данных» — это ноль, а измерение появляется
+/// только когда пришло реальное свидетельство ([recordEvidence]). Отличить
+/// «не измерено» от «измерено и плохо» можно по `lastAssessedAt`/мисконцепциям.
+const double kUnmeasuredDimension = 0.0;
+
 /// A computed concept profile with SRS fields flattened in.
 class ConceptProfile {
   final String nodeId;
@@ -123,17 +139,46 @@ class LearnerModelService {
   Future<List<ConceptProfile>> getConceptProfiles(String topicId) async =>
       (await _masteriesOf(topicId)).map(ConceptProfile.fromMastery).toList();
 
-  Future<void> setOverallLevel(String topicId, MasteryLevel level) async {
+  /// Поднять уровень по теме, не опуская уже достигнутый. Возвращает
+  /// фактический уровень после записи.
+  ///
+  /// Уровень — витрина набранного прогресса (его же `analytics` читает для
+  /// Learning Gain), поэтому произвольного «понижения» здесь нет: один запуск
+  /// диагностики или один экзамен не должны стирать ранее показанный уровень.
+  /// Абсолютного сеттера уровня намеренно не существует — иначе баг
+  /// «уровень считается из констант и перезаписывает ученика» вернётся.
+  ///
+  /// [asInitial] дополнительно фиксирует уровень как стартовый, но только
+  /// пока стартовый не определён ([MasteryLevel.awareness] — значение по
+  /// умолчанию в БД): иначе повторная диагностика переписывала бы «точку
+  /// отсчёта» и обнуляла Learning Gain.
+  Future<MasteryLevel> raiseOverallLevel(
+    String topicId,
+    MasteryLevel level, {
+    bool asInitial = false,
+  }) async {
     final m = await getModel(topicId);
+    final currentIdx = MasteryLevel.order.indexOf(m.overallLevel);
+    final candidateIdx = MasteryLevel.order.indexOf(level);
+    final next = candidateIdx > currentIdx ? level : m.overallLevel;
+    final initial = asInitial &&
+            m.initialOverallLevel == MasteryLevel.awareness &&
+            candidateIdx > 0
+        ? level
+        : m.initialOverallLevel;
+    if (next == m.overallLevel && initial == m.initialOverallLevel) {
+      return next;
+    }
     await repo.saveLearnerModel(LearnerModel(
       id: m.id,
       userId: m.userId,
       topicId: topicId,
-      overallLevel: level,
+      overallLevel: next,
       conceptMasteries: m.conceptMasteries,
       updatedAt: _now(),
-      initialOverallLevel: m.initialOverallLevel,
+      initialOverallLevel: initial,
     ));
+    return next;
   }
 
   Future<ConceptProfile?> getConceptProfile(String nodeId, String topicId) async {
@@ -144,6 +189,11 @@ class LearnerModelService {
     return null;
   }
 
+  /// Низкоуровневая АБСОЛЮТНАЯ запись измерений.
+  ///
+  /// Примитив хранилища, а не способ накопления: движкам вызывать нельзя —
+  /// один прогон не имеет права переписать историю концепта целиком. Для
+  /// накопления есть [recordEvidence].
   Future<void> updateMasteryDimensions(
     String topicId,
     String nodeId,
@@ -166,6 +216,64 @@ class LearnerModelService {
     cm = cm.copyWith(lastAssessedAt: _now(), confidence: cm.average);
     _replace(masteries, cm);
     await _saveMasteries(topicId, masteries);
+  }
+
+  /// Инкрементальная запись свидетельств по измерениям концепта.
+  ///
+  /// Единственная разрешённая формула накопления:
+  /// `new = prev * (1 - kEvidenceWeight) + score * kEvidenceWeight`, где `prev` —
+  /// накопленное значение ([kUnmeasuredDimension], если измерения ещё не было),
+  /// а `score` — свидетельство в 0..1.
+  ///
+  /// [evidence] содержит только те измерения, по которым свидетельство ЕСТЬ.
+  /// Измерения без ключа не трогаются: отсутствие данных — не повод выдумать
+  /// оценку (это и был прежний «хардкод 0.6/0.4 всем известным концептам»).
+  Future<void> recordEvidence(
+    String topicId,
+    String nodeId,
+    Map<String, double> evidence,
+  ) async {
+    if (evidence.isEmpty) return;
+    final masteries = await _masteriesOf(topicId);
+    final prev = _findOrCreate(masteries, nodeId);
+    final blended = _blendDimensions(prev, evidence);
+    if (blended == null) return;
+    await updateMasteryDimensions(topicId, nodeId, blended);
+  }
+
+  /// `prev * (1 - kEvidenceWeight) + score * kEvidenceWeight` по каждому ключу.
+  ///
+  /// `null`, если в [evidence] нет ни одного известного измерения — тогда
+  /// хранилище не трогаем вовсе.
+  static Map<String, double>? _blendDimensions(
+    ConceptMastery cm,
+    Map<String, double> evidence,
+  ) {
+    final out = <String, double>{};
+    for (final e in evidence.entries) {
+      final prev = _dimensionValue(cm, e.key);
+      if (prev == null) continue;
+      final score = _clamp01(e.value);
+      out[e.key] =
+          _clamp01(prev * (1 - kEvidenceWeight) + score * kEvidenceWeight);
+    }
+    return out.isEmpty ? null : out;
+  }
+
+  /// Накопленное значение измерения [dim]; `null` — такого измерения нет.
+  static double? _dimensionValue(ConceptMastery cm, String dim) {
+    switch (dim) {
+      case dimUnderstanding:
+        return cm.understanding;
+      case dimRecall:
+        return cm.recall;
+      case dimApplication:
+        return cm.application;
+      case dimTransfer:
+        return cm.transfer;
+      default:
+        return null;
+    }
   }
 
   Future<void> addMisconception(

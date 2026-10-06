@@ -220,6 +220,39 @@ class MindtreeRepository {
     return rows.map(Mappers.sessionFromRow).toList();
   }
 
+  /// Незавершённые сессии темы, свежие первыми.
+  ///
+  /// «Незавершённая» = status != completed (completed/abandoned сейчас не
+  /// пишутся, см. модель). Порядок детерминированный: startedAt desc, при
+  /// равенстве — id asc, чтобы выбор не зависел от порядка строк в SQLite.
+  Future<List<LearningSession>> listUnfinishedSessionsForTopic(
+    String topicId, {
+    int? limit,
+  }) async {
+    final query = db.select(db.learningSessions)
+      ..where((s) =>
+          s.topicId.equals(topicId) &
+          s.status.isNotValue(SessionStatus.completed.raw))
+      ..orderBy([
+        (s) => OrderingTerm.desc(s.startedAt),
+        (s) => OrderingTerm.asc(s.id),
+      ]);
+    if (limit != null) {
+      query.limit(limit);
+    }
+    final rows = await query.get();
+    return rows.map(Mappers.sessionFromRow).toList();
+  }
+
+  /// Последняя незавершённая сессия темы либо null.
+  ///
+  /// Продуктовое правило: показываем одну незавершённую сессию на тему, поэтому
+  /// выбор делается в БД (`limit: 1`), а не вызывающим кодом.
+  Future<LearningSession?> latestUnfinishedSessionForTopic(String topicId) async {
+    final rows = await listUnfinishedSessionsForTopic(topicId, limit: 1);
+    return rows.isEmpty ? null : rows.first;
+  }
+
   Future<LearningSession?> getSession(String id) async {
     final row = await (db.select(db.learningSessions)..where((s) => s.id.equals(id))).getSingleOrNull();
     return row == null ? null : Mappers.sessionFromRow(row);

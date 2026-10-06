@@ -217,17 +217,27 @@ class DiagnosticEngine {
       currentLevel = 'awareness';
     }
 
-    await _learnerModel.setOverallLevel(
+    // Уровень из ответов диагностики — стартовая точка, а не приговор: он не
+    // опускает уже достигнутый уровень (`raiseOverallLevel`) и попадает в
+    // `initial_overall_level`, из которого `analytics` считает Learning Gain.
+    await _learnerModel.raiseOverallLevel(
       topicId,
       MasteryLevel.fromString(currentLevel),
+      asInitial: true,
     );
 
-    for (final nodeId in knownConcepts) {
-      await _learnerModel.updateMasteryDimensions(topicId, nodeId, {
-        'understanding': 0.6,
-        'recall': 0.6,
-        'application': 0.4,
-        'transfer': 0.3,
+    // Свидетельство по КАЖДОМУ ответу, а не константы всем «известным»:
+    // раньше здесь писалось {understanding: 0.6, recall: 0.6, application: 0.4,
+    // transfer: 0.3} для всех верно отвеченных концептов, и в реальной БД
+    // восемь узлов получали одинаковый профиль независимо от ответов. Теперь
+    // верный ответ — это одно свидетельство для `recall`/`understanding` с
+    // весом [kEvidenceWeight], неверный — то же свидетельство со score 0.
+    for (final answer in answers) {
+      if (answer.nodeId.isEmpty) continue;
+      final score = answer.selectedIndex == answer.correctIndex ? 1.0 : 0.0;
+      await _learnerModel.recordEvidence(topicId, answer.nodeId, {
+        dimRecall: score,
+        dimUnderstanding: score,
       });
     }
 

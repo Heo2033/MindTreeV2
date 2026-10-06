@@ -6,6 +6,8 @@ import '../../data/database/mindtree_repository.dart';
 import '../../data/llm/scheduler.dart';
 import '../../data/llm/client.dart';
 import '../../data/prompts/prompts.dart';
+import 'package:mindtree_flutter/domain/lib/activity_blob.dart';
+import 'feedback_engine.dart';
 import 'learning_session_engine.dart';
 
 class LearningActivityService {
@@ -13,10 +15,16 @@ class LearningActivityService {
   final MindtreeRepository repo;
   final TreeScheduler scheduler;
 
+  /// Оценка ответов и запись модели ученика живут здесь, а не в приватных
+  /// копиях сервиса: `FeedbackEngine` владеет единственной формулой накопления
+  /// измерений, SRS и типологией мисконцепций.
+  final FeedbackEngine feedback;
+
   LearningActivityService({
     required this.engine,
     required this.repo,
     required this.scheduler,
+    required this.feedback,
   });
 
   Future<LearningActivity?> getActivity(String sessionId) async {
@@ -119,10 +127,19 @@ class LearningActivityService {
     final node = await repo.getNode(activity.nodeId);
     final nodeLabel = node?.label ?? activity.nodeLabel;
     final nodeOneLiner = node?.oneLiner ?? '';
+    final topic = await repo.getTopic(session.topicId);
+    final topicName = topic?.name ?? '';
 
     if (step.type == 'recall') {
       final chosenIndex = _clamp(0, int.tryParse(answer) ?? 0, (step.options?.length ?? 1) - 1);
-      final result = _evaluateRecall(chosenIndex, step);
+      final result = await feedback.evaluateRecall(
+        session.topicId,
+        topicName,
+        activity.nodeId,
+        nodeLabel,
+        RecallStepInput(options: step.options, correctIndex: step.correctIndex),
+        chosenIndex,
+      );
       final updatedSteps = List<ActivityStep>.from(activity.steps);
       updatedSteps[stepIndex] = ActivityStep(
         type: step.type,
@@ -135,7 +152,7 @@ class LearningActivityService {
         placeholder: step.placeholder,
         status: 'answered',
         userAnswer: answer,
-        correct: result.correct,
+        correct: result.evaluated ? result.correct : null,
         feedback: result.feedback,
       );
       await _persistSteps(sessionId, activity.itemId, updatedSteps);
@@ -147,14 +164,12 @@ class LearningActivityService {
         topicId: session.topicId,
         kind: 'activity_answer',
         nodeId: activity.nodeId,
-        payload: {'step': 'recall', 'correct': result.correct, 'score': result.score},
+        payload: _answerPayload('recall', result),
         durationMs: spentMs,
       );
       engine.eventBus.markUnitStart(sessionId);
     } else if (step.type == 'apply') {
-      final topic = await repo.getTopic(session.topicId);
-      final topicName = topic?.name ?? '';
-      final res = await _evaluateApply(session.topicId, topicName, activity.nodeId,
+      final res = await feedback.evaluateApply(session.topicId, topicName, activity.nodeId,
           nodeLabel, nodeOneLiner, step.instruction ?? '', step.bestAnswer ?? '', answer);
       final updatedSteps = List<ActivityStep>.from(activity.steps);
       updatedSteps[stepIndex] = ActivityStep(
@@ -168,7 +183,7 @@ class LearningActivityService {
         placeholder: step.placeholder,
         status: 'answered',
         userAnswer: answer,
-        correct: res.correct,
+        correct: res.evaluated ? res.correct : null,
         feedback: res.feedback,
       );
       await _persistSteps(sessionId, activity.itemId, updatedSteps);
@@ -178,7 +193,7 @@ class LearningActivityService {
         topicId: session.topicId,
         kind: 'activity_answer',
         nodeId: activity.nodeId,
-        payload: {'step': 'apply', 'correct': res.correct, 'score': res.score},
+        payload: _answerPayload('apply', res),
         durationMs: spentMs,
       );
       engine.eventBus.markUnitStart(sessionId);
@@ -310,66 +325,17 @@ class LearningActivityService {
     await repo.updateSession(updated);
   }
 
-  ({bool correct, String feedback, double score}) _evaluateRecall(
-    int chosenIndex,
-    ActivityStep step,
-  ) {
-    final options = step.options;
-    final correctIdx = step.correctIndex ?? 0;
-    if (options == null || options.isEmpty) {
-      // Без вариантов ответов считаем ответ верным — fallback без данных.
-      return (correct: true, feedback: 'Варианты не сгенерированы; переходим дальше.', score: 1.0);
-    }
-    final clamped = _clamp(0, chosenIndex, options.length - 1);
-    final correct = clamped == correctIdx;
-    return (
-      correct: correct,
-      feedback: correct
-          ? 'Правильно!'
-          : 'Неверно. Правильный ответ: ${options[correctIdx]}',
-      score: correct ? 1.0 : 0.0,
-    );
-  }
-
-  Future<({bool? correct, String feedback, double score})> _evaluateApply(
-    String topicId,
-    String topicName,
-    String nodeId,
-    String nodeLabel,
-    String nodeOneLiner,
-    String instruction,
-    String referenceAnswer,
-    String userAnswer,
-  ) async {
-    try {
-      final res = await scheduler.execute<Map<String, dynamic>>(
-        'activity',
-        () => buildActivityFeedbackPrompt(
-          nodeLabel: nodeLabel,
-          nodeOneLiner: nodeOneLiner,
-          instruction: instruction,
-          referenceAnswer: referenceAnswer,
-          userAnswer: userAnswer,
-        ),
-        (raw) => parseLLMJson<Map<String, dynamic>>(raw),
-      );
-      final assessment = (res.result['assessment'] as String?) ?? 'partial';
-      final feedback = (res.result['feedback'] as String?) ?? '';
-      final isCorrect = assessment == 'correct';
-      return (
-        correct: isCorrect,
-        feedback: feedback,
-        score: isCorrect ? 1.0 : (assessment == 'partial' ? 0.5 : 0.0),
-      );
-    } catch (_) {
-      // LLM недоступен: не помечаем ответ ложным «Есть ошибки».
-      // Нейтральный статус (correct: null) → в UI бейдж «Принято».
-      final feedback = referenceAnswer.trim().isNotEmpty
-          ? '\u041e\u0442\u0432\u0435\u0442 \u043f\u0440\u0438\u043d\u044f\u0442. \u0421\u0432\u0435\u0440\u044c\u0442\u0435\u0441\u044c \u0441 \u043e\u0431\u0440\u0430\u0437\u0446\u043e\u043c \u043d\u0438\u0436\u0435.'
-          : '\u041e\u0442\u0432\u0435\u0442 \u043f\u0440\u0438\u043d\u044f\u0442.';
-      return (correct: null, feedback: feedback, score: 0.5);
-    }
-  }
+  /// Полезная нагрузка события `activity_answer`.
+  ///
+  /// `score` и `correct` попадают в лог только когда ответ удалось оценить:
+  /// при отказе LLM (`evaluated == false`) выдумывать «0.5 за неоценённый
+  /// ответ» нельзя — иначе аналитика и ревью считают мусор за данные.
+  static Map<String, dynamic> _answerPayload(String step, AnswerFeedback result) => {
+        'step': step,
+        'evaluated': result.evaluated,
+        'correct': result.evaluated ? result.correct : null,
+        if (result.evaluated) 'score': result.score,
+      };
 
   static int _clamp(int min, int value, int max) =>
       value < min ? min : (value > max ? max : value);
@@ -688,34 +654,4 @@ int nextPendingIndex(List<ActivityStep> steps) {
     if (steps[i].status == 'pending' || steps[i].status == 'current') return i;
   }
   return -1;
-}
-
-({String? itemId, List<ActivityStep> steps}) parseActivityBlob(String raw) {
-  try {
-    final parsed = jsonDecode(raw.isEmpty ? '{}' : raw);
-    if (parsed is List) {
-      return (
-        itemId: null,
-        steps: parsed
-            .whereType<Map<String, dynamic>>()
-            .map(ActivityStep.fromJson)
-            .toList(),
-      );
-    }
-    if (parsed is Map<String, dynamic>) {
-      final stepsRaw = parsed['steps'];
-      if (stepsRaw is List) {
-        return (
-          itemId: parsed['itemId'] as String?,
-          steps: stepsRaw
-              .whereType<Map<String, dynamic>>()
-              .map(ActivityStep.fromJson)
-              .toList(),
-        );
-      }
-    }
-    return (itemId: null, steps: <ActivityStep>[]);
-  } catch (_) {
-    return (itemId: null, steps: <ActivityStep>[]);
-  }
 }

@@ -87,6 +87,33 @@ enum MisconceptionType {
         return 'careless';
     }
   }
+
+  /// Осмысленный текст-заглушка для случая «тип известен, объяснения нет».
+  ///
+  /// Нужен потому, что пустое `description` в БД бесполезно: такие записи
+  /// ничего не объясняют, но попадают в профиль ошибок и в контекст промптов.
+  /// Если объяснения нет — пишем текст по типу, а не пустую строку.
+  ///
+  /// Для [MisconceptionType.unknown] возвращает пустую строку: неизвестный тип
+  /// означает, что ошибаться нечем записывать — такую запись не создают.
+  String get defaultDescription {
+    switch (this) {
+      case MisconceptionType.unknown:
+        return '';
+      case MisconceptionType.confused:
+        return 'Ответ перепутан с другим понятием темы';
+      case MisconceptionType.incomplete:
+        return 'Ответ неполон: не раскрыта ключевая часть понятия';
+      case MisconceptionType.definitionOnly:
+        return 'Ответ повторяет определение, но не показывает применение';
+      case MisconceptionType.mechanismError:
+        return 'Ответ неверно описывает механизм понятия';
+      case MisconceptionType.applicationFailure:
+        return 'Ответ неверно применяет понятие: описанная ситуация ему не соответствует';
+      case MisconceptionType.careless:
+        return 'Ответ небрежный: понятие не вспомнено при повторении';
+    }
+  }
 }
 
 /// A single misconception detected for a concept.

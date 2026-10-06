@@ -30,8 +30,10 @@ class _FailingReviewScheduler extends ReviewScheduler {
   Future<void> onAnswered(
     String topicId,
     String nodeId,
-    String quality,
-  ) async {
+    String quality, {
+    Map<String, double>? evidence,
+    bool recordCareless = true,
+  }) async {
     throw Exception('srs write failed');
   }
 

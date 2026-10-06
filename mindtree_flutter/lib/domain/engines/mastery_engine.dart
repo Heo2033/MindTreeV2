@@ -69,19 +69,18 @@ class MasteryEngine {
 
     final perConcept = <String, double>{};
     for (final c in mastery.concepts) {
-      await learnerModel.updateMasteryDimensions(topicId, c.nodeId, {
-        'understanding': c.understanding,
-        'recall': c.recall,
-        'application': c.application,
-        'transfer': c.transfer,
+      if (c.nodeId.isEmpty) continue;
+      // Оценки LLM — это ещё одно свидетельство, а не право переписать
+      // накопленную историю концепта: раньше все четыре измерения ставились
+      // абсолютно, и один прогон экзамена стирал всё, что накопилось на шагах.
+      await learnerModel.recordEvidence(topicId, c.nodeId, {
+        dimUnderstanding: c.understanding,
+        dimRecall: c.recall,
+        dimApplication: c.application,
+        dimTransfer: c.transfer,
       });
       if (c.misconception != null) {
-        await learnerModel.addMisconception(
-          topicId,
-          c.nodeId,
-          MisconceptionType.fromString(c.misconception!['type'] as String? ?? 'unknown'),
-          c.misconception!['description'] as String? ?? '',
-        );
+        await _recordMisconception(topicId, c.nodeId, c.misconception!);
       }
       final score = c.confidence > 0
           ? c.confidence
@@ -91,8 +90,11 @@ class MasteryEngine {
 
     final scores = perConcept.values.toList();
     final overallScore = _average(scores);
-    final newLevel = levelFromScore(overallScore);
-    await learnerModel.setOverallLevel(topicId, newLevel);
+    // Уровень не откатывается от одного прогона: см. `raiseOverallLevel`.
+    final newLevel = await learnerModel.raiseOverallLevel(
+      topicId,
+      levelFromScore(overallScore),
+    );
 
     final targetIndex = MasteryLevel.order.indexWhere(
       (l) => l.raw == targetLevel,
@@ -107,6 +109,31 @@ class MasteryEngine {
       reachedTarget: mastery.enough ? true : reachedTarget,
       perConcept: perConcept,
       gaps: mastery.gaps,
+    );
+  }
+
+  /// Запись мисконцепции по вердикту LLM.
+  ///
+  /// Пустое описание в БД писать нельзя: такие записи ничего не объясняют, но
+  /// попадают в профиль ошибок и в контекст промптов (в реальной БД их
+  /// накопилось девять, все типа `careless` с `description = ''`). Поэтому:
+  /// тип известен — пишем осмысленный текст по типу ([defaultDescription]);
+  /// тип не распознан — не пишем запись вовсе, потому что ошибаться тут нечем.
+  Future<void> _recordMisconception(
+    String topicId,
+    String nodeId,
+    Map<String, dynamic> misconception,
+  ) async {
+    final type = MisconceptionType.fromString(
+      misconception['type']?.toString() ?? 'unknown',
+    );
+    if (type == MisconceptionType.unknown) return;
+    final description = (misconception['description']?.toString() ?? '').trim();
+    await learnerModel.addMisconception(
+      topicId,
+      nodeId,
+      type,
+      description.isEmpty ? type.defaultDescription : description,
     );
   }
 

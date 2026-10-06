@@ -4,6 +4,7 @@ import '../../data/database/mindtree_repository.dart';
 import '../../data/llm/scheduler.dart';
 import '../../data/llm/client.dart';
 import 'package:mindtree_flutter/domain/lib/short_ids.dart';
+import 'package:mindtree_flutter/domain/lib/activity_blob.dart';
 import 'package:mindtree_flutter/domain/lib/tree_reading.dart';
 
 import '../../data/prompts/prompts.dart';
@@ -120,6 +121,11 @@ class LearningSessionEngine {
 
   Future<LearningSession?> getSession(String sessionId) async =>
       repo.getSession(sessionId);
+
+  /// Последняя незавершённая сессия темы либо null — вход для «продолжить
+  /// после перезапуска приложения»: id сессии живёт в БД, а не в памяти.
+  Future<LearningSession?> latestUnfinishedSessionForTopic(String topicId) =>
+      repo.latestUnfinishedSessionForTopic(topicId);
 
   Future<({CurriculumItem item, int index, Curriculum curriculum})?>
       getCurrentItem(String sessionId) async {
@@ -240,14 +246,26 @@ class LearningSessionEngine {
     }
   }
 
+  /// Завершает пункт плана и, если передан `nodeId`, отдаёт результат в SRS.
+  ///
+  /// [quality] — escape hatch для вызывающего (assessment, досрочная отмена).
+  /// Если не передан, качество ДЕТЕРМИНИРОВАННО выводится из шагов активности
+  /// (`deriveCompletionQuality`). Раньше параметр жёстко дефолтился в
+  /// 'correct', поэтому кнопка «Завершить концепт» всегда давала
+  /// +0.15 recall / +0.1 understanding и продлевала интервал SRS независимо от
+  /// того, как ученик отвечал на шаги.
   Future<void> markItemCompleted(
     String sessionId,
     String itemId, {
     String? nodeId,
-    String quality = 'correct',
+    String? quality,
   }) async {
     final session = await getSession(sessionId);
     if (session == null) return;
+
+    // Выводим качество ДО `updated`: activityJson очищается в этой же записи.
+    final effectiveQuality =
+        quality ?? deriveCompletionQuality(session.activityJson, itemId);
 
     final items = [
       for (final it in session.curriculum.items)
@@ -273,7 +291,15 @@ class LearningSessionEngine {
     await repo.updateSession(updated);
 
     if (nodeId != null) {
-      await reviewScheduler.onAnswered(session.topicId, nodeId, quality);
+      // `evidence: {}` — закрытие пункта плана это не ответ: измерения за него
+      // уже записали шаги активности (см. FeedbackEngine). SRS по качеству
+      // завершения двигаем, мастерство — нет.
+      await reviewScheduler.onAnswered(
+        session.topicId,
+        nodeId,
+        effectiveQuality,
+        evidence: const {},
+      );
     }
 
     final completedCount = items.where((i) => i.status == CurriculumItemStatus.completed).length;

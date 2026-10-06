@@ -241,6 +241,7 @@ MindtreeEngines buildEngines({
     engine: session,
     repo: repo,
     scheduler: sched,
+    feedback: feedback,
   );
 
   final adaptive = AdaptiveLearningEngine(

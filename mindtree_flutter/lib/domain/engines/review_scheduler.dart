@@ -10,11 +10,32 @@ class ReviewScheduler {
 
   ReviewScheduler(this.repo) : _learnerModel = LearnerModelService(repo);
 
+  /// Записать ответ по теме/узлу: SRS + (необязательно) свидетельства.
+  ///
+  /// Разделение ответственности:
+  /// - [quality] ('correct' | 'again' | 'incorrect') уходит в SM-2
+  ///   (`scheduleReview`): 'incorrect'/'again' обнуляют интервал, 'correct'
+  ///   двигает его вперёд.
+  /// - [evidence] — измерения, по которым ответ даёт свидетельство. Если не
+  ///   переданы, берётся [defaultEvidence]. Шаги активности и экзамены
+  ///   передают своё (у них своя типология измерений), а «завершил концепт»
+  ///   передаёт пустую карту: это отметка о закрытии пункта плана, а не ответ —
+  ///   расти мастерству ей не за что.
+  /// - [recordCareless] — писать ли мисконцепцию `careless` под 'incorrect'.
+  ///   Вызывающий, который уже записал тип ошибки точнее (см. `FeedbackEngine`),
+  ///   её выключает.
+  ///
+  /// Измерения пишутся ТОЛЬКО здесь и ТОЛЬКО через `recordEvidence`. Раньше
+  /// метод подмешивал `+0.15 recall` / `+0.1 understanding` поверх бленда,
+  /// который уже сделал `FeedbackEngine`: recall получал двойную порцию, а
+  /// application/transfer по одной, и модель разъезжалась с ответами.
   Future<void> onAnswered(
     String topicId,
     String nodeId,
-    String quality,
-  ) async {
+    String quality, {
+    Map<String, double>? evidence,
+    bool recordCareless = true,
+  }) async {
     final profile = await _learnerModel.getConceptProfile(nodeId, topicId);
     final prev = profile != null
         ? SrsState(
@@ -29,25 +50,34 @@ class ReviewScheduler {
     await _learnerModel.updateSrs(topicId, nodeId,
         (interval: next.interval, ease: next.ease, dueAt: next.dueAt));
 
-    if (quality == 'correct') {
-      final p = await _learnerModel.getConceptProfile(nodeId, topicId);
-      if (p != null) {
-        final rec = p.recall + 0.15 > 1.0 ? 1.0 : p.recall + 0.15;
-        final und = p.understanding + 0.1 > 1.0 ? 1.0 : p.understanding + 0.1;
-        await _learnerModel.updateMasteryDimensions(topicId, nodeId, {
-          dimRecall: rec,
-          dimUnderstanding: und,
-        });
-      }
-    } else {
+    final dims = evidence ?? defaultEvidence(quality);
+    if (dims.isNotEmpty) {
+      await _learnerModel.recordEvidence(topicId, nodeId, dims);
+    }
+
+    if (quality == 'incorrect' && recordCareless) {
+      // Ложная мисконцепция пишется только под 'incorrect' — про ответ на
+      // карточке повторения. 'again' означает «нужен повтор скоро»
+      // (см. вывод качества в `deriveCompletionQuality`), и это НЕ «небрежный
+      // ответ на повторении»: раньше ветка else ловила любое не-'correct' и
+      // засоряла модель выдуманной ошибкой.
       await _learnerModel.addMisconception(
         topicId,
         nodeId,
         MisconceptionType.careless,
-        'Ответ был неверным при повторении',
+        MisconceptionType.careless.defaultDescription,
       );
     }
   }
+
+  /// Свидетельство по умолчанию для вызывающих без своей типологии.
+  ///
+  /// Карточка повторения — это чистая проверка памяти по узлу: верный ответ
+  /// подтверждает `recall`, неверный — опровергает. Считается один раз и той
+  /// же формулой накопления, что и остальные измерения.
+  static Map<String, double> defaultEvidence(String quality) => {
+        dimRecall: quality == 'correct' ? 1.0 : 0.0,
+      };
 
   Future<bool> isDueNode(String nodeId, String topicId) async {
     final p = await _learnerModel.getConceptProfile(nodeId, topicId);

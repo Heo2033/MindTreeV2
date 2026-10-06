@@ -9,6 +9,7 @@ import 'package:mindtree_flutter/data/llm/scheduler.dart';
 import 'package:mindtree_flutter/domain/engines/assessment_engine.dart';
 import 'package:mindtree_flutter/domain/engines/curriculum_engine.dart';
 import 'package:mindtree_flutter/domain/engines/event_bus.dart';
+import 'package:mindtree_flutter/domain/engines/feedback_engine.dart';
 import 'package:mindtree_flutter/domain/engines/learner_model_service.dart';
 import 'package:mindtree_flutter/domain/engines/learning_activity_service.dart';
 import 'package:mindtree_flutter/domain/engines/learning_session_engine.dart';
@@ -93,6 +94,7 @@ class _OkActivityService extends LearningActivityService {
     required super.engine,
     required super.repo,
     required super.scheduler,
+    required super.feedback,
   });
 
   @override
@@ -140,6 +142,7 @@ void main() {
               engine: engine,
               repo: repo,
               scheduler: scheduler,
+              feedback: FeedbackEngine(repo: repo, scheduler: scheduler),
             ),
       ),
       sessionStoreProvider.overrideWith((ref) => SessionNotifier(ref)),

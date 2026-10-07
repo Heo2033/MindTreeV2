@@ -9,6 +9,7 @@ import 'package:mindtree_flutter/domain/models/models.dart';
 import 'package:mindtree_flutter/providers/app_providers.dart';
 import 'package:mindtree_flutter/providers/ui_stores.dart';
 import 'package:mindtree_flutter/ui/labels.dart';
+import 'package:mindtree_flutter/ui/question_timer.dart';
 import 'package:mindtree_flutter/ui/theme/app_theme.dart';
 import 'package:mindtree_flutter/ui/widgets/badge.dart';
 import 'package:mindtree_flutter/ui/widgets/button.dart';
@@ -38,7 +39,11 @@ class _QuizScreenState extends ConsumerState<QuizScreen> {
   String _mode = 'learning'; // 'learning' | 'exam' (как в web Quiz.tsx)
   final _answerController = TextEditingController();
   int? _selectedOption;
-  int _startedAt = 0;
+
+  /// Отсчёт времени ответа. Заведён уже при показе экрана и перезапускается
+  /// при старте каждого вопроса — `0` в поле стоять не может, иначе в
+  /// `assessment_attempts.time_spent_ms` уезжает epoch-мс (см. [QuestionTimer]).
+  final _questionTimer = QuestionTimer();
 
   // Аккумуляторы ответов текущей попытки: в режиме «Экзамен» питают разбор
   // в конце, в обоих режимах — факт. результаты для SRS (`_applyQuizResultsToSRS`).
@@ -122,7 +127,8 @@ class _QuizScreenState extends ConsumerState<QuizScreen> {
         _examAnswers.clear();
         _examResults.clear();
       });
-      _startedAt = DateTime.now().millisecondsSinceEpoch;
+      // Вопрос 1 показан — таймер стартует вместе с ним, а не «где-то раньше».
+      _questionTimer.restart();
     } catch (e) {
       setState(() {
         _error = '$e';
@@ -139,7 +145,9 @@ class _QuizScreenState extends ConsumerState<QuizScreen> {
     final q = _currentQuestion;
     if (q == null) return;
     final engine = ref.read(assessmentEngineProvider);
-    final timeMs = DateTime.now().millisecondsSinceEpoch - _startedAt;
+    // Прошедшее время от показа текущего вопроса: QuestionTimer не даёт
+    // записать абсолютное время, если старт по какой-то причине не заведён.
+    final timeMs = _questionTimer.elapsedMs();
 
     bool correct;
     String answer;
@@ -189,8 +197,8 @@ class _QuizScreenState extends ConsumerState<QuizScreen> {
       if (_currentIndex >= _totalQuestions) _finished = true;
     });
     // Таймер следующего вопроса сбрасывается сразу и не ждёт async-записей
-    // завершения (finalize/SRS).
-    _startedAt = DateTime.now().millisecondsSinceEpoch;
+    // завершения (finalize/SRS): отсчёт идёт от показа вопроса.
+    _questionTimer.restart();
     if (_currentIndex >= _totalQuestions) {
       final score = _totalQuestions > 0
           ? _correctCount / _totalQuestions

@@ -161,6 +161,8 @@ class _AnalyticsScreenState extends ConsumerState<AnalyticsScreen> {
         children: [
           _buildSummaryCards(m),
           const SizedBox(height: 16),
+          _buildLearningGainCard(m),
+          const SizedBox(height: 16),
           _buildLevelCard(m, levelText, targetText),
           const SizedBox(height: 16),
           _buildMasteryDistribution(m),
@@ -190,6 +192,94 @@ class _AnalyticsScreenState extends ConsumerState<AnalyticsScreen> {
           ),
         ),
       ],
+    );
+  }
+
+  /// Ключевая метрика продукта — Learning Gain / Time: сколько уровней
+  /// понимания прибавилось с момента старта и сколько в среднем это стоит
+  /// по времени.
+  ///
+  /// Период — те же `studyMinutes` экрана (сумма достоверных замеров времени
+  /// занятий, неправдоподобные записи в `AnalyticsService` отфильтрованы):
+  /// новых источников данных карточка не заводит.
+  Widget _buildLearningGainCard(TopicMetrics m) {
+    final gain = m.learningGain.round();
+    final hasTime = m.studyMinutes > 0;
+    final gainPositive = gain > 0;
+
+    final String value;
+    final String caption;
+    if (!gainPositive) {
+      value = 'Пока без прироста';
+      caption = !hasTime
+          ? 'Нет замеров времени занятий — метрика появится после занятий.'
+          : 'За ${m.studyMinutes} мин занятий уровень понимания не вырос.';
+    } else {
+      value = '+${_levelsPlural(gain)} понимания';
+      if (!hasTime) {
+        caption = 'Нет замеров времени занятий — темп посчитать нельзя.';
+      } else {
+        // learningGainPerMinute посчитан как «уровней за час»
+        // (gain / часы занятий), минут на уровень — обратная величина.
+        final perHour = m.learningGainPerMinute.toStringAsFixed(1).replaceAll('.', ',');
+        // Потолок снизу — «~0 мин на уровень» на крошечной выборке
+        // смысла не имеет.
+        final minutesPerLevel =
+            (m.studyMinutes / gain).round().clamp(1, 100000).toInt();
+        caption = 'За ${m.studyMinutes} мин занятий — ~$minutesPerLevel мин '
+            'на уровень ($perHour уровня в час).';
+      }
+    }
+
+    final valueColor = gainPositive
+        ? Theme.of(context).colorScheme.primary
+        : AppColors.textMuted(context);
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Text(
+                  'Прирост понимания и время',
+                  style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                ),
+                const Spacer(),
+                // Период метрики — те же данные, что в карточке «Время».
+                StatusBadge('${m.studyMinutes} мин', variant: BadgeVariant.muted),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Icon(Icons.trending_up, size: 20, color: valueColor),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    value,
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.w700,
+                          color: valueColor,
+                        ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              caption,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: AppColors.textMuted(context),
+                  ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -412,6 +502,21 @@ class _StatCard extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Русская форма «уровень / уровня / уровней» для метрики прироста.
+String _levelsPlural(int n) {
+  final mod10 = n % 10;
+  final mod100 = n % 100;
+  final String word;
+  if (mod10 == 1 && mod100 != 11) {
+    word = 'уровень';
+  } else if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) {
+    word = 'уровня';
+  } else {
+    word = 'уровней';
+  }
+  return '$n $word';
 }
 
 class _MetricRow extends StatelessWidget {

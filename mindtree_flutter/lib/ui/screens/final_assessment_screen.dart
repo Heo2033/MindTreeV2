@@ -10,6 +10,7 @@ import 'package:mindtree_flutter/domain/models/models.dart';
 import 'package:mindtree_flutter/providers/app_providers.dart';
 import 'package:mindtree_flutter/providers/ui_stores.dart';
 import 'package:mindtree_flutter/ui/labels.dart';
+import 'package:mindtree_flutter/ui/question_timer.dart';
 import 'package:mindtree_flutter/ui/theme/app_theme.dart';
 import 'package:mindtree_flutter/ui/widgets/badge.dart';
 import 'package:mindtree_flutter/ui/widgets/button.dart';
@@ -48,7 +49,12 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
   String? _error;
   final _answerController = TextEditingController();
   int? _selectedOption;
-  int _startedAt = 0;
+
+  /// Отсчёт времени ответа. Заведён уже при показе экрана и перезапускается
+  /// при старте каждого вопроса — в том числе при подхвате незавершённого
+  /// теста из `_tryLoadExisting`, где раньше старт оставался `0` и в
+  /// `assessment_attempts.time_spent_ms` уезжало epoch-мс (см. [QuestionTimer]).
+  final _questionTimer = QuestionTimer();
 
   // Collect all answers before submit (like web FinalAssessment.tsx)
   final Map<String, String> _answers = {};
@@ -97,6 +103,12 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
       setState(() {
         _assessment = existing;
       });
+      // Корень дефекта «Неправдоподобный замер времени»: тест подхвачен из БД,
+      // минуя `_startAssessment`, и без этой строки таймер оставался бы
+      // незаводным — первый ответ писал `now - 0` = epoch-мс (~1.8e12 ≈ 20
+      // суток) в `assessment_attempts.time_spent_ms`. Вопрос снова показан —
+      // отсчёт стартует от показа.
+      _questionTimer.restart();
     }
   }
 
@@ -154,7 +166,8 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
         _gaps = null;
         _masteryLevel = null;
       });
-      _startedAt = DateTime.now().millisecondsSinceEpoch;
+      // Вопрос 1 показан — таймер стартует вместе с ним, а не «где-то раньше».
+      _questionTimer.restart();
     } catch (e) {
       setState(() {
         _error = '$e';
@@ -167,7 +180,9 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
     final q = _currentQuestion;
     if (q == null) return;
     final engine = ref.read(assessmentEngineProvider);
-    final timeMs = DateTime.now().millisecondsSinceEpoch - _startedAt;
+    // Прошедшее время от показа текущего вопроса: QuestionTimer не даёт
+    // записать абсолютное время, если старт по какой-то причине не заведён.
+    final timeMs = _questionTimer.elapsedMs();
 
     bool correct;
     String answer;
@@ -217,8 +232,8 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
       if (_currentIndex >= _totalQuestions) _finished = true;
     });
     // Таймер следующего вопроса сбрасывается сразу и не ждёт async-записей
-    // завершения (finalize/SRS).
-    _startedAt = DateTime.now().millisecondsSinceEpoch;
+    // завершения (finalize/SRS): отсчёт идёт от показа вопроса.
+    _questionTimer.restart();
     if (_currentIndex >= _totalQuestions) {
       final score = _totalQuestions > 0
           ? _correctCount / _totalQuestions

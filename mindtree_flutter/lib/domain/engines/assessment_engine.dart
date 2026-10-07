@@ -2,6 +2,7 @@ import 'dart:developer' as developer;
 
 import 'package:mindtree_flutter/domain/lib/option_matching.dart';
 import 'package:mindtree_flutter/domain/lib/short_ids.dart';
+import 'package:mindtree_flutter/domain/lib/time_plausibility.dart';
 
 import '../../data/database/mindtree_repository.dart';
 import '../../data/llm/client.dart';
@@ -30,6 +31,26 @@ class AssessmentItem {
         'details': details,
       };
 }
+
+/// Порог правдоподобного времени ответа на один вопрос.
+///
+/// Более большое значение не бывает «размышлением над вопросом» — такие
+/// значения приходят от зависшего/неостановленного таймера (например,
+/// экстраполяция `now - 0` ≈ epoch-мс ≈ 20 суток). Общий доменный порог —
+/// [kImplausibleDurationMs] из `lib/domain/lib/time_plausibility.dart`: его же
+/// использует фильтр аналитики, а пара к нему — `kImplausibleAnswerMs` в
+/// `tool/review/session_checks.dart`. Держать отдельный «более мягкий»
+/// потолок нельзя: attempt, который аналитика потом выкинет из сумм времени,
+/// оставляет Learning Gain / Time с дырой.
+const int kMaxPlausibleAttemptMs = kImplausibleDurationMs;
+
+/// Нормализует время ответа перед записью: `≤0` и неправдоподобно большие
+/// значения (см. [kMaxPlausibleAttemptMs]) заменяются на `0`.
+///
+/// Чистая функция — правила санитизации не мутируют и тестируются
+/// напрямую, без фейков и БД.
+int sanitizeAttemptTimeMs(int timeMs) =>
+    (timeMs <= 0 || timeMs > kMaxPlausibleAttemptMs) ? 0 : timeMs;
 
 /// Разбор `questions_json` от LLM в боевой контракт оценки.
 ///
@@ -191,13 +212,23 @@ class AssessmentEngine {
     int timeMs, {
     String? feedback,
   }) async {
+    // Защита от «зависших» таймеров: неправдоподобно большое (или
+    // неположительное) время ответа не пишем как есть — иначе оно
+    // искажает средние время-на-вопрос в аналитике и похожие статистики.
+    final safeTimeMs = sanitizeAttemptTimeMs(timeMs);
+    if (safeTimeMs != timeMs) {
+      developer.log(
+        'attempt_time_sanitized: question=$questionId timeMs=$timeMs '
+        '-> $safeTimeMs (порог $kMaxPlausibleAttemptMs мс)',
+      );
+    }
     final attempt = Attempt(
       id: shortIdWith('att_'),
       assessmentId: assessmentId,
       questionId: questionId,
       answer: answer,
       correct: correct,
-      timeSpentMs: timeMs,
+      timeSpentMs: safeTimeMs,
       feedback: feedback,
     );
     await repo.addAttempt(attempt);

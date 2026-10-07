@@ -1,5 +1,7 @@
 import 'dart:math' as math;
 
+import 'package:mindtree_flutter/domain/lib/time_plausibility.dart';
+
 import '../models/models.dart';
 import '../../data/database/mindtree_repository.dart';
 import 'learner_model_service.dart';
@@ -142,11 +144,24 @@ class AnalyticsService {
     for (final s in sessions) {
       final events = await repo.listEvents(s.id);
       for (final e in events) {
+        // Считаем только достоверные замеры. Неправдоподобная длительность
+        // (> [kImplausibleDurationMs] — 2 часа, тот же порог, что в тул ревью)
+        // это не «долго занимался», а сломанный таймер: в `duration_ms` утекло
+        // абсолютное время (старт не заведён → `now - 0` = epoch-мс ≈ 1.8e12)
+        // либо приложение висело в фоне сутки. Отрицательные значения —
+        // ушедшие назад часы. Такие записи раздували бы studyMinutes и
+        // обнуляли Learning Gain / Time, поэтому в сумму они не идут.
+        if (e.durationMs <= 0 || e.durationMs > kImplausibleDurationMs) {
+          continue;
+        }
         totalDurationMs += e.durationMs;
       }
     }
     var minutes = (totalDurationMs / 60000).round();
 
+    // Ни одного достоверного замера (события отсутствуют либо все отфильтрованы
+    // выше): оцениваем по времени жизни сессии, но не больше часа на сессию —
+    // этот потолок и не даёт эвристике раздуть метрику.
     if (minutes == 0 && sessions.isNotEmpty) {
       final firstStarted = sessions
           .map((s) => s.startedAt)

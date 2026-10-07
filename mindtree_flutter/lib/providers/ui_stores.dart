@@ -473,6 +473,25 @@ final graphStoreProvider = StateNotifierProvider<GraphNotifier, GraphState>(
 
 // ─── SessionStore ────────────────────────────────────────────────────────────
 
+/// Состояние действий Adapt (§80) на экране сессии.
+///
+/// [running] — какое действие выполняется прямо сейчас (null — ничего);
+/// по нему рисуется спиннер ровно на той кнопке, которую нажали, остальные
+/// на время операции блокируются. [result] — последний результат для показа:
+/// он переживает обновление сессии (перерисовку плана и ETA) и сбрасывается
+/// пользователем (крестик либо чип-возврат), при старте изучения
+/// (`startStudy`), при переходе шага активности (`answerStep`,
+/// `completeReadStep`, `resetAnsweredView`) и при смене понятия — то есть
+/// результат живёт ровно одну фазу чтения объяснения.
+class AdaptUiState {
+  final AdaptAction? running;
+  final AdaptResult? result;
+
+  const AdaptUiState({this.running, this.result});
+
+  bool get busy => running != null;
+}
+
 class SessionState {
   final LearningSession? session;
 
@@ -485,6 +504,9 @@ class SessionState {
   final CurriculumItem? currentItem;
   final int currentIndex;
   final AdaptiveDecision? adaptive;
+
+  /// Активность Adapt (§80): выполняемое действие и последний результат.
+  final AdaptUiState adapt;
   final LearningActivity? activity;
   final int? answeredStepView;
   final bool studying;
@@ -498,6 +520,7 @@ class SessionState {
     this.currentItem,
     this.currentIndex = 0,
     this.adaptive,
+    this.adapt = const AdaptUiState(),
     this.activity,
     this.answeredStepView,
     this.studying = false,
@@ -515,6 +538,7 @@ class SessionState {
     CurriculumItem? currentItem,
     int? currentIndex,
     AdaptiveDecision? adaptive,
+    AdaptUiState? adapt,
     LearningActivity? activity,
     bool clearActivity = false,
     int? Function()? answeredStepView,
@@ -529,6 +553,7 @@ class SessionState {
         currentItem: currentItem ?? this.currentItem,
         currentIndex: currentIndex ?? this.currentIndex,
         adaptive: adaptive ?? this.adaptive,
+        adapt: adapt ?? this.adapt,
         activity: clearActivity ? null : (activity ?? this.activity),
         answeredStepView:
             answeredStepView != null ? answeredStepView() : this.answeredStepView,
@@ -579,6 +604,8 @@ class SessionNotifier extends StateNotifier<SessionState> {
         resumable: () => null,
         currentItem: current.item,
         currentIndex: current.index,
+        // Результат Adapt-действия предыдущей сессии показывать нечего.
+        adapt: const AdaptUiState(),
         loading: false,
       );
       // Фоновая предгенерация следующих разделов (контент узлов + шаги activity).
@@ -702,7 +729,15 @@ class SessionNotifier extends StateNotifier<SessionState> {
   Future<void> startStudy(String nodeId) async {
     final sessionId = state.session?.id;
     if (sessionId == null) return;
-    state = state.copyWith(studying: true, loading: true, error: null);
+    // Результат Adapt относился к карточке понятия до изучения: он не должен
+    // дожить до первого шага активности (иначе «объясни проще» висит поверх
+    // теста, который начинается сразу после).
+    state = state.copyWith(
+      studying: true,
+      loading: true,
+      error: null,
+      adapt: const AdaptUiState(),
+    );
     try {
       String effectiveNodeId = nodeId.trim();
       if (effectiveNodeId.isEmpty) {
@@ -747,8 +782,13 @@ class SessionNotifier extends StateNotifier<SessionState> {
     final sessionId = state.session?.id;
     if (sessionId == null) return;
     // Busy-флаг на время оценки (особенно apply: LLM-вызов без видимого хода
-    // заставлял думать, что кнопка «не работает»).
-    state = state.copyWith(loading: true, error: null);
+    // заставлял думать, что кнопка «не работает»). Ответ — это переход к
+    // следующему шагу: результат Adapt предыдущей фазы чтения закрываем.
+    state = state.copyWith(
+      loading: true,
+      error: null,
+      adapt: const AdaptUiState(),
+    );
     try {
       final activity = await _activityService.answer(sessionId, stepIndex, answer);
       state = state.copyWith(
@@ -770,7 +810,13 @@ class SessionNotifier extends StateNotifier<SessionState> {
   Future<void> completeReadStep(int stepIndex) async {
     final sessionId = state.session?.id;
     if (sessionId == null) return;
-    state = state.copyWith(loading: true, error: null);
+    // Переход к следующему шагу: результат Adapt относился к закрытому шагу
+    // (фазе чтения объяснения) и сбрасывается до старта операции.
+    state = state.copyWith(
+      loading: true,
+      error: null,
+      adapt: const AdaptUiState(),
+    );
     try {
       final activity = await _activityService.answer(sessionId, stepIndex, '');
       state = state.copyWith(
@@ -808,9 +854,152 @@ class SessionNotifier extends StateNotifier<SessionState> {
         studying: false,
         loading: false,
         advancing: false,
+        // Понятие закрыто — результат Adapt-действия по нему устарел.
+        adapt: const AdaptUiState(),
       );
     } catch (e) {
       state = state.copyWith(loading: false, error: '$e', advancing: false);
+    }
+  }
+
+  // ─── Adapt (§80): действия пользователя над подачей и планом ────────────────
+
+  /// Текущее понятие сессии; null — действия Adapt показывать нечего.
+  String? get _currentNodeId {
+    final id = state.currentItem?.nodeId;
+    return id == null || id.isEmpty ? null : id;
+  }
+
+  /// Общая обёртка пяти действий Adapt: индикатор выполняемого действия,
+  /// вызов движка через провайдер и аккуратная ошибка (экран не падает —
+  /// баннер показывается по тому же паттерну, что и у соседних действий
+  /// сессии; LLM-сбой сам движок превращает в сохранённый текст).
+  ///
+  /// Возвращает результат либо null, если действие не выполнилось.
+  Future<AdaptResult?> _runAdapt(
+    AdaptAction action,
+    Future<AdaptResult> Function(AdaptiveLearningEngine engine, String sessionId) run,
+  ) async {
+    final sessionId = state.session?.id;
+    if (sessionId == null) return null;
+    state = state.copyWith(
+      adapt: AdaptUiState(running: action, result: state.adapt.result),
+      error: null,
+    );
+    try {
+      final result = await run(_adaptiveEngine, sessionId);
+      if (!mounted) return result;
+      state = state.copyWith(adapt: AdaptUiState(result: result));
+      return result;
+    } catch (e) {
+      if (!mounted) return null;
+      state = state.copyWith(
+        adapt: AdaptUiState(result: state.adapt.result),
+        error: '$e',
+      );
+      return null;
+    }
+  }
+
+  /// «Объясни проще»: то же понятие, но объяснением для новичка. LLM идёт
+  /// через scheduler; если модель недоступна, движок отдаёт сохранённый текст
+  /// (`source: stored`) — сценарий не рвётся.
+  Future<void> adaptSimplify() async {
+    final nodeId = _currentNodeId;
+    if (nodeId == null) return;
+    await _runAdapt(AdaptAction.simplify, (e, s) => e.simplify(s, nodeId));
+  }
+
+  /// «Из чего складывается»: из чего понятие собирается — явные связи и путь
+  /// по дереву, детерминированно, без LLM.
+  Future<void> adaptPrerequisites() async {
+    final nodeId = _currentNodeId;
+    if (nodeId == null) return;
+    await _runAdapt(
+      AdaptAction.prerequisite,
+      (e, s) => e.prerequisites(s, nodeId),
+    );
+  }
+
+  /// «Обзор / Обычно / Глубже»: меняет только глубину подачи, аудитория
+  /// (уровень ученика) остаётся прежней.
+  Future<void> adaptDepth(ContentDepth depth) async {
+    final nodeId = _currentNodeId;
+    if (nodeId == null) return;
+    await _runAdapt(
+      AdaptAction.changeDepth,
+      (e, s) => e.changeDepth(s, nodeId, depth),
+    );
+  }
+
+  /// «Знаю, пропустить»: пункт закрывается, план и точка сессии обновляются.
+  /// Повторный пропуск — no-op, о чём результат честно сообщает
+  /// (`changed: false` → «уже отмечено»).
+  Future<void> adaptSkip() async {
+    final item = state.currentItem;
+    if (item == null) return;
+    final result =
+        await _runAdapt(AdaptAction.skip, (e, s) => e.skip(s, item.id));
+    if (result == null || !mounted) return;
+    // План изменился в хранилище: перечитываем сессию, точку и ETA.
+    await _reloadAfterPlanChange(clearActivity: true);
+  }
+
+  /// «Успеваю только…»: план пересобирается под остаток времени: что не
+  /// влезает — откладывается, ETA пересчитывается. [remainingMinutes] == null
+  /// — остаток берётся из бюджета сессии.
+  Future<void> adaptReplan({int? remainingMinutes}) async {
+    final result = await _runAdapt(
+      AdaptAction.replan,
+      (e, s) => e.replanRemaining(s, remainingMinutes: remainingMinutes),
+    );
+    if (result == null || !mounted) return;
+    // Текущий пункт мог быть отложен — тогда активность чужая и её надо убрать.
+    await _reloadAfterPlanChange(clearActivityIfItemChanged: true);
+  }
+
+  /// Результат Adapt-действия закрыт пользователем.
+  void clearAdaptResult() {
+    state = state.copyWith(
+      adapt: AdaptUiState(running: state.adapt.running),
+    );
+  }
+
+  /// Перечитывает сессию после действия, поменявшего план: перерисовка плана,
+  /// новая точка, пересчёт ETA (`nextStep` — тот же механизм, что и после
+  /// «Завершить концепт»).
+  Future<void> _reloadAfterPlanChange({
+    bool clearActivity = false,
+    bool clearActivityIfItemChanged = false,
+  }) async {
+    final sessionId = state.session?.id;
+    if (sessionId == null) return;
+    final prevItemId = state.currentItem?.id;
+    try {
+      final session = await _engine.getSession(sessionId);
+      if (session == null) return;
+      final current = await _engine.getCurrentItem(sessionId);
+      AdaptiveDecision? adaptive;
+      try {
+        adaptive = await _adaptiveEngine.nextStep(sessionId);
+      } catch (e, st) {
+        developer.log('[adapt] nextStep failed', error: e, stackTrace: st);
+      }
+      final itemChanged = current?.item.id != prevItemId;
+      state = state.copyWith(
+        session: session,
+        currentItem: current?.item,
+        currentIndex: current?.index ?? session.currentIndex,
+        adaptive: adaptive,
+        answeredStepView: () => null,
+        clearActivity:
+            clearActivity || (clearActivityIfItemChanged && itemChanged),
+      );
+    } catch (e, st) {
+      // Перерисовка плана не должна ронять показанный результат действия,
+      // но и молчать о сбое хранилища нехорошо — тем же баннером.
+      developer.log('[adapt] session reload failed', error: e, stackTrace: st);
+      if (mounted) state = state.copyWith(error: '$e');
     }
   }
 
@@ -828,8 +1017,13 @@ class SessionNotifier extends StateNotifier<SessionState> {
     }
   }
 
+  /// Возврат из ответа (фидбека) к первому незакрытому шагу: результат Adapt
+  /// предыдущей фазы чтения закрыт — он не должен пережить переход шага.
   void resetAnsweredView() {
-    state = state.copyWith(answeredStepView: () => null);
+    state = state.copyWith(
+      answeredStepView: () => null,
+      adapt: const AdaptUiState(),
+    );
   }
 
   void clearError() {

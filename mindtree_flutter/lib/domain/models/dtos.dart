@@ -450,6 +450,350 @@ class SessionPlan {
       };
 }
 
+// ─── Adapt (§80): действия пользователя над подачей и планом ──────────────────
+
+/// Пять действий Adapt из §80: упрощённое объяснение, prerequisite, пропуск
+/// уже известного, смена глубины (L1/L2/L3) и пересборка плана под оставшееся
+/// время. Каждое возвращает свой типизированный результат (см. [AdaptResult]),
+/// а не общий Map: вызывающий получает ровно те поля, которые ему нужны.
+///
+/// `fromJson` у типов Adapt намеренно НЕТ: результаты возвращаются вызывающему
+/// напрямую (UI, probe) и не десериализуются — в отличие от [AdaptiveDecision],
+/// который шлётся по wire в инструментах ревью.
+enum AdaptAction {
+  simplify,
+  prerequisite,
+  skip,
+  changeDepth,
+  replan;
+
+  static AdaptAction fromString(String? v) => AdaptAction.values
+      .firstWhere((e) => e.raw == v, orElse: () => AdaptAction.simplify);
+
+  String get raw {
+    switch (this) {
+      case AdaptAction.simplify:
+        return 'simplify';
+      case AdaptAction.prerequisite:
+        return 'prerequisite';
+      case AdaptAction.skip:
+        return 'skip';
+      case AdaptAction.changeDepth:
+        return 'change_depth';
+      case AdaptAction.replan:
+        return 'replan';
+    }
+  }
+}
+
+/// Источник текста LLM-действий ([AdaptSimplifyResult], [AdaptDepthResult]).
+///
+/// [AdaptSource.llm] — свежий ответ модели; [AdaptSource.stored] —
+/// детерминированный fallback на сохранённый контент узла, когда LLM
+/// недоступна или ответ не прошёл JSON-контракт (обязательное правило
+/// AGENTS.md: сбой LLM не должен ронять сценарий).
+enum AdaptSource {
+  llm,
+  stored;
+
+  static AdaptSource fromString(String? v) => AdaptSource.values
+      .firstWhere((e) => e.raw == v, orElse: () => AdaptSource.stored);
+
+  String get raw => name;
+}
+
+/// Глубина подачи (§80 «изменить глубину»: L1/L2/L3).
+///
+/// - [overview] — обзор (L1): суть и место понятия, без глубоких деталей;
+/// - [standard] — обычная подача сессии (L2): цель берётся из `session.goal`;
+/// - [deep] — глубокое изучение (L3): механизм и подтемы.
+///
+/// Глубина меняет ЦЕЛЬ подачи, но не аудиторию: «глубже» ≠ «проще»
+/// (аудитория меняется только в [AdaptSimplifyResult]).
+enum ContentDepth {
+  overview,
+  standard,
+  deep;
+
+  static ContentDepth fromString(String? v) => ContentDepth.values
+      .firstWhere((e) => e.raw == v, orElse: () => ContentDepth.standard);
+
+  String get raw {
+    switch (this) {
+      case ContentDepth.overview:
+        return 'overview';
+      case ContentDepth.standard:
+        return 'standard';
+      case ContentDepth.deep:
+        return 'deep';
+    }
+  }
+}
+
+/// Как prerequisite связан с запрошенным понятием.
+enum PrerequisiteKind {
+  /// Явная связь `depends_on`/`requires` самого узла.
+  dependsOn,
+
+  /// Предок по иерархии дерева (`parentId`) — путь L1→L2→L3.
+  parent;
+
+  static PrerequisiteKind fromString(String? v) => PrerequisiteKind.values
+      .firstWhere((e) => e.raw == v, orElse: () => PrerequisiteKind.dependsOn);
+
+  String get raw {
+    switch (this) {
+      case PrerequisiteKind.dependsOn:
+        return 'depends_on';
+      case PrerequisiteKind.parent:
+        return 'parent';
+    }
+  }
+}
+
+/// Один prerequisite узла: на что опираться + статус изученности.
+class PrerequisiteRef {
+  final String nodeId;
+  final String label;
+  final String oneLiner;
+  final PrerequisiteKind kind;
+
+  /// Пункт плана с этим `nodeId` уже `completed` в текущей сессии.
+  final bool studied;
+
+  /// `masteryScore` профиля концепта; `null` — измерения ещё не было.
+  final double? mastery;
+
+  const PrerequisiteRef({
+    required this.nodeId,
+    required this.label,
+    required this.oneLiner,
+    required this.kind,
+    required this.studied,
+    this.mastery,
+  });
+
+  factory PrerequisiteRef.fromJson(Map<String, dynamic> json) => PrerequisiteRef(
+        nodeId: json['nodeId'] as String,
+        label: json['label'] as String? ?? '',
+        oneLiner: json['oneLiner'] as String? ?? '',
+        kind: PrerequisiteKind.fromString(json['kind'] as String?),
+        studied: json['studied'] as bool? ?? false,
+        mastery: (json['mastery'] as num?)?.toDouble(),
+      );
+
+  Map<String, dynamic> toJson() => {
+        'nodeId': nodeId,
+        'label': label,
+        'oneLiner': oneLiner,
+        'kind': kind.raw,
+        'studied': studied,
+        'mastery': mastery,
+      };
+}
+
+/// Общий каркас результата Adapt-действия.
+///
+/// [title]/[text] — готовое к показу в UI (русский), [reasons] — почему
+/// действие сработало именно так (в т.ч. когда включился fallback).
+class AdaptResult {
+  final AdaptAction action;
+  final String sessionId;
+  final String? nodeId;
+  final String? itemId;
+
+  /// Заголовок (как правило — понятие, к которому применено действие).
+  final String title;
+
+  /// Сводный текст для показа без дополнительной сборки.
+  final String text;
+
+  final List<String> reasons;
+
+  const AdaptResult({
+    required this.action,
+    required this.sessionId,
+    this.nodeId,
+    this.itemId,
+    required this.title,
+    required this.text,
+    this.reasons = const [],
+  });
+
+  Map<String, dynamic> _baseJson() => {
+        'action': action.raw,
+        'sessionId': sessionId,
+        'nodeId': nodeId,
+        'itemId': itemId,
+        'title': title,
+        'text': text,
+        'reasons': reasons,
+      };
+
+  Map<String, dynamic> toJson() => _baseJson();
+}
+
+/// «Упрощённое объяснение» (§80): тот же узел, но аудитория — новичок.
+class AdaptSimplifyResult extends AdaptResult {
+  /// Откуда взялся текст: свежий ответ модели либо сохранённый контент.
+  final AdaptSource source;
+  final String oneLiner;
+  final String details;
+  final String? analogy;
+
+  const AdaptSimplifyResult({
+    required super.sessionId,
+    required super.nodeId,
+    required super.title,
+    required super.text,
+    super.reasons,
+    required this.source,
+    this.oneLiner = '',
+    this.details = '',
+    this.analogy,
+  }) : super(action: AdaptAction.simplify);
+
+  @override
+  Map<String, dynamic> toJson() => {
+        ..._baseJson(),
+        'source': source.raw,
+        'oneLiner': oneLiner,
+        'details': details,
+        'analogy': analogy,
+      };
+}
+
+/// «Смена глубины» (§80): переподача узла на обзор/стандарт/углубление.
+class AdaptDepthResult extends AdaptResult {
+  final AdaptSource source;
+  final ContentDepth depth;
+  final String oneLiner;
+  final String details;
+  final String? analogy;
+
+  const AdaptDepthResult({
+    required super.sessionId,
+    required super.nodeId,
+    required super.title,
+    required super.text,
+    super.reasons,
+    required this.source,
+    required this.depth,
+    this.oneLiner = '',
+    this.details = '',
+    this.analogy,
+  }) : super(action: AdaptAction.changeDepth);
+
+  @override
+  Map<String, dynamic> toJson() => {
+        ..._baseJson(),
+        'source': source.raw,
+        'depth': depth.raw,
+        'oneLiner': oneLiner,
+        'details': details,
+        'analogy': analogy,
+      };
+}
+
+/// «Prerequisite» (§80): чего не хватает, чтобы понять понятие.
+///
+/// Строится без LLM: явные связи `depends_on`/`requires` + предки по дереву.
+class AdaptPrerequisiteResult extends AdaptResult {
+  final List<PrerequisiteRef> prerequisites;
+
+  /// `nodeId` ещё не изученных prerequisites (для кнопки «изучить сначала»).
+  final List<String> missingNodeIds;
+
+  const AdaptPrerequisiteResult({
+    required super.sessionId,
+    required super.nodeId,
+    required super.title,
+    required super.text,
+    super.reasons,
+    this.prerequisites = const [],
+    this.missingNodeIds = const [],
+  }) : super(action: AdaptAction.prerequisite);
+
+  @override
+  Map<String, dynamic> toJson() => {
+        ..._baseJson(),
+        'prerequisites': prerequisites.map((p) => p.toJson()).toList(),
+        'missingNodeIds': missingNodeIds,
+      };
+}
+
+/// «Пропустить уже известное» (§80): пункт плана закрывается, измерения
+/// обновляются свидетельством самооценки «знаю».
+class AdaptSkipResult extends AdaptResult {
+  /// `false` — пункт уже был завершён, повторный пропуск ничего не менял.
+  final bool changed;
+
+  /// Записанные свидетельства по измерениям (пусто, если `changed == false`).
+  final Map<String, double> evidence;
+
+  /// `masteryScore` профиля после записи; `null` — узла нет в модели.
+  final double? masteryScore;
+
+  /// Прогресс сессии после пропуска (completed / total, 0 если план пуст).
+  final double progress;
+
+  const AdaptSkipResult({
+    required super.sessionId,
+    required super.itemId,
+    super.nodeId,
+    required super.title,
+    required super.text,
+    super.reasons,
+    this.changed = false,
+    this.evidence = const {},
+    this.masteryScore,
+    this.progress = 0,
+  }) : super(action: AdaptAction.skip);
+
+  @override
+  Map<String, dynamic> toJson() => {
+        ..._baseJson(),
+        'changed': changed,
+        'evidence': evidence,
+        'masteryScore': masteryScore,
+        'progress': progress,
+      };
+}
+
+/// «Пересобрать план под оставшееся время» (§80 «адаптировать remaining»).
+class AdaptReplanResult extends AdaptResult {
+  /// Что осталось в плане (завершённое + влезшее по бюджету), порядок 1..n.
+  final List<CurriculumItem> kept;
+
+  /// Что вынесено за бюджет (только незавершённые пункты).
+  final List<CurriculumItem> deferred;
+  final int remainingMinutes;
+  final int elapsedMinutes;
+  final SessionEta eta;
+
+  const AdaptReplanResult({
+    required super.sessionId,
+    required super.title,
+    required super.text,
+    super.reasons,
+    this.kept = const [],
+    this.deferred = const [],
+    this.remainingMinutes = 0,
+    this.elapsedMinutes = 0,
+    required this.eta,
+  }) : super(action: AdaptAction.replan);
+
+  @override
+  Map<String, dynamic> toJson() => {
+        ..._baseJson(),
+        'kept': kept.map((i) => i.toJson()).toList(),
+        'deferred': deferred.map((i) => i.toJson()).toList(),
+        'remainingMinutes': remainingMinutes,
+        'elapsedMinutes': elapsedMinutes,
+        'eta': eta.toJson(),
+      };
+}
+
 /// Topic metrics for analytics.
 class TopicMetrics {
   final String topicId;

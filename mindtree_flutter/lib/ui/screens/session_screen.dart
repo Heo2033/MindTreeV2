@@ -6,6 +6,7 @@ import 'package:mindtree_flutter/domain/models/models.dart';
 import 'package:mindtree_flutter/providers/ui_stores.dart';
 import 'package:mindtree_flutter/ui/labels.dart';
 import 'package:mindtree_flutter/ui/theme/app_theme.dart';
+import 'package:mindtree_flutter/ui/widgets/adapt_panel.dart';
 import 'package:mindtree_flutter/ui/widgets/badge.dart';
 import 'package:mindtree_flutter/ui/widgets/button.dart';
 import 'package:mindtree_flutter/ui/widgets/error_banner.dart';
@@ -234,6 +235,29 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     );
   }
 
+  /// Текстовый результат Adapt (упрощение/глубина/база) — он рендерится на
+  /// месте, в карточке шага, а не в панели: результат должен стоять рядом с
+  /// текстом, который меняет. Статусные (skip/replan) сюда не попадают — они
+  /// остаются в панели.
+  ///
+  /// Показываем только в фазе «Объяснение»: текстовый результат создаётся
+  /// только там, где есть объяснение. До активности контент ещё не
+  /// сгенерирован (just-in-time, §61) — упрощать нечего; на «Примере» и на
+  /// шаге с вопросом тест объяснениями не засоряется.
+  AdaptResult? _inlineAdaptResult(SessionState ss) {
+    final result = ss.adapt.result;
+    if (result == null || !isInlineAdaptResult(result)) return null;
+    return adaptPhaseOf(ss) == AdaptPhase.explain ? result : null;
+  }
+
+  /// Карточка текстового результата Adapt с действием возврата к исходному
+  /// тексту («Вернуть обычное объяснение», для глубины — «Вернуть исходный
+  /// текст»).
+  Widget _buildInlineAdaptResult(AdaptResult result) => AdaptResultBody(
+        result: result,
+        onReset: () => _session.clearAdaptResult(),
+      );
+
   Widget _buildActiveSession(SessionState ss) {
     final session = ss.session!;
     final items = session.curriculum.items;
@@ -279,6 +303,13 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                     _buildAllComplete(ss)
                   else
                     _buildWaitingForActivity(ss),
+                  // Действия Adapt (§80): всегда рядом с текущим понятием —
+                  // и до чтения, и во время шага активности. Сама панель по
+                  // фазе шага прячется целиком (шаг с вопросом).
+                  if (ss.currentItem != null) ...[
+                    const SizedBox(height: 16),
+                    const AdaptPanel(),
+                  ],
                 ],
               ),
             ),
@@ -459,6 +490,9 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     );
   }
 
+  /// Стартовая карточка понятия (фаза до активности): текстовых результатов
+  /// Adapt здесь нет — контент генерируется по «Изучать» (just-in-time, §61),
+  /// упрощать нечего, поэтому в карточке только заголовок и действие.
   Widget _buildStudyPrompt(SessionState ss) {
     final item = ss.currentItem!;
     return Card(
@@ -539,6 +573,12 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
       return _buildActivityComplete(ss);
     }
     final step = activity.steps[stepIndex];
+    // Текстовый результат Adapt показываем здесь же, в карточке шага: он
+    // подменяет тело read-шага. На шаге с вопросом и на «Примере»
+    // [_inlineAdaptResult] возвращает null — вопрос, варианты и поле ввода
+    // остаются на месте, чужого объяснения в тесте нет.
+    final inline = _inlineAdaptResult(ss);
+    final replaceBody = inline != null;
 
     return Card(
       child: Padding(
@@ -566,7 +606,11 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                   ),
             ),
             const SizedBox(height: 12),
-            if (step.body != null) ...[
+            if (inline != null) ...[
+              _buildInlineAdaptResult(inline),
+              const SizedBox(height: 16),
+            ],
+            if (step.body != null && !replaceBody) ...[
               FormattedText(step.body!),
               const SizedBox(height: 16),
             ],
@@ -729,6 +773,9 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     if (!allStepsAnswered) {
       return _buildActivityStep(ss);
     }
+    // Текстовый результат Adapt здесь не показываем: чтение объяснения
+    // закрыто (фаза «конец активности» — только skip/replan, как на шаге
+    // «Пример»), а результат от предыдущих шагов сброшен при переходе шага.
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(20),

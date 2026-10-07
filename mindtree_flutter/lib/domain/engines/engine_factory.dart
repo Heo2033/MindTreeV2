@@ -249,6 +249,7 @@ MindtreeEngines buildEngines({
     learnerModel: learnerModel,
     reviewScheduler: review,
     sessionEngine: session,
+    scheduler: sched,
   );
 
   final mastery = MasteryEngine(

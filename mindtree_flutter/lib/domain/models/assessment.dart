@@ -73,7 +73,15 @@ class AssessmentQuestion {
   final String question;
   final List<String>? options;
   final String? correctAnswer;
+
+  /// Рубрика-критерии проверки (у открытых вопросов) либо пояснение к
+  /// закрытому. Рубрика НЕ содержит эталонного ответа — он живёт отдельно в
+  /// [referenceAnswer] (контракт `buildAssessmentPrompt`).
   final String? explanation;
+
+  /// Эталонный ответ открытого вопроса: полный образец того, что требовалось.
+  /// У закрытых вопросов — пустая строка (их проверяет `correctAnswer`).
+  final String referenceAnswer;
 
   const AssessmentQuestion({
     required this.id,
@@ -83,6 +91,7 @@ class AssessmentQuestion {
     this.options,
     this.correctAnswer,
     this.explanation,
+    this.referenceAnswer = '',
   });
 
   factory AssessmentQuestion.fromJson(Map<String, dynamic> json) => AssessmentQuestion(
@@ -93,6 +102,7 @@ class AssessmentQuestion {
         options: (json['options'] as List<dynamic>?)?.cast<String>(),
         correctAnswer: json['correctAnswer'] as String?,
         explanation: json['explanation'] as String?,
+        referenceAnswer: json['referenceAnswer'] as String? ?? '',
       );
 
   Map<String, dynamic> toJson() => {
@@ -103,6 +113,7 @@ class AssessmentQuestion {
         if (options != null) 'options': options,
         if (correctAnswer != null) 'correctAnswer': correctAnswer,
         if (explanation != null) 'explanation': explanation,
+        if (referenceAnswer.isNotEmpty) 'referenceAnswer': referenceAnswer,
       };
 }
 

@@ -11,6 +11,13 @@ import 'learner_model_service.dart';
 
 // ─── Request / result DTOs ────────────────────────────────────────────────────
 
+/// Порог «прочно освоено»: концепт с `masteryScore ≥` этого значения не
+/// включается в новый план (его место — повторения, а не изучение заново).
+/// Та же граница используется и в `planForGoal`, и в `LearningSessionEngine`
+/// при классификации уже изученного — расхождение порогов давало бы разные
+/// картины «что учить» в зависимости от точки входа.
+const double kMasteredMasteryScore = 0.7;
+
 class CurriculumRequest {
   final String topicId;
   final String topicName;
@@ -160,7 +167,7 @@ class CurriculumEngine {
   ) async {
     final profiles = await learnerSvc.getConceptProfiles(req.topicId);
     final mastered = profiles
-        .where((p) => p.masteryScore >= 0.7)
+        .where((p) => p.masteryScore >= kMasteredMasteryScore)
         .map((p) => p.nodeId)
         .toSet();
     return generate(CurriculumRequest(

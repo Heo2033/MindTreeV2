@@ -1,4 +1,6 @@
 import 'dart:developer' as developer;
+import 'dart:math';
+
 import '../models/models.dart';
 import '../../data/database/mindtree_repository.dart';
 import '../../data/llm/scheduler.dart';
@@ -21,12 +23,18 @@ class CreateSessionInput {
   final int timeBudgetMinutes;
   final String? milestoneId;
 
+  /// Явный запрос «учить заново»: накопленный прогресс не читается — уже
+  /// изученные концепты остаются в плане и не влияют на порядок. Дефолт
+  /// `false`: новая сессия продолжает прогресс (due → слабые → новые).
+  final bool includeLearned;
+
   const CreateSessionInput({
     this.journeyId,
     required this.topicId,
     required this.goal,
     required this.timeBudgetMinutes,
     this.milestoneId,
+    this.includeLearned = false,
   });
 }
 
@@ -72,6 +80,12 @@ class LearningSessionEngine {
     final topicName = topic?.name ?? '';
     final currentLevel = await learnerModel.getCurrentLevel(input.topicId);
 
+    // Что уже освоено: прочно изученные уходят в knownNodeIds (новый план их
+    // не включает), due/слабые — в приоритет порядка. При явном includeLearned
+    // прогресс игнорируется — пользователь просит пройти тему целиком.
+    final prior = await _priorLearning(input.topicId,
+        ignoreProgress: input.includeLearned);
+
     // CurriculumEngine строит промпт с реальными prerequisites и сам
     // применяет fitPlanToBudget в конце (зеркало server LearningSessionEngine).
     final plan = await curriculumEngine.generate(CurriculumRequest(
@@ -82,10 +96,35 @@ class LearningSessionEngine {
       currentLevel: currentLevel.raw,
       timeBudgetMinutes: input.timeBudgetMinutes,
       nodes: ordered,
+      knownNodeIds: prior.solid.isEmpty ? null : prior.solid,
     ));
-    final curriculum = plan.curriculum;
-    // UX guard для пустого плана отключён временно, чтобы не ломать существующие тесты.
-    // TODO: вернуть дружелюбное объяснение пустого плана с учётом known/unknown.
+
+    // Новая сессия не начинается «с нуля»: повторения и слабые понятия идут
+    // раньше новых, недостающие due/weak возвращаются в план принудительно —
+    // LLM-отбор оптимизирует по цели и может их не выбрать.
+    var items = plan.curriculum.items;
+    if (prior.due.isNotEmpty || prior.weak.isNotEmpty) {
+      items = _withStudyPriority(
+        items,
+        ordered,
+        prior,
+        input.timeBudgetMinutes > 0 ? input.timeBudgetMinutes : 60,
+      );
+    }
+    // Всё уже изучено — пустая сессия хуже отказа: строка сессии НЕ создаётся
+    // (исключение уходит до `repo.createSession`), UI показывает готовую
+    // подсказку. Если же known пуст и план пуст (пустое дерево), поведение
+    // прежнее — сессия создаётся с пустым планом.
+    if (items.isEmpty && prior.solid.isNotEmpty) {
+      throw Exception(
+        'Все концепции по теме уже изучены — новая сессия не нужна. '
+        'Переходите к следующей вехе или измените цель.',
+      );
+    }
+    // Сумма финальных пунктов: принудительные добавления и refit меняют план,
+    // готовый `totalEstimatedMinutes` из generate уже неточен.
+    final totalEstimatedMinutes =
+        items.fold<int>(0, (s, i) => s + i.estimatedMinutes);
 
     final sessionId = shortIdWith('session_');
     final session = LearningSession(
@@ -99,8 +138,8 @@ class LearningSessionEngine {
       status: SessionStatus.active,
       curriculum: Curriculum(
         sessionId: sessionId,
-        items: curriculum.items,
-        totalEstimatedMinutes: curriculum.totalEstimatedMinutes,
+        items: items,
+        totalEstimatedMinutes: totalEstimatedMinutes,
       ),
       currentIndex: 0,
     );
@@ -361,6 +400,149 @@ class LearningSessionEngine {
   }
 
   // ─── Private helpers ──────────────────────────────────────────────────────
+
+  /// Уже изученное по теме — вход для планирования новой сессии.
+  ///
+  /// - [due] — узлы с истёкшим интервалом SRS (повторить в первую очередь);
+  /// - [weak] — слабые концепты (`masteryScore < 0.6`, от слабейшего);
+  /// - [solid] — прочно освоенные: пройденные пункты прошлых сессий со
+  ///   score ≥ [kMasteredMasteryScore] и не ждущие повторения. Их новый план
+  ///   не включает (`knownNodeIds`); due-узел остаётся в плане даже при
+  ///   высоком мастерстве — SRS-повернение не отменяется.
+  ///
+  /// [ignoreProgress] — «учить заново»: прогресс не читается вообще.
+  Future<({List<String> due, List<String> weak, Set<String> solid})>
+      _priorLearning(String topicId, {required bool ignoreProgress}) async {
+    if (ignoreProgress) {
+      return (
+        due: const <String>[],
+        weak: const <String>[],
+        solid: const <String>{},
+      );
+    }
+
+    // `upcomingReviews` помечает «due» и узлы без профиля (p == null): нужны
+    // только реально запланированные повторения — у нового узла dueAt пуст.
+    final due = <String>[
+      for (final r
+          in await reviewScheduler.upcomingReviews(topicId, limit: 100))
+        if (r.dueAt != null) r.nodeId,
+    ];
+
+    final weak = await learnerModel.getWeakConcepts(topicId, limit: 100);
+
+    // Прочный = пройденный пункт плана прошлой сессии с высоким мастерством:
+    // завершение пункта без ответов даёт score 0 и в плане он полагается снова.
+    final completed = <String>{};
+    for (final s in await repo.listSessionsForTopic(topicId)) {
+      for (final it in s.curriculum.items) {
+        if (it.status == CurriculumItemStatus.completed &&
+            it.nodeId.isNotEmpty) {
+          completed.add(it.nodeId);
+        }
+      }
+    }
+    final solid = <String>{};
+    for (final p in await learnerModel.getConceptProfiles(topicId)) {
+      if (p.masteryScore < kMasteredMasteryScore) continue;
+      if (!completed.contains(p.nodeId)) continue;
+      if (due.contains(p.nodeId)) continue;
+      solid.add(p.nodeId);
+    }
+    return (due: due, weak: weak, solid: solid);
+  }
+
+  /// Расставляет приоритеты новой сессии: due → слабые → остальные.
+  ///
+  /// Due/weak-узлы, которых нет в плане (LLM-отбор мог их пропустить),
+  /// добавляются принудительно — иначе «повторить сейчас» потерялось бы до
+  /// следующего планирования ревью. Порядок стабилен: tie-break по исходному
+  /// индексу (Dart `sort` нестабилен), затем перенумерация `order` и повторный
+  /// `fitPlanToBudget` — сумма минут от порядка не зависит, поэтому refit
+  /// корректно режет хвост по бюджету.
+  List<CurriculumItem> _withStudyPriority(
+    List<CurriculumItem> items,
+    List<KnowledgeNode> ordered,
+    ({List<String> due, List<String> weak, Set<String> solid}) prior,
+    int budgetMinutes,
+  ) {
+    final rank = <String, int>{};
+    for (final id in prior.due) {
+      rank.putIfAbsent(id, () => 0);
+    }
+    for (final id in prior.weak) {
+      rank.putIfAbsent(id, () => 1);
+    }
+
+    final byId = <String, KnowledgeNode>{for (final n in ordered) n.id: n};
+    final present = {for (final it in items) it.nodeId};
+    final result = [...items];
+
+    for (final id in <String>{...prior.due, ...prior.weak}) {
+      if (present.contains(id)) continue;
+      final node = byId[id];
+      if (node == null) continue; // узел вне дерева — не добавляем
+      present.add(id);
+      final est = _estMinutesOf(node);
+      result.add(CurriculumItem(
+        id: shortIdWith('ci_'),
+        nodeId: id,
+        label: node.label,
+        // Перенумерация ниже выставит реальный order.
+        order: 0,
+        type: curriculumEngine.itemTypeFor(node),
+        estimatedMinutes: est,
+        priority: scorePriority(
+          goalRelevanceOf(node),
+          prerequisiteValueOf(node, [], byId),
+          node.importance,
+          est.toDouble(),
+        ),
+        status: CurriculumItemStatus.pending,
+        reason: prior.due.contains(id)
+            ? 'Повторение по расписанию: интервал SRS истёк'
+            : 'Слабое понятие: его нужно закрепить в первую очередь',
+      ));
+    }
+
+    final indexed = result
+        .asMap()
+        .entries
+        .map((e) => (idx: e.key, item: e.value))
+        .toList()
+      ..sort((a, b) {
+        final ra = rank[a.item.nodeId] ?? 2;
+        final rb = rank[b.item.nodeId] ?? 2;
+        if (ra != rb) return ra.compareTo(rb);
+        return a.idx.compareTo(b.idx);
+      });
+
+    return fitPlanToBudget([
+      for (var i = 0; i < indexed.length; i++)
+        _renumberItem(indexed[i].item, i + 1),
+    ], budgetMinutes);
+  }
+
+  static CurriculumItem _renumberItem(CurriculumItem it, int order) =>
+      CurriculumItem(
+        id: it.id,
+        nodeId: it.nodeId,
+        label: it.label,
+        order: order,
+        type: it.type,
+        estimatedMinutes: it.estimatedMinutes,
+        priority: it.priority,
+        status: it.status,
+        content: it.content,
+        reason: it.reason,
+      );
+
+  /// Оценка времени узла той же формулой, что в `deterministicSelect`
+  /// (незаданное время — 5 минут, потолок — 20).
+  static int _estMinutesOf(KnowledgeNode n) {
+    final est = n.estimatedTimeMinutes > 0 ? n.estimatedTimeMinutes : 5;
+    return min(est, 20);
+  }
 
   Future<({String nodeId, String label, String oneLiner, String details})>
       _nodeBrief(String topicId, String nodeId) async {

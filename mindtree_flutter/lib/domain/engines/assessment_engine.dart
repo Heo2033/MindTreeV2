@@ -79,6 +79,9 @@ List<AssessmentQuestion> _parseAssessmentResult(String raw) {
     final options = optionsRaw is List ? optionsRaw.whereType<String>().toList() : <String>[];
     final correctAnswerRaw = (q['correctAnswer'] as String?)?.trim() ?? '';
     final explanationRaw = (q['explanation'] as String?)?.trim() ?? '';
+    // Эталон полного ответа (контракт `buildAssessmentPrompt`): у закрытых
+    // вопросов и у моделей, вернувших поле вне схемы, — ''.
+    final referenceRaw = (q['referenceAnswer'] as String?)?.trim() ?? '';
     final typeStr = (q['type'] as String?)?.trim();
     final type = QuestionType.fromString(typeStr);
 
@@ -96,6 +99,7 @@ List<AssessmentQuestion> _parseAssessmentResult(String raw) {
         options: options,
         correctAnswer: resolved,
         explanation: explanationRaw,
+        referenceAnswer: referenceRaw,
       ));
       continue;
     }
@@ -112,6 +116,7 @@ List<AssessmentQuestion> _parseAssessmentResult(String raw) {
       options: const [],
       correctAnswer: '',
       explanation: explanationRaw,
+      referenceAnswer: referenceRaw,
     ));
   }
   return result;
@@ -245,6 +250,30 @@ class AssessmentEngine {
       startedAt: existing.startedAt,
       completedAt: DateTime.now().toIso8601String(),
       score: score,
+    ));
+
+    // Итоговый тест — финал сессии: статус `completed` закрывает её для
+    // репозитория (незавершённые больше не предлагаются) и для витрин
+    // (считаются завершённые сессии). Quiz и промежуточные проверки сессию
+    // не закрывают — их тип не final_.
+    final sessionId = existing.sessionId;
+    if (existing.type == AssessmentType.final_ &&
+        sessionId != null &&
+        sessionId.isNotEmpty) {
+      await _closeSession(sessionId);
+    }
+  }
+
+  /// Закрывает сессию после итоговой проверки. Идемпотентно: повторный
+  /// `finalize` не двигает уже зафиксированный `completedAt` — окна ревью и
+  /// статистика обязаны быть стабильны между прогонами.
+  Future<void> _closeSession(String sessionId) async {
+    final session = await repo.getSession(sessionId);
+    if (session == null) return;
+    if (session.status == SessionStatus.completed) return;
+    await repo.updateSession(session.copyWith(
+      status: SessionStatus.completed,
+      completedAt: DateTime.now().toIso8601String(),
     ));
   }
 

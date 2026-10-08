@@ -200,4 +200,62 @@ void main() {
       expectNoPlaceholders(p, 'explain');
     });
   });
+
+  group('assessment open-ended contract', () {
+    test('buildAssessmentPrompt разделяет referenceAnswer и explanation', () {
+      final p = buildAssessmentPrompt(
+        topic: 'Диффузионные модели',
+        goal: 'понимание',
+        sessionItems: const [
+          {
+            'nodeId': 'n1_root~1a2b3c4d',
+            'label': 'Диффузионные модели',
+            'oneLiner': 'Класс генеративных моделей',
+            'details': 'Описание',
+          },
+        ],
+        questionCount: 6,
+      );
+      expectNoPlaceholders(p, 'assessment');
+      // Поле эталонного ответа описано в инструкции, в примере JSON и в чек-листе.
+      expect(p, contains('referenceAnswer'));
+      expect(p, contains('ПОЛНЫЙ образец ответа'));
+      expect(p, contains('НЕ повторяет и не раскрывает весь referenceAnswer'));
+      expect(p, contains('referenceAnswer — только у открытых вопросов'));
+      // Рубрика остаётся рубрикой — без неё открытый вопрос непроверяем.
+      expect(p, contains('rubric (explanation) содержит конкретные критерии'));
+    });
+
+    test('parseAssessmentResult заполняет referenceAnswer, иначе пустая строка', () {
+      final qs = parseAssessmentResult({
+        'questions': [
+          {
+            'id': 'a1',
+            'type': 'explanation',
+            'nodeId': 'n1',
+            'question': 'Объясните, как работает X',
+            'options': <String>[],
+            'correctAnswer': '',
+            'explanation': 'Ключевые элементы ответа: 1) шаги, 2) причина',
+            'referenceAnswer': 'X работает так: сначала …, затем …',
+          },
+          // Модель не вернула поле вне схемы — эталон пуст, контракт цел.
+          {
+            'id': 'a2',
+            'type': 'recall',
+            'nodeId': 'n1',
+            'question': 'Что верно?',
+            'options': ['A', 'B', 'C', 'D'],
+            'correctAnswer': '0',
+            'explanation': 'Потому что …',
+          },
+        ],
+      });
+      expect(qs, hasLength(2));
+      expect(qs[0]['referenceAnswer'], 'X работает так: сначала …, затем …');
+      expect(qs[0]['explanation'], contains('Ключевые элементы'));
+      expect(qs[1]['referenceAnswer'], '');
+      expect(qs[1]['correctAnswer'], '0');
+    });
+  });
 }

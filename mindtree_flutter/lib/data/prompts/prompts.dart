@@ -1110,29 +1110,34 @@ const String promptAssessment = '# Роль\n'
     'Сгенерируй финальную проверку, используя следующие типы:\n'
     '- **recognition** — узнавание: выбери корректный вариант из четырёх (формулировка, а не заучивание)\n'
     '- **recall** — припоминание: воспроизведи определение или ключевой факт (multiple choice)\n'
-    '- **explanation** — объясни механизм своими словами (structure matters; rubric обязателен)\n'
-    '- **diagnosis** — найди и объясни ошибку/несоответствие в приведённом утверждении (rubric обязателен)\n'
-    '- **application** — примени знание к новой конкретной ситуации (rubric обязателен)\n'
-    '- **transfer** — перенеси знание на смежную/нестандартную ситуацию (rubric обязателен)\n'
+    '- **explanation** — объясни механизм своими словами (structure matters; rubric и referenceAnswer обязательны)\n'
+    '- **diagnosis** — найди и объясни ошибку/несоответствие в приведённом утверждении (rubric и referenceAnswer обязательны)\n'
+    '- **application** — примени знание к новой конкретной ситуации (rubric и referenceAnswer обязательны)\n'
+    '- **transfer** — перенеси знание на смежную/нестандартную ситуацию (rubric и referenceAnswer обязательны)\n'
     '\n'
     'Всего {{question_count}} вопросов. Обеспечь разнообразие типов: это должен быть честный замер, а не только фактология.\n'
-    'Для recognition/recall укажи options и correctAnswer (индекс корректного варианта, начиная с 0).\n'
-    'Для explanation/diagnosis/application/transfer — options=[] и correctAnswer=""; '
-    'explanation (рубрика) содержит конкретные критерии оценивания: какие элементы должны присутствовать в свободном ответе.\n'
+    'Для recognition/recall укажи options и correctAnswer (индекс корректного варианта, начиная с 0), referenceAnswer — пустая строка.\n'
+    'Для explanation/diagnosis/application/transfer — options=[] и correctAnswer="". '
+    'Эти вопросы имеют два независимых текстовых поля, не смешивай их роли:\n'
+    '- referenceAnswer — ПОЛНЫЙ образец ответа: развёрнуто, своими словами, что ученик должен был назвать и разъяснить, '
+    'чтобы ответ засчитали. Это НЕ определение и не пересказ one_liner — это готовый ответ на вопрос целиком.\n'
+    '- explanation — рубрика для проверки: короткий список ключевых элементов («1) …, 2) …»), по которым сверяется ответ ученика. '
+    'Рубрика НЕ повторяет и не раскрывает весь referenceAnswer — только критерии проверки.\n'
     '\n'
     '# Формат ответа\n'
     'Строгий JSON-объект:\n'
-    '{"questions":[{"id":"a1","type":"recall","nodeId":"n2_a","question":"...","options":["A","B","C","D"],"correctAnswer":"0","explanation":"..."},{"id":"a2","type":"explanation","nodeId":"n2_b","question":"Объясните своими словами, как работает X (порядок шагов, причинно-следственные связи).","options":[],"correctAnswer":"","explanation":"Ключевые элементы ответа: 1) ..., 2) ..."}]}\n'
+    '{"questions":[{"id":"a1","type":"recall","nodeId":"n2_a","question":"...","options":["A","B","C","D"],"correctAnswer":"0","explanation":"...","referenceAnswer":""},{"id":"a2","type":"explanation","nodeId":"n2_b","question":"Объясните своими словами, как работает X (порядок шагов, причинно-следственные связи).","options":[],"correctAnswer":"","explanation":"Ключевые элементы ответа: 1) ..., 2) ...","referenceAnswer":"X работает так: сначала ..., затем ...; например, ..."}]}\n'
     '\n'
     '# Примечания\n'
     '- correctAnswer для recognition/recall — ИНДЕКС правильного варианта (строка "0","1","2","3").\n'
+    '- referenceAnswer — только у открытых вопросов; у recognition/recall он пустой.\n'
     '- Вопросы проверяют глубокое понимание, не поверхностную фактологию.\n'
     '\n'
     '$noMetaRule\n'
     '$alphabetRule\n'
     '\n'
     '# Язык\n'
-    'Отвечай СТРОГО на русском языке. Вопросы, варианты, рубрики — на русском.\n'
+    'Отвечай СТРОГО на русском языке. Вопросы, варианты, рубрики, эталонные ответы — на русском.\n'
     '\n'
     'Никакого текста вне JSON. Без ```json и без пояснений.\n'
     '\n'
@@ -1140,6 +1145,8 @@ const String promptAssessment = '# Роль\n'
     '- [ ] Ровно {{question_count}} вопросов\n'
     '- [ ] Есть вопросы с options (recognition/recall) и открытые вопросы (explanation/diagnosis/application/transfer)\n'
     '- [ ] У всех открытых вопросов rubric (explanation) содержит конкретные критерии\n'
+    '- [ ] У всех открытых вопросов заполнен referenceAnswer — полный образец ответа, а explanation остаётся краткой рубрикой без дублирования эталона\n'
+    '- [ ] У recognition/recall referenceAnswer пустой\n'
     '- [ ] Вопросы проверяют глубокое понимание, не поверхностную фактологию\n'
     '- [ ] Формат — строго JSON с ключом "questions"';
 
@@ -1187,6 +1194,7 @@ List<Map<String, dynamic>> parseAssessmentResult(dynamic data) {
     final opts = q['options'];
     final ca = q['correctAnswer'];
     final explanation = q['explanation'];
+    final referenceAnswer = q['referenceAnswer'];
     return {
       'id': id is String ? id : 'a_${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}',
       'type': type is String ? type : 'recall',
@@ -1197,6 +1205,9 @@ List<Map<String, dynamic>> parseAssessmentResult(dynamic data) {
           : <String>[],
       'correctAnswer': ca is String ? ca : '',
       'explanation': explanation is String ? explanation : '',
+      // Эталонный ответ открытого вопроса: полный образец (не рубрика).
+      // У закрытых вопросов и у моделей, вернувших поле вне схемы, — ''.
+      'referenceAnswer': referenceAnswer is String ? referenceAnswer : '',
     };
   }).toList();
 }

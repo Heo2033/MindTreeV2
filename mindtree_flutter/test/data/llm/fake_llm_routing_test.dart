@@ -515,11 +515,17 @@ void main() {
         if (isClosed) {
           expect(options, hasLength(4));
           expect(int.parse(q['correctAnswer'] as String), inInclusiveRange(0, 3));
+          // Эталонный ответ — только у открытых вопросов.
+          expect(q['referenceAnswer'] as String, isEmpty);
         } else {
           expect(options, isEmpty);
           expect(q['correctAnswer'] as String, isEmpty);
           // Для открытых типов explanation — это рубрика.
           expect(q['explanation'] as String, contains('Рубрика'));
+          // Открытый вопрос несёт полный эталон отдельно от рубрики.
+          final reference = q['referenceAnswer'] as String;
+          expect(reference, isNotEmpty);
+          expect(reference, isNot(q['explanation'] as String));
         }
         expect(q['nodeId'], isNotEmpty);
       }

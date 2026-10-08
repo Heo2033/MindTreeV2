@@ -139,6 +139,8 @@ assessment → mastery → milestones`) и кладёт в `--out`:
 - Probe: команда выше, `--mock` достаточно; полный набор команд — `tool/probe/README.md`.
 - Дистрибуция (Windows): `tool/build_release.ps1` — `flutter build windows --release` и упаковка
   в `dist/mindtree_windows-<version>.zip`; CI см. `.github/workflows/ci.yml`.
+- Android: `flutter build apk --release` (сборка; нужен JDK 17 — `flutter config --jdk-dir="C:\Program Files\Eclipse Adoptium\jdk-17.0.20.101-hotspot"`;
+  JBR Android Studio 25 несовместим с Gradle 8.14). Release подписан debug-ключом — ок для выдачи, для Play нужен свой keystore.
 - TS-стек: `npm run typecheck`, `npm run lint`, `npm run test` (vitest), сборка `npm run build:all`.
 - При правках всегда прогоняй соответствующие тесты (см. `.opencode/command/`).
 

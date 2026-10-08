@@ -1,6 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- LLM API вызывается по HTTPS прямо из приложения (release-сборка без
+         этого пермишена не сможет ходить в сеть: debug подмешивает его сам). -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <application
-        android:label="mindtree_flutter"
+        android:label="MindTree"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

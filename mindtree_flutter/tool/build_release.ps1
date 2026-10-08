@@ -39,3 +39,11 @@ if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip }
 Compress-Archive -Path (Join-Path $releaseDir '*') -DestinationPath $zip -Force
 
 Write-Output "Done: $zip"
+
+# Android: copy release APK if present (built separately via flutter build apk --release).
+$apk = Join-Path $root 'build\app\outputs\flutter-apk\app-release.apk'
+if (Test-Path -LiteralPath $apk) {
+    $apkOut = Join-Path $dist "mindtree_android-$version.apk"
+    Copy-Item -LiteralPath $apk -Destination $apkOut -Force
+    Write-Output "Done: $apkOut"
+}

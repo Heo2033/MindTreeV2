@@ -1,0 +1,50 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'mindtree_flutter/**'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    paths:
+      - 'mindtree_flutter/**'
+      - '.github/workflows/ci.yml'
+  workflow_dispatch:
+
+jobs:
+  flutter-checks:
+    name: analyze + test + probe + release build
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: mindtree_flutter
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Static analysis
+        run: flutter analyze --no-pub
+
+      - name: Tests
+        run: flutter test --no-pub
+
+      - name: Probe (mock, детерминированный прогон доменного ядра)
+        run: dart run tool/probe/bin/mindtree_probe.dart --mock --out build/probe-ci
+
+      - name: Release build (windows)
+        run: flutter build windows --release --no-pub
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mindtree-windows
+          path: mindtree_flutter/build/windows/x64/runner/Release/
+          if-no-files-found: error

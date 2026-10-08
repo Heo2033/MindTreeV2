@@ -65,11 +65,13 @@ class TopicNotifier extends StateNotifier<TopicState> {
     }
   }
 
+  /// Создание темы. Бюджет времени здесь не участвует: `Topic` берёт свой
+  /// default (60) из модели, а реальный вопрос «сколько времени есть»
+  /// задаётся на входе в сессию/веху.
   Future<Topic> createTopic(
     String name, {
     String? goal,
     String? targetLevel,
-    int timeBudgetMinutes = 60,
   }) async {
     final repo = _repo!;
     final id = _generateId();
@@ -78,7 +80,6 @@ class TopicNotifier extends StateNotifier<TopicState> {
       name: name,
       goal: LearningGoal.fromString(goal),
       targetLevel: MasteryLevel.fromString(targetLevel),
-      timeBudgetMinutes: timeBudgetMinutes,
       createdAt: DateTime.now().toIso8601String(),
     );
     await repo.createTopic(topic);
@@ -234,6 +235,9 @@ class GraphNotifier extends StateNotifier<GraphState> {
     state = state.copyWith(topicId: id);
   }
 
+  /// Генерация дерева. [timeBudgetMinutes] опционален и больше не приходит
+  /// из UI (бюджет спрашивается на входе в сессию): его передают probe и
+  /// тесты через engine_factory.
   Future<void> generateTree(
     String query, {
     String? goal,

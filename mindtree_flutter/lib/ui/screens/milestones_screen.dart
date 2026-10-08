@@ -12,6 +12,7 @@ import 'package:mindtree_flutter/ui/widgets/button.dart';
 import 'package:mindtree_flutter/ui/widgets/error_banner.dart';
 import 'package:mindtree_flutter/ui/widgets/progress_bar.dart';
 import 'package:mindtree_flutter/ui/widgets/spinner.dart';
+import 'package:mindtree_flutter/ui/widgets/time_budget_picker.dart';
 
 class MilestonesScreen extends ConsumerStatefulWidget {
   final String topicId;
@@ -133,13 +134,18 @@ class _MilestonesScreenState extends ConsumerState<MilestonesScreen> {
     }
   }
 
+  /// Старт сессии вехи: сначала спрашиваем, сколько времени есть (это и есть
+  /// «Успеваю только…» до старта). Отмена пикера — сессию не запускаем.
   Future<void> _startSession(String? milestoneId) async {
+    final minutes = await showTimeBudgetPicker(context, initial: 30);
+    if (!mounted || minutes == null) return;
     final session = ref.read(sessionStoreProvider.notifier);
     setState(() => _starting = true);
     await session.createSession(
       widget.topicId,
       goal: 'milestone',
       milestoneId: milestoneId,
+      timeBudget: minutes,
     );
     await session.startStudy('');
     if (!mounted) return;

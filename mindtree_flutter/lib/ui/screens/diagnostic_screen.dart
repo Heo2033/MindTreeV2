@@ -410,9 +410,10 @@ class _DiagnosticScreenState extends ConsumerState<DiagnosticScreen> {
     );
   }
 
-  /// Оценка времени плана. Приоритет источников: план уже существующей
-  /// сессии темы → сумма оценок понятий, которые предстоит разобрать →
-  /// бюджет темы. `null` — показывать нечего, бейдж не рисуется.
+  /// Оценка времени плана. Источники: план уже существующей сессии темы →
+  /// сумма оценок понятий, которые предстоит разобрать. Бюджет темы НЕ
+  /// используется (он больше не задаётся при создании темы). `null` —
+  /// показывать нечего, бейдж не рисуется.
   int? _planMinutes(GraphState graph, SessionState session) {
     final active = session.session ?? session.resumable;
     if (active != null &&
@@ -427,8 +428,7 @@ class _DiagnosticScreenState extends ConsumerState<DiagnosticScreen> {
         .fold<int>(0, (sum, n) => sum + n.estimatedTimeMinutes);
     if (byNodes > 0) return byNodes;
 
-    final budget = graph.topic?.timeBudgetMinutes ?? 0;
-    return budget > 0 ? budget : null;
+    return null;
   }
 
   /// «Почему выбраны эти понятия»: сначала reasons пунктов плана активной

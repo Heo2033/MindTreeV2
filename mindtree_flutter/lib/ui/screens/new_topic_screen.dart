@@ -10,9 +10,12 @@ import 'package:mindtree_flutter/ui/widgets/error_banner.dart';
 import 'package:mindtree_flutter/ui/widgets/inputs.dart';
 import 'package:mindtree_flutter/ui/widgets/progress_bar.dart';
 
-/// Создание темы: одна обязательная тема, реальный бюджет времени,
-/// необязательные уточнения. После генерации — сразу диагностика,
-/// чтобы понять исходный уровень, а не смотреть на пустой граф.
+/// Создание темы: тема, необязательные уточнения, цель и целевой уровень.
+/// Бюджет времени здесь НЕ спрашивается: «уровень × минуты» даёт ложное
+/// обещание «стать экспертом за 30 минут». Сколько времени есть — вопрос
+/// на входе в сессию/веху (пикер `showTimeBudgetPicker`). После генерации —
+/// сразу диагностика, чтобы понять исходный уровень, а не смотреть на пустой
+/// граф.
 class NewTopicScreen extends ConsumerStatefulWidget {
   const NewTopicScreen({super.key});
 
@@ -23,18 +26,11 @@ class NewTopicScreen extends ConsumerStatefulWidget {
 class _NewTopicScreenState extends ConsumerState<NewTopicScreen> {
   final _topicController = TextEditingController();
   final _notesController = TextEditingController();
-  final _customBudgetController = TextEditingController(text: '45');
 
   String _goal = 'overview';
   String _level = 'solid_understanding';
-  int _budgetMinutes = 30;
-  bool _customBudget = false;
   bool _running = false;
   String? _error;
-
-  static const int _minBudget = 5;
-  static const int _maxBudget = 600;
-  static const List<int> _budgetPresets = [15, 30, 60, 120];
 
   static const _goalOptions = <({String value, String label})>[
     (value: 'overview', label: 'Обзор'),
@@ -55,21 +51,11 @@ class _NewTopicScreenState extends ConsumerState<NewTopicScreen> {
   void dispose() {
     _topicController.dispose();
     _notesController.dispose();
-    _customBudgetController.dispose();
     super.dispose();
   }
 
-  /// Бюджет в минутах, реально уходящий в план.
-  int get _effectiveBudget {
-    if (!_customBudget) return _budgetMinutes;
-    return int.tryParse(_customBudgetController.text.trim()) ?? 0;
-  }
-
-  bool get _budgetValid =>
-      _effectiveBudget >= _minBudget && _effectiveBudget <= _maxBudget;
-
   bool get _canSubmit {
-    return _topicController.text.trim().isNotEmpty && !_running && _budgetValid;
+    return _topicController.text.trim().isNotEmpty && !_running;
   }
 
   /// Запрос для дерева: тема плюс уточнения, если они есть.
@@ -87,14 +73,12 @@ class _NewTopicScreenState extends ConsumerState<NewTopicScreen> {
     try {
       final topicNotifier = ref.read(topicStoreProvider.notifier);
       final graphNotifier = ref.read(graphStoreProvider.notifier);
-      final budget = _effectiveBudget;
       final name = _topicController.text.trim();
 
       final topic = await topicNotifier.createTopic(
         name,
         goal: _goal,
         targetLevel: _level,
-        timeBudgetMinutes: budget,
       );
 
       // Тема должна быть доступна экранам до смены маршрута.
@@ -104,7 +88,6 @@ class _NewTopicScreenState extends ConsumerState<NewTopicScreen> {
         _buildQuery(),
         goal: _goal,
         level: _level,
-        timeBudgetMinutes: budget,
       );
 
       if (!mounted) return;
@@ -186,20 +169,6 @@ class _NewTopicScreenState extends ConsumerState<NewTopicScreen> {
                   maxLines: 2,
                 ),
                 const SizedBox(height: 20),
-                _TimeBudgetField(
-                  presets: _budgetPresets,
-                  minutes: _budgetMinutes,
-                  custom: _customBudget,
-                  customController: _customBudgetController,
-                  valid: _budgetValid,
-                  onPreset: (m) => setState(() {
-                    _customBudget = false;
-                    _budgetMinutes = m;
-                  }),
-                  onCustom: (v) => setState(() => _customBudget = v),
-                  onCustomText: (_) => setState(() {}),
-                ),
-                const SizedBox(height: 20),
                 AppSelect(
                   label: 'Цель',
                   value: _goal,
@@ -255,15 +224,6 @@ class _NewTopicScreenState extends ConsumerState<NewTopicScreen> {
                   icon: Icons.auto_awesome,
                   onPressed: _canSubmit ? _submit : null,
                 ),
-                if (!_budgetValid) ...[
-                  const SizedBox(height: 8),
-                  Text(
-                    'Бюджет времени: от $_minBudget до $_maxBudget минут',
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: Theme.of(context).colorScheme.error,
-                        ),
-                  ),
-                ],
               ],
             ),
           ),
@@ -303,80 +263,5 @@ class _NewTopicScreenState extends ConsumerState<NewTopicScreen> {
       default:
         return 'Инициализация';
     }
-  }
-}
-
-/// Реальный выбор бюджета времени: пресеты или своё значение.
-class _TimeBudgetField extends StatelessWidget {
-  final List<int> presets;
-  final int minutes;
-  final bool custom;
-  final TextEditingController customController;
-  final bool valid;
-  final ValueChanged<int> onPreset;
-  final ValueChanged<bool> onCustom;
-  final ValueChanged<String> onCustomText;
-
-  const _TimeBudgetField({
-    required this.presets,
-    required this.minutes,
-    required this.custom,
-    required this.customController,
-    required this.valid,
-    required this.onPreset,
-    required this.onCustom,
-    required this.onCustomText,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return AppField(
-      label: 'Сколько времени есть',
-      hint: 'План подстроится под бюджет: короткий путь до цели, '
-          'а не бесконечный список тем.',
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              for (final m in presets)
-                ChoiceChip(
-                  selected: !custom && minutes == m,
-                  onSelected: (_) => onPreset(m),
-                  label: Text(_formatMinutes(m)),
-                  visualDensity: VisualDensity.compact,
-                ),
-              ChoiceChip(
-                selected: custom,
-                onSelected: onCustom,
-                label: const Text('Другое'),
-                visualDensity: VisualDensity.compact,
-              ),
-            ],
-          ),
-          if (custom) ...[
-            const SizedBox(height: 12),
-            AppInput(
-              label: 'Минут',
-              controller: customController,
-              keyboardType: TextInputType.number,
-              onChanged: onCustomText,
-              errorText: valid
-                  ? null
-                  : 'Введите целое число минут в допустимом диапазоне',
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  static String _formatMinutes(int m) {
-    if (m < 60) return '$m мин';
-    final h = m ~/ 60;
-    final rest = m % 60;
-    return rest == 0 ? '$h ч' : '$h ч $rest мин';
   }
 }

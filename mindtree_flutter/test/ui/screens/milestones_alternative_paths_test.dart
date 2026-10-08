@@ -1,7 +1,8 @@
 // Шаг 5 аудита (Continue): alternativePaths движок сохраняет вместе с вехой,
 // но экран их не показывал. Здесь — рендер «возможных направлений» и статус
 // «не готовы», когда данных нет, плюс то, что действие у направления то же,
-// что у основного пути: старт сессии вехи.
+// что у основного пути: старт сессии вехи — через пикер бюджета времени
+// («сколько у меня сейчас времени» задаётся на входе в сессию).
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -14,6 +15,7 @@ import 'package:mindtree_flutter/domain/models/models.dart';
 import 'package:mindtree_flutter/providers/app_providers.dart';
 import 'package:mindtree_flutter/providers/ui_stores.dart';
 import 'package:mindtree_flutter/ui/screens/milestones_screen.dart';
+import 'package:mindtree_flutter/ui/widgets/button.dart';
 
 const _topicId = 't1';
 
@@ -29,6 +31,7 @@ class FakeSessionNotifier extends SessionNotifier {
   FakeSessionNotifier(super.ref);
 
   final List<String?> createdMilestones = [];
+  final List<int> createdBudgets = [];
 
   @override
   Future<void> createSession(
@@ -38,6 +41,7 @@ class FakeSessionNotifier extends SessionNotifier {
     int timeBudget = 30,
   }) async {
     createdMilestones.add(milestoneId);
+    createdBudgets.add(timeBudget);
   }
 
   @override
@@ -159,10 +163,34 @@ void main() {
     await tester.tap(find.text('Начать сессию').first);
     await tester.pumpAndSettle();
 
+    // Старт перехватывает пикер бюджета — без подтверждения сессии нет.
+    expect(find.text('Сколько времени у тебя есть?'), findsOneWidget);
+    expect(session.createdMilestones, isEmpty);
+
+    await tester.tap(find.widgetWithText(AppButton, 'Начать'));
+    await tester.pumpAndSettle();
+
     expect(session.createdMilestones, ['ms_active'],
         reason: 'действие направления — та же сессия вехи, что и у основного пути');
+    expect(session.createdBudgets, [30],
+        reason: 'бюджет — из выбранного в пикере, а не из темы');
     expect(router.routerDelegate.currentConfiguration.uri.path,
         '/topic/learn/session');
+  });
+
+  testWidgets('отмена пикера не запускает сессию', (tester) async {
+    final repo = await _seedDb();
+    final (_, session, router) = await _pumpScreen(tester, repo);
+
+    await tester.tap(find.text('Начать сессию').first);
+    await tester.pumpAndSettle();
+    expect(find.text('Сколько времени у тебя есть?'), findsOneWidget);
+
+    await tester.tap(find.widgetWithText(AppButton, 'Отмена'));
+    await tester.pumpAndSettle();
+
+    expect(session.createdMilestones, isEmpty);
+    expect(router.routerDelegate.currentConfiguration.uri.path, '/');
   });
 
   testWidgets('без данных об альтернативах — статус «пока не готовы»',

@@ -161,7 +161,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                           const SizedBox(width: 8),
                                           Expanded(
                                             child: Text(
-                                              'Цель: ${goalLabel[topic.goal.raw] ?? topic.goal.raw} · ${topic.timeBudgetMinutes} мин',
+                                              'Цель: ${goalLabel[topic.goal.raw] ?? topic.goal.raw}',
                                               style: Theme.of(context)
                                                   .textTheme
                                                   .bodySmall

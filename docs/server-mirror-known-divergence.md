@@ -29,6 +29,7 @@
 | 6 | `markItemCompleted`: качество выводится из результатов шагов активности, не хардкод `'correct'`; `evidence: {}` («закрыть концепт» — не ответ) | `lib/domain/engines/learning_session_engine.dart`, `lib/domain/lib/activity_blob.dart` | `server/src/domain/LearningSessionEngine.ts` |
 | 7 | `LearningActivityService` получает `FeedbackEngine`, приватные `_evaluateRecall`/`_evaluateApply` удалены; событие `activity_answer` несёт `evaluated`/`score` | `lib/domain/engines/learning_activity_service.dart` | `server/src/domain/LearningActivityService.ts` |
 | 8 | Тип-контракт: `AnswerFeedback.evaluated`, quality-литералы, `MisconceptionType.defaultDescription` | `lib/domain/models/mastery.dart` | `packages/types/src/mastery.ts`, `packages/types/src/learning.ts` |
+| 9 | **Бюджет времени — параметр сессии, не темы.** UI больше не задаёт `Topic.timeBudgetMinutes` при создании темы (убирает ложное обещание «уровень за N минут»); время спрашивается на входе в сессию/веху (`showTimeBudgetPicker` → `createSession(timeBudget:)`). Поле остаётся в модели/схеме с default 60 (не удалено, чтобы не мигрировать БД); в куррикулум бюджет попадает только из `CreateSessionInput.timeBudgetMinutes` | `lib/ui/screens/new_topic_screen.dart`, `lib/ui/widgets/time_budget_picker.dart` | `server/src/domain/CurriculumEngine.ts` (поле темы по-прежнему используется как budget по умолчанию) |
 
 ## Если зеркалирование всё же понадобится (по явной просьбе)
 

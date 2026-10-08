@@ -11,6 +11,7 @@ import 'package:mindtree_flutter/ui/widgets/button.dart';
 import 'package:mindtree_flutter/ui/widgets/error_banner.dart';
 import 'package:mindtree_flutter/ui/widgets/formatted_text.dart';
 import 'package:mindtree_flutter/ui/widgets/spinner.dart';
+import 'package:mindtree_flutter/ui/widgets/time_budget_picker.dart';
 import 'package:mindtree_flutter/ui/widgets/topic_meta_bar.dart';
 
 const Map<String, String> _conceptTypeLabel = {
@@ -134,10 +135,18 @@ class _FocusScreenState extends ConsumerState<FocusScreen> {
     }
   }
 
+  /// Старт сессии раздела: сначала пикер «сколько времени есть» — бюджет
+  /// ограничивает план сессии. Отмена — сессию не запускаем.
   Future<void> _startSession({String? nodeId}) async {
+    final minutes = await showTimeBudgetPicker(context, initial: 30);
+    if (!mounted || minutes == null) return;
     final session = ref.read(sessionStoreProvider.notifier);
     setState(() => _starting = true);
-    await session.createSession(widget.topicId, goal: 'deep');
+    await session.createSession(
+      widget.topicId,
+      goal: 'deep',
+      timeBudget: minutes,
+    );
     await session.startStudy(nodeId ?? _focusNodeId ?? '');
     if (!mounted) return;
     setState(() => _starting = false);

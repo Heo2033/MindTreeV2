@@ -13,6 +13,7 @@ import 'package:mindtree_flutter/ui/widgets/error_banner.dart';
 import 'package:mindtree_flutter/ui/widgets/formatted_text.dart';
 import 'package:mindtree_flutter/ui/widgets/progress_bar.dart';
 import 'package:mindtree_flutter/ui/widgets/spinner.dart';
+import 'package:mindtree_flutter/ui/widgets/topic_meta_bar.dart';
 
 class DiagnosticScreen extends ConsumerStatefulWidget {
   final String topicId;
@@ -269,6 +270,7 @@ class _DiagnosticScreenState extends ConsumerState<DiagnosticScreen> {
   }
 
   Widget _buildResult() {
+    final graph = ref.watch(graphStoreProvider);
     final result = _result!;
     final pct = (result.score * 100).round();
     final levelRaw = result.currentLevel;
@@ -324,7 +326,10 @@ class _DiagnosticScreenState extends ConsumerState<DiagnosticScreen> {
                   runSpacing: 8,
                   children: [
                     for (final c in result.knownConcepts)
-                      StatusBadge(c, variant: BadgeVariant.success),
+                      StatusBadge(
+                        _conceptLabel(graph, c),
+                        variant: BadgeVariant.success,
+                      ),
                   ],
                 ),
               ],
@@ -342,7 +347,10 @@ class _DiagnosticScreenState extends ConsumerState<DiagnosticScreen> {
                   runSpacing: 8,
                   children: [
                     for (final c in result.unknownConcepts)
-                      StatusBadge(c, variant: BadgeVariant.warning),
+                      StatusBadge(
+                        _conceptLabel(graph, c),
+                        variant: BadgeVariant.warning,
+                      ),
                   ],
                 ),
               ],
@@ -353,6 +361,10 @@ class _DiagnosticScreenState extends ConsumerState<DiagnosticScreen> {
                 icon: Icons.replay,
                 onPressed: _startDiagnostic,
               ),
+              const SizedBox(height: 16),
+              // Шаг 8 аудита (Plan): что дальше, сколько займёт и почему
+              // выбраны именно эти понятия — между результатом и «К графу».
+              _buildPlanCard(),
               const SizedBox(height: 8),
               AppButton(
                 'К графу',
@@ -365,6 +377,212 @@ class _DiagnosticScreenState extends ConsumerState<DiagnosticScreen> {
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  /// Подпись понятия для бейджей результата: технический id из движка
+  /// заменяется на название из дерева, если оно уже загружено.
+  String _conceptLabel(GraphState graph, String id) {
+    for (final n in graph.nodes) {
+      if (n.id == id && n.label.trim().isNotEmpty) return n.label.trim();
+    }
+    return id;
+  }
+
+  /// Карточка «Твой план»: цель, целевой уровень, оценка времени и причины
+  /// выбранных понятий. Данные — из уже загруженной темы, активной сессии
+  /// (план и её reasons) и самих вопросов диагностики.
+  Widget _buildPlanCard() {
+    final graph = ref.watch(graphStoreProvider);
+    final session = ref.watch(sessionStoreProvider);
+    final result = _result!;
+    final known = result.knownConcepts.toSet().length;
+    final checked = {...result.knownConcepts, ...result.unknownConcepts}.length;
+
+    return _PlanCard(
+      goal: goalText(graph.topic),
+      targetLevel: targetLevelText(graph.topic),
+      minutes: _planMinutes(graph, session),
+      knownCount: known,
+      checkedCount: checked,
+      reasons: _planReasons(graph, session),
+    );
+  }
+
+  /// Оценка времени плана. Приоритет источников: план уже существующей
+  /// сессии темы → сумма оценок понятий, которые предстоит разобрать →
+  /// бюджет темы. `null` — показывать нечего, бейдж не рисуется.
+  int? _planMinutes(GraphState graph, SessionState session) {
+    final active = session.session ?? session.resumable;
+    if (active != null &&
+        active.topicId == widget.topicId &&
+        active.curriculum.totalEstimatedMinutes > 0) {
+      return active.curriculum.totalEstimatedMinutes;
+    }
+
+    final unknown = _result!.unknownConcepts.toSet();
+    final byNodes = graph.nodes
+        .where((n) => unknown.contains(n.id))
+        .fold<int>(0, (sum, n) => sum + n.estimatedTimeMinutes);
+    if (byNodes > 0) return byNodes;
+
+    final budget = graph.topic?.timeBudgetMinutes ?? 0;
+    return budget > 0 ? budget : null;
+  }
+
+  /// «Почему выбраны эти понятия»: сначала reasons пунктов плана активной
+  /// сессии, иначе — сам факт диагностики (на понятие не получилось ответить).
+  List<_PlanReason> _planReasons(GraphState graph, SessionState session) {
+    final labels = {for (final n in graph.nodes) n.id: n.label};
+
+    final active = session.session ?? session.resumable;
+    if (active != null && active.topicId == widget.topicId) {
+      final fromPlan = <_PlanReason>[];
+      for (final item in active.curriculum.items) {
+        final reason = (item.reason ?? '').trim();
+        if (reason.isEmpty) continue;
+        final label = (item.label ?? labels[item.nodeId] ?? '').trim();
+        if (label.isEmpty) continue;
+        fromPlan.add(_PlanReason(label, reason));
+      }
+      if (fromPlan.isNotEmpty) return fromPlan;
+    }
+
+    final questionByNode = {
+      for (final q in _questions ?? const <DiagnosticQuestion>[]) q.nodeId: q,
+    };
+    final reasons = <_PlanReason>[];
+    final seen = <String>{};
+    for (final id in _result!.unknownConcepts) {
+      if (!seen.add(id)) continue;
+      final label = (labels[id] ?? '').trim();
+      if (label.isEmpty) continue;
+      final question = (questionByNode[id]?.question ?? '').trim();
+      reasons.add(_PlanReason(
+        label,
+        question.isNotEmpty
+            ? 'Не получилось ответить на диагностике: «$question»'
+            : 'Не получилось ответить на диагностике — разберём понятие первым.',
+      ));
+    }
+    return reasons;
+  }
+}
+
+/// Причина попадания понятия в план: подпись понятия и короткое объяснение.
+class _PlanReason {
+  final String label;
+  final String text;
+
+  const _PlanReason(this.label, this.text);
+}
+
+/// Компактная карточка «Твой план»: цель и уровень, оценка времени,
+/// что уже освоено и почему выбраны эти понятия.
+class _PlanCard extends StatelessWidget {
+  final String? goal;
+  final String? targetLevel;
+  final int? minutes;
+  final int knownCount;
+  final int checkedCount;
+  final List<_PlanReason> reasons;
+
+  const _PlanCard({
+    this.goal,
+    this.targetLevel,
+    this.minutes,
+    this.knownCount = 0,
+    this.checkedCount = 0,
+    this.reasons = const [],
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: scheme.primaryContainer.withValues(alpha: 0.25),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: scheme.primary.withValues(alpha: 0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.route_outlined, size: 18, color: scheme.primary),
+              const SizedBox(width: 8),
+              Text(
+                'Твой план',
+                style: theme.textTheme.titleSmall
+                    ?.copyWith(fontWeight: FontWeight.w700),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              if (goal != null && goal!.isNotEmpty)
+                StatusBadge('Цель: $goal', icon: Icons.flag_outlined),
+              if (targetLevel != null && targetLevel!.isNotEmpty)
+                StatusBadge(
+                  'Целевой уровень: $targetLevel',
+                  icon: Icons.school_outlined,
+                ),
+              if (minutes != null)
+                StatusBadge('⏱ ≈ $minutes мин', icon: Icons.schedule),
+            ],
+          ),
+          if (checkedCount > 0) ...[
+            const SizedBox(height: 10),
+            Text(
+              'Освоено $knownCount из $checkedCount проверенных понятий — '
+              'стартуем с текущего уровня.',
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: scheme.onSurfaceVariant),
+            ),
+          ],
+          const SizedBox(height: 12),
+          Text(
+            'Почему выбраны эти понятия',
+            style: theme.textTheme.labelSmall?.copyWith(color: scheme.outline),
+          ),
+          const SizedBox(height: 6),
+          if (reasons.isEmpty)
+            Text(
+              'Понятия выбраны по результатам диагностики.',
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: scheme.onSurfaceVariant),
+            )
+          else
+            for (final reason in reasons)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      reason.label,
+                      style: theme.textTheme.bodySmall
+                          ?.copyWith(fontWeight: FontWeight.w700),
+                    ),
+                    Text(
+                      reason.text,
+                      style: theme.textTheme.bodySmall
+                          ?.copyWith(color: scheme.onSurfaceVariant),
+                    ),
+                  ],
+                ),
+              ),
+        ],
       ),
     );
   }

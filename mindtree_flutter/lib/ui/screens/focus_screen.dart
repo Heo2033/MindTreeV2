@@ -11,6 +11,7 @@ import 'package:mindtree_flutter/ui/widgets/button.dart';
 import 'package:mindtree_flutter/ui/widgets/error_banner.dart';
 import 'package:mindtree_flutter/ui/widgets/formatted_text.dart';
 import 'package:mindtree_flutter/ui/widgets/spinner.dart';
+import 'package:mindtree_flutter/ui/widgets/topic_meta_bar.dart';
 
 const Map<String, String> _conceptTypeLabel = {
   'topic': 'Тема',
@@ -147,6 +148,7 @@ class _FocusScreenState extends ConsumerState<FocusScreen> {
   Widget build(BuildContext context) {
     final graph = ref.watch(graphStoreProvider);
     final learner = ref.watch(learnerStoreProvider);
+    final session = ref.watch(sessionStoreProvider);
     final scheme = Theme.of(context).colorScheme;
     final theme = Theme.of(context);
 
@@ -193,6 +195,14 @@ class _FocusScreenState extends ConsumerState<FocusScreen> {
               _Header(
                 topicName: graph.topicName ?? widget.topicId,
                 onBack: () => context.go('/topic/learn/graph'),
+              ),
+              // Шаг 9 аудита (§81): цель, уровень и оценка времени —
+              // компактными бейджами под заголовком, без лишнего шума.
+              TopicMetaBar(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+                goal: goalText(graph.topic),
+                level: targetLevelText(graph.topic),
+                time: topicTimeLabel(session, widget.topicId),
               ),
               Expanded(
                 child: focus == null

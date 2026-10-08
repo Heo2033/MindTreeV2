@@ -484,6 +484,28 @@ class _MilestoneRow extends StatelessWidget {
                   ?.copyWith(color: scheme.outline),
             ),
             const SizedBox(height: 10),
+            // Альтернативные пути к этой же вехе: движок сохраняет их вместе
+            // с вехой (см. _markStatus), здесь они только показываются.
+            if (milestone.alternativePaths.isNotEmpty) ...[
+              Text(
+                'Возможные направления',
+                style: theme.textTheme.labelSmall
+                    ?.copyWith(color: scheme.outline),
+              ),
+              const SizedBox(height: 6),
+              for (final path in milestone.alternativePaths)
+                _AlternativePath(
+                  path: path,
+                  busy: starting && isActive,
+                  onStart: onStartSession,
+                ),
+            ] else
+              Text(
+                'Другие направления пока не готовы',
+                style: theme.textTheme.bodySmall
+                    ?.copyWith(color: scheme.outline),
+              ),
+            const SizedBox(height: 10),
             Wrap(
               spacing: 8,
               runSpacing: 8,
@@ -515,6 +537,89 @@ class _MilestoneRow extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Одно альтернативное направление к вехе: название, короткое описание,
+/// оценка по времени и действие — старт сессии (то же, что у основного пути).
+class _AlternativePath extends StatelessWidget {
+  final LearningPath path;
+  final bool busy;
+  final VoidCallback onStart;
+
+  const _AlternativePath({
+    required this.path,
+    required this.busy,
+    required this.onStart,
+  });
+
+  /// Оценка в часах без лишнего нуля: 2 → «≈ 2 ч», 1.5 → «≈ 1.5 ч».
+  String get _time {
+    final hours = path.estimatedHours;
+    final text =
+        hours == hours.roundToDouble() ? hours.toInt().toString() : hours.toStringAsFixed(1);
+    return '≈ $text ч';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 6),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest.withValues(alpha: 0.45),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: scheme.outlineVariant),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.alt_route, size: 18, color: scheme.primary),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        path.title,
+                        style: theme.textTheme.bodyMedium
+                            ?.copyWith(fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    StatusBadge(_time, variant: BadgeVariant.muted),
+                  ],
+                ),
+                if (path.description.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    path.description,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall
+                        ?.copyWith(color: scheme.onSurfaceVariant),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          AppButton(
+            'Начать сессию',
+            icon: Icons.play_arrow,
+            size: AppButtonSize.sm,
+            variant: AppButtonVariant.secondary,
+            busy: busy,
+            onPressed: busy ? null : onStart,
+          ),
+        ],
       ),
     );
   }

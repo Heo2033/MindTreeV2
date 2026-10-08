@@ -9,12 +9,12 @@ import 'package:mindtree_flutter/domain/models/models.dart';
 import 'package:mindtree_flutter/providers/ui_stores.dart';
 import 'package:mindtree_flutter/ui/graph/graph_canvas.dart';
 import 'package:mindtree_flutter/ui/graph/graph_layout.dart';
-import 'package:mindtree_flutter/ui/labels.dart';
 import 'package:mindtree_flutter/ui/widgets/badge.dart';
 import 'package:mindtree_flutter/ui/widgets/button.dart';
 import 'package:mindtree_flutter/ui/widgets/error_banner.dart';
 import 'package:mindtree_flutter/ui/widgets/progress_bar.dart';
 import 'package:mindtree_flutter/ui/widgets/spinner.dart';
+import 'package:mindtree_flutter/ui/widgets/topic_meta_bar.dart';
 
 const Map<String, String> _phaseLabel = {
   'structure': 'Структурирование темы',
@@ -106,6 +106,7 @@ class _GraphScreenState extends ConsumerState<GraphScreen> {
   Widget build(BuildContext context) {
     final state = ref.watch(graphStoreProvider);
     final notifier = ref.read(graphStoreProvider.notifier);
+    final session = ref.watch(sessionStoreProvider);
 
     if (state.loading && !state.pipeline.running) {
       return const Center(child: Loader(size: LoaderSize.lg));
@@ -137,7 +138,9 @@ class _GraphScreenState extends ConsumerState<GraphScreen> {
       children: [
         _Toolbar(
           topicName: state.topicName ?? widget.topicId,
-          levelLabel: levelLabel[state.topic?.targetLevel.raw] ?? 'Понятие',
+          goal: goalText(state.topic),
+          level: targetLevelText(state.topic),
+          time: topicTimeLabel(session, widget.topicId),
           visibleCount: layout.nodes.length,
           hiddenCount: hiddenCount,
           showLegend: _showLegend,
@@ -299,7 +302,9 @@ class _GraphScreenState extends ConsumerState<GraphScreen> {
 
 class _Toolbar extends StatelessWidget {
   final String topicName;
-  final String levelLabel;
+  final String? goal;
+  final String? level;
+  final String? time;
   final int visibleCount;
   final int hiddenCount;
   final bool showLegend;
@@ -311,7 +316,9 @@ class _Toolbar extends StatelessWidget {
 
   const _Toolbar({
     required this.topicName,
-    required this.levelLabel,
+    required this.goal,
+    required this.level,
+    required this.time,
     required this.visibleCount,
     required this.hiddenCount,
     required this.showLegend,
@@ -360,7 +367,8 @@ class _Toolbar extends StatelessWidget {
             runSpacing: 8,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
-              StatusBadge(levelLabel, icon: Icons.school_outlined),
+              // Шаг 9 аудита (§81): цель, уровень и время — в шапке графа.
+              ...topicMetaBadges(goal: goal, level: level, time: time),
               StatusBadge(
                 hiddenCount > 0
                     ? 'Видно $visibleCount / ${visibleCount + hiddenCount}'

@@ -24,8 +24,42 @@ class _LearnerModelScreenState extends ConsumerState<LearnerModelScreen> {
   void initState() {
     super.initState();
     Future.microtask(() {
+      // Подписи понятий берём из графа: без него в списках остаются быдло-id.
+      final graph = ref.read(graphStoreProvider.notifier);
+      if (ref.read(graphStoreProvider).topicId != widget.topicId) {
+        graph.loadTopic(widget.topicId);
+      }
       ref.read(learnerStoreProvider.notifier).load(widget.topicId);
     });
+  }
+
+  /// Человеческая подпись понятия: label узла из графа, иначе id без
+  /// scoped-суффикса — внутренние идентификаторы движка не показываем.
+  String _conceptTitle(String nodeId) =>
+      conceptTitle(nodeId, _nodeLabel(nodeId));
+
+  String? _nodeLabel(String nodeId) {
+    // `build` уже следит за graphStoreProvider — здесь только чтение.
+    for (final n in ref.read(graphStoreProvider).nodes) {
+      if (n.id == nodeId) return n.label;
+    }
+    return null;
+  }
+
+  /// Все нерешённые мисконцепции модели: понятие + описание ошибки.
+  List<({String nodeId, String description})> _misconceptions(LearnerState ls) {
+    final out = <({String nodeId, String description})>[];
+    for (final p in ls.profiles) {
+      for (final e in p.errors) {
+        if (e.resolved) continue;
+        final text = e.description.trim().isNotEmpty
+            ? e.description.trim()
+            : e.type.defaultDescription;
+        if (text.isEmpty) continue;
+        out.add((nodeId: p.nodeId, description: text));
+      }
+    }
+    return out;
   }
 
   @override
@@ -96,6 +130,9 @@ class _LearnerModelScreenState extends ConsumerState<LearnerModelScreen> {
           _buildMasteryCard(masteryPct, levelText, targetText),
           const SizedBox(height: 16),
           if (ls.profiles.isNotEmpty) _buildProfilesSection(ls),
+          // Блок виден всегда: и с ошибками, и с честным «Пока нет».
+          const SizedBox(height: 16),
+          _buildMisconceptionsSection(ls),
           if (ls.weakConcepts.isNotEmpty) ...[
             const SizedBox(height: 16),
             _buildWeakSection(ls),
@@ -219,7 +256,7 @@ class _LearnerModelScreenState extends ConsumerState<LearnerModelScreen> {
           children: [
             Expanded(
               child: Text(
-                p.nodeId,
+                _conceptTitle(p.nodeId),
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                       fontWeight: FontWeight.w600,
                     ),
@@ -244,6 +281,64 @@ class _LearnerModelScreenState extends ConsumerState<LearnerModelScreen> {
             ),
           ),
       ],
+    );
+  }
+
+  /// Блок «Мисконцепции»: что модель считает ошибочным пониманием.
+  /// Пусто — честное «Пока нет», а не скрытый блок.
+  Widget _buildMisconceptionsSection(LearnerState ls) {
+    final items = _misconceptions(ls);
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.lightbulb_outline,
+                    size: 18, color: AppColors.warning(context)),
+                const SizedBox(width: 6),
+                Text(
+                  'Мисконцепции',
+                  style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                ),
+                const Spacer(),
+                if (items.isNotEmpty) StatusBadge('${items.length}'),
+              ],
+            ),
+            const SizedBox(height: 8),
+            if (items.isEmpty)
+              Text(
+                'Пока нет',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: AppColors.textMuted(context),
+                    ),
+              )
+            else
+              for (final it in items) ...[
+                Text(
+                  _conceptTitle(it.nodeId),
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(left: 12, top: 2, bottom: 10),
+                  child: Text(
+                    it.description,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: AppColors.textMuted(context),
+                        ),
+                  ),
+                ),
+              ],
+          ],
+        ),
+      ),
     );
   }
 
@@ -272,7 +367,7 @@ class _LearnerModelScreenState extends ConsumerState<LearnerModelScreen> {
               Padding(
                 padding: const EdgeInsets.only(bottom: 4),
                 child: Text(
-                  '• $c',
+                  '• ${_conceptTitle(c)}',
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
               ),
@@ -307,7 +402,7 @@ class _LearnerModelScreenState extends ConsumerState<LearnerModelScreen> {
               Padding(
                 padding: const EdgeInsets.only(bottom: 4),
                 child: Text(
-                  '• $c',
+                  '• ${_conceptTitle(c)}',
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
               ),

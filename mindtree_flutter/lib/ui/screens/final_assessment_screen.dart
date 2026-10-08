@@ -1,9 +1,9 @@
-import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import 'package:mindtree_flutter/domain/engines/assessment_engine.dart';
+import 'package:mindtree_flutter/domain/engines/learner_model_service.dart';
 import 'package:mindtree_flutter/domain/engines/review_scheduler.dart';
 import 'package:mindtree_flutter/domain/lib/grading.dart';
 import 'package:mindtree_flutter/domain/models/models.dart';
@@ -12,6 +12,7 @@ import 'package:mindtree_flutter/providers/ui_stores.dart';
 import 'package:mindtree_flutter/ui/labels.dart';
 import 'package:mindtree_flutter/ui/question_timer.dart';
 import 'package:mindtree_flutter/ui/theme/app_theme.dart';
+import 'package:mindtree_flutter/ui/widgets/answer_review.dart';
 import 'package:mindtree_flutter/ui/widgets/badge.dart';
 import 'package:mindtree_flutter/ui/widgets/button.dart';
 import 'package:mindtree_flutter/ui/widgets/error_banner.dart';
@@ -20,14 +21,14 @@ import 'package:mindtree_flutter/ui/widgets/inputs.dart';
 import 'package:mindtree_flutter/ui/widgets/progress_bar.dart';
 import 'package:mindtree_flutter/ui/widgets/spinner.dart';
 
-const Map<String, String> masteryLabels = {
-  'awareness': 'Ознакомление',
-  'basic_understanding': 'Базовое понимание',
-  'solid_understanding': 'Устойчивое понимание',
-  'practical_application': 'Практическое применение',
-  'advanced': 'Продвинутый',
-  'expert': 'Эксперт',
-};
+/// Измерения мастерства в порядке их показа в итогах. Тот же состав, что в
+/// профиле обучающегося: `understanding / recall / application / transfer`.
+const List<({String dim, String label})> masteryDimensions = [
+  (dim: 'understanding', label: 'Понимание'),
+  (dim: 'recall', label: 'Память'),
+  (dim: 'application', label: 'Применение'),
+  (dim: 'transfer', label: 'Перенос'),
+];
 
 class FinalAssessmentScreen extends ConsumerStatefulWidget {
   final String topicId;
@@ -60,7 +61,12 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
   final Map<String, String> _answers = {};
   final Map<String, bool> _results = {};
   List<String>? _gaps;
+
+  /// Уровень мастерства и четыре измерения — из `LearnerModelService`, как и
+  /// на экране профиля обучающегося. Экранных эвристик по score здесь больше
+  /// нет: тест двигает модель через SRS, а витрина читает её же.
   String? _masteryLevel;
+  List<double>? _dimensions;
 
   @override
   void dispose() {
@@ -165,6 +171,7 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
         _results.clear();
         _gaps = null;
         _masteryLevel = null;
+        _dimensions = null;
       });
       // Вопрос 1 показан — таймер стартует вместе с ним, а не «где-то раньше».
       _questionTimer.restart();
@@ -244,12 +251,16 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
       final engine = ref.read(assessmentEngineProvider);
       final reviewScheduler = ref.read(reviewSchedulerProvider);
       final topicId = ref.read(graphStoreProvider).topic?.id ?? widget.topicId;
-      // Уровень мастерства и список пробелов — чисто экранный синхронный
-      // расчёт БЕЗ записей в БД, поэтому считается сразу, но уже вне setState.
-      _computeMasteryAndGaps();
+      // Пробелы — чисто экранный синхронный расчёт БЕЗ записей в БД,
+      // поэтому считается сразу, но уже вне setState.
+      _computeGaps();
       await engine.finalize(_assessment!.id, score);
       // Apply results to SRS (mirrors web: ReviewScheduler.onAnswered)
       await _applyResultsToSRS(reviewScheduler, topicId);
+      // Мастерство читаем ТОЛЬКО после записи ответов в SRS: до этого в
+      // модели ещё старые значения, и итоговый экран показал бы уровень,
+      // который тест не двигал.
+      await _loadMasteryFromModel(topicId);
     }
   }
 
@@ -280,34 +291,15 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
     }
   }
 
-  /// Вычисляет уровень мастерства и список слабых мест по результатам теста.
+  /// Список пробелов по результатам теста: понятия, где ответ был неверный.
   ///
-  /// Только читает `graphStoreProvider` и пишет в экранные поля
-  /// [_masteryLevel]/[_gaps] — в БД ничего не сохраняет, поэтому вызов
-  /// синхронный и может идти до await-записей финиша.
-  void _computeMasteryAndGaps() {
+  /// Только читает `graphStoreProvider` и пишет в экранный [_gaps] — в БД
+  /// ничего не сохраняет, поэтому вызов синхронный и может идти до
+  /// await-записей финиша. Уровень мастерства здесь НЕ считается: его даёт
+  /// [LearnerModelService] (см. [_loadMasteryFromModel]).
+  void _computeGaps() {
     final questions = _assessment!.questions;
-    final score = _totalQuestions > 0 ? _correctCount / _totalQuestions : 0.0;
     final graph = ref.read(graphStoreProvider);
-    final topic = graph.topic;
-    final targetLevel = topic?.targetLevel ?? MasteryLevel.basicUnderstanding;
-
-    // Mastery level mapping (mirrors web: score-based progression)
-    String mastery;
-    if (score >= 0.9) {
-      mastery = targetLevel.index + 1 < MasteryLevel.order.length
-          ? MasteryLevel.order[min(targetLevel.index + 1, MasteryLevel.order.length - 1)].raw
-          : targetLevel.raw;
-    } else if (score >= 0.7) {
-      mastery = targetLevel.raw;
-    } else if (score >= 0.5) {
-      mastery = targetLevel.index > 0
-          ? MasteryLevel.order[max(targetLevel.index - 1, 0)].raw
-          : MasteryLevel.awareness.raw;
-    } else {
-      mastery = MasteryLevel.awareness.raw;
-    }
-    _masteryLevel = mastery;
 
     // Gaps list: nodes with wrong answers
     final gapLabels = <String>[];
@@ -320,6 +312,41 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
       }
     }
     _gaps = gapLabels;
+  }
+
+  /// Среднее по измерениям мастерства — тот же состав, что в профиле
+  /// обучающегося (understanding/recall/application/transfer).
+  List<double>? _averageDimensions(List<ConceptProfile> profiles) {
+    if (profiles.isEmpty) return null;
+    double avg(double Function(ConceptProfile p) pick) =>
+        profiles.map(pick).reduce((a, b) => a + b) / profiles.length;
+    return [
+      avg((p) => p.understanding),
+      avg((p) => p.recall),
+      avg((p) => p.application),
+      avg((p) => p.transfer),
+    ];
+  }
+
+  /// Читает уровень и измерения мастерства из модели обучающегося — того же
+  /// источника, что и экран «Профиль обучающегося».
+  ///
+  /// Никаких записей не делает; любая ошибка (БД недоступна) гасится молча:
+  /// счёт, пробелы и SRS от чтения не зависят.
+  Future<void> _loadMasteryFromModel(String topicId) async {
+    if (!mounted) return;
+    try {
+      final learner = ref.read(learnerModelProvider);
+      final model = await learner.getModel(topicId);
+      final profiles = await learner.getConceptProfiles(topicId);
+      if (!mounted) return;
+      setState(() {
+        _masteryLevel = model.overallLevel.raw;
+        _dimensions = _averageDimensions(profiles);
+      });
+    } catch (_) {
+      // Мастерство не показываем — итоги теста остаются сортом и пробелами.
+    }
   }
 
   @override
@@ -456,34 +483,9 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
                       if (_isMultipleChoice)
                         _buildOptions(q)
                       else ...[
-                        if (q.explanation != null && q.explanation!.isNotEmpty)
-                          Container(
-                            margin: const EdgeInsets.only(bottom: 12),
-                            padding: const EdgeInsets.all(12),
-                            decoration: BoxDecoration(
-                              color: Theme.of(context).colorScheme.surfaceContainerHighest,
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  'Рекомендация для проверки',
-                                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                                        color: AppColors.textMuted(context),
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  q.explanation!,
-                                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                                        color: AppColors.textMuted(context),
-                                      ),
-                                ),
-                              ],
-                            ),
-                          ),
+                        // Рубрика НЕ показывается до ответа: в ней ключевые
+                        // элементы ответа — прямой спойлер открытого вопроса.
+                        // Разбор (эталон/рубрика) открывается в [_buildFeedback].
                         AppTextarea(
                           label: 'Ваш ответ',
                           controller: _answerController,
@@ -541,36 +543,13 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
     );
   }
 
+  /// Разбор ответа: бейдж вердикта и эталон/рубрика — та же плашка, что в
+  /// сессии у apply (см. [AnswerReview]).
   Widget _buildFeedback() {
-    final q = _currentQuestion!;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        StatusBadge(
-          _lastCorrect ? 'Верно' : 'Неверно',
-          variant: _lastCorrect ? BadgeVariant.success : BadgeVariant.danger,
-        ),
-        if (!_lastCorrect && _isMultipleChoice && q.correctAnswer != null)
-          Padding(
-            padding: const EdgeInsets.only(top: 12),
-            child: Text(
-              'Правильный ответ: ${q.options![int.tryParse(q.correctAnswer!) ?? 0]}',
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    fontWeight: FontWeight.w600,
-                  ),
-            ),
-          ),
-        if (q.explanation != null && q.explanation!.isNotEmpty) ...[
-          const SizedBox(height: 12),
-          Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.surfaceContainerHighest,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: FormattedText(q.explanation!),
-          ),
-        ],
+        AnswerReview(correct: _lastCorrect, question: _currentQuestion!),
         const SizedBox(height: 16),
         AppButton(
           _currentIndex + 1 >= _totalQuestions ? 'Завершить' : 'Следующий вопрос',
@@ -589,7 +568,7 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
     final graph = ref.read(graphStoreProvider);
     final topicName = graph.topicName ?? widget.topicId;
     final masteryLabel = _masteryLevel != null
-        ? masteryLabels[_masteryLevel!] ?? _masteryLevel!
+        ? levelLabel[_masteryLevel!] ?? _masteryLevel!
         : null;
 
     return SingleChildScrollView(
@@ -635,7 +614,8 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: 12),
-              // Mastery level (как в web)
+              // Уровень мастерства — из модели обучающегося (тот же источник,
+              // что на экране «Профиль обучающегося»), а не из score теста.
               if (masteryLabel != null) ...[
                 Container(
                   padding: const EdgeInsets.all(12),
@@ -668,6 +648,16 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
                                   : AppColors.warning(context),
                             ),
                       ),
+                      // Четыре измерения той же модели — видно, что именно
+                      // росло: понимание, память, применение, перенос.
+                      if (_dimensions != null) ...[
+                        const SizedBox(height: 12),
+                        for (var i = 0; i < masteryDimensions.length && i < _dimensions!.length; i++)
+                          _DimensionRow(
+                            label: masteryDimensions[i].label,
+                            value: _dimensions![i],
+                          ),
+                      ],
                     ],
                   ),
                 ),
@@ -782,4 +772,21 @@ class _FinalAssessmentScreenState extends ConsumerState<FinalAssessmentScreen> {
       ),
     );
   }
+}
+
+/// Строка одного измерения мастерства в итогах теста.
+class _DimensionRow extends StatelessWidget {
+  final String label;
+  final double value;
+
+  const _DimensionRow({required this.label, required this.value});
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: ProgressBar(
+          value: value * 100,
+          label: label,
+        ),
+      );
 }

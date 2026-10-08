@@ -263,9 +263,13 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     final items = session.curriculum.items;
     final completedCount =
         items.where((i) => i.status == CurriculumItemStatus.completed).length;
-    final totalItems = items.isEmpty ? 1 : items.length;
-    final progress = completedCount / totalItems;
     final eta = ss.adaptive?.eta;
+    // План пройден целиком. Ключ не в `currentItem == null`: движок клампит
+    // индекс на последнем пункте, поэтому после закрытия последнего концепта
+    // «текущим» остаётся УЖЕ завершённый пункт (см. LearningSessionEngine) и
+    // карточка «Все концепты изучены!» никогда бы не открылась.
+    final allComplete = items.isNotEmpty &&
+        items.every((i) => i.status == CurriculumItemStatus.completed);
 
     return Column(
       children: [
@@ -280,8 +284,12 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
               onDismiss: () => _session.clearError(),
             ),
           ),
-        // "Достаточно" баннер — как в web (apps/web/src/screens/Session.tsx)
-        if (ss.adaptive?.recommendedAction == RecommendedAction.finalAssessment || ss.adaptive?.recommendedAction == RecommendedAction.complete)
+        // «Достаточно» баннер — предложение закрыться раньше плана. На
+        // пройденном плане он не нужен: ниже и так стоит «Все концепты
+        // изучены!» с кнопкой итогового теста.
+        if (!allComplete &&
+            (ss.adaptive?.recommendedAction == RecommendedAction.finalAssessment ||
+                ss.adaptive?.recommendedAction == RecommendedAction.complete))
           _buildEnoughBanner(ss),
         if (ss.advancing)
           _buildAdvancingIndicator(),
@@ -297,16 +305,19 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                   const SizedBox(height: 16),
                   if (ss.activity != null)
                     _buildActivityStep(ss)
+                  else if (allComplete)
+                    _buildAllComplete(ss)
+                  // Ветка «текущий пункт» сюда попадает только когда план
+                  // не пройден целиком (выше проверен allComplete).
                   else if (ss.currentItem != null)
                     _buildStudyPrompt(ss)
-                  else if (progress >= 1.0)
-                    _buildAllComplete(ss)
                   else
                     _buildWaitingForActivity(ss),
                   // Действия Adapt (§80): всегда рядом с текущим понятием —
                   // и до чтения, и во время шага активности. Сама панель по
-                  // фазе шага прячется целиком (шаг с вопросом).
-                  if (ss.currentItem != null) ...[
+                  // фазе шага прячется целиком (шаг с вопросом). На пройденном
+                  // плане адаптивать больше нечего.
+                  if (ss.currentItem != null && !allComplete) ...[
                     const SizedBox(height: 16),
                     const AdaptPanel(),
                   ],
@@ -454,7 +465,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                         : Icon(Icons.radio_button_unchecked,
                             color: AppColors.textMuted(context), size: 20),
                 title: Text(
-                  item.label ?? item.nodeId,
+                  conceptTitle(item.nodeId, item.label),
                   style: TextStyle(
                     fontWeight:
                         item.id == ss.currentItem?.id ? FontWeight.w600 : FontWeight.normal,
@@ -502,7 +513,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Text(
-              item.label ?? item.nodeId,
+              conceptTitle(item.nodeId, item.label),
               style: Theme.of(context).textTheme.titleMedium?.copyWith(
                     fontWeight: FontWeight.w600,
                   ),
@@ -875,12 +886,21 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     // 'incorrect' — а это пишет ложную мисконцепцию «неверно при повторении».
     await _session.completeConcept(item.id, nodeId: item.nodeId);
 
+    // План закрыт? Считаем по ВСЕМ пунктам, а не по `currentItem == null`:
+    // движок клампит индекс на последнем пункте, поэтому после последнего
+    // концепта «текущим» остаётся уже завершённый пункт и конец плана
+    // никогда не наступал.
     final updated = ref.read(sessionStoreProvider);
-    final allDone = updated.currentItem == null;
-    if (allDone) {
-      // Shortcut: если последний концепт — сразу finalize (как в web)
-      _finalizeSession();
-    }
+    final items =
+        updated.session?.curriculum.items ?? const <CurriculumItem>[];
+    final allDone = items.isNotEmpty &&
+        items.every((i) => i.status == CurriculumItemStatus.completed);
+    if (!allDone) return;
+
+    // Shortcut: последний концепт — сразу итоговый тест (как в web).
+    // Если finalize не вернул id — пользователь остаётся на карточке
+    // «Все концепты изучены!» с кнопкой повторной попытки.
+    await _finalizeSession();
   }
 
   Future<void> _finalizeSession() async {

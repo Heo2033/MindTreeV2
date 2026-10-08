@@ -11,6 +11,7 @@ import 'package:mindtree_flutter/providers/ui_stores.dart';
 import 'package:mindtree_flutter/ui/labels.dart';
 import 'package:mindtree_flutter/ui/question_timer.dart';
 import 'package:mindtree_flutter/ui/theme/app_theme.dart';
+import 'package:mindtree_flutter/ui/widgets/answer_review.dart';
 import 'package:mindtree_flutter/ui/widgets/badge.dart';
 import 'package:mindtree_flutter/ui/widgets/button.dart';
 import 'package:mindtree_flutter/ui/widgets/error_banner.dart';
@@ -448,36 +449,13 @@ class _QuizScreenState extends ConsumerState<QuizScreen> {
     );
   }
 
+  /// Разбор ответа: бейдж вердикта и эталон/рубрика — та же плашка, что в
+  /// сессии у apply (см. [AnswerReview]).
   Widget _buildFeedback() {
-    final q = _currentQuestion!;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        StatusBadge(
-          _lastCorrect ? 'Верно' : 'Неверно',
-          variant: _lastCorrect ? BadgeVariant.success : BadgeVariant.danger,
-        ),
-        if (!_lastCorrect && _isMultipleChoice && q.correctAnswer != null)
-          Padding(
-            padding: const EdgeInsets.only(top: 12),
-            child: Text(
-              'Правильный ответ: ${q.options![int.tryParse(q.correctAnswer!) ?? 0]}',
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    fontWeight: FontWeight.w600,
-                  ),
-            ),
-          ),
-        if (q.explanation != null && q.explanation!.isNotEmpty) ...[
-          const SizedBox(height: 12),
-          Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.surfaceContainerHighest,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: FormattedText(q.explanation!),
-          ),
-        ],
+        AnswerReview(correct: _lastCorrect, question: _currentQuestion!),
         const SizedBox(height: 16),
         AppButton(
           _currentIndex + 1 >= _totalQuestions ? 'Завершить тест' : 'Следующий вопрос',
@@ -599,6 +577,20 @@ class _QuizScreenState extends ConsumerState<QuizScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    // Эталон открытого вопроса — то же, что в разборе по
+                    // одному вопросу ([AnswerReview]).
+                    if (q.referenceAnswer.trim().isNotEmpty) ...[
+                      Text(
+                        'Эталонный ответ',
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          color: AppColors.textMuted(context),
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      FormattedText(q.referenceAnswer.trim()),
+                      const SizedBox(height: 8),
+                    ],
                     if (q.explanation != null && q.explanation!.isNotEmpty)
                       Container(
                         padding: const EdgeInsets.all(8),

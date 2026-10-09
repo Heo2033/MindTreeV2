@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import 'package:mindtree_flutter/domain/models/models.dart';
 import 'package:mindtree_flutter/providers/ui_stores.dart';
+import 'package:mindtree_flutter/ui/adaptive.dart';
 import 'package:mindtree_flutter/ui/labels.dart';
 import 'package:mindtree_flutter/ui/theme/app_theme.dart';
 import 'package:mindtree_flutter/ui/widgets/adapt_panel.dart';
@@ -357,6 +358,15 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     );
   }
 
+  /// Элементы для Row с одинаковым отступом между ними (без отступа перед
+  /// первым) — используется там, где бейджи идут в строку.
+  List<Widget> _gap(List<Widget> items, {double gap = 8}) => [
+        for (var i = 0; i < items.length; i++) ...[
+          if (i > 0) SizedBox(width: gap),
+          items[i],
+        ],
+      ];
+
   Widget _buildAdvancingIndicator() {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -365,11 +375,15 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         children: [
           const Loader(size: LoaderSize.sm),
           const SizedBox(width: 8),
-          Text(
-            'Генерируем следующий концепт…',
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: AppColors.textMuted(context),
-                ),
+          // Expanded — чтобы на узком экране текст переносился, а не
+          // вылезал за край баннера.
+          Expanded(
+            child: Text(
+              'Генерируем следующий концепт…',
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: AppColors.textMuted(context),
+                  ),
+            ),
           ),
         ],
       ),
@@ -384,6 +398,39 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     SessionEta? eta,
   ) {
     final pct = total > 0 ? (completed / total) * 100 : 0.0;
+    final planToggle = GestureDetector(
+      onTap: () => setState(() => _showPlan = !_showPlan),
+      child: Text(
+        _showPlan ? 'Скрыть план' : 'Показать план',
+        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+              color: Theme.of(context).colorScheme.primary,
+            ),
+      ),
+    );
+    final finishButton = AppButton(
+      'Завершить',
+      variant: AppButtonVariant.danger,
+      size: AppButtonSize.sm,
+      busy: ss.loading,
+      onPressed: _finalizeSession,
+    );
+    final badges = <Widget>[
+      StatusBadge(goalLabel[session.goal] ?? session.goal),
+      Text(
+        '$completed/$total концептов',
+        style: Theme.of(context).textTheme.bodySmall,
+      ),
+      if (eta != null)
+        StatusBadge(
+          '\u23f1 ${eta.remainingMinutesMin}\u2013${eta.remainingMinutesMax} мин',
+          variant: eta.pace == PaceClass.faster
+              ? BadgeVariant.success
+              : eta.pace == PaceClass.slower
+                  ? BadgeVariant.warning
+                  : BadgeVariant.info,
+        ),
+    ];
+
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: BoxDecoration(
@@ -392,45 +439,38 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              StatusBadge(goalLabel[session.goal] ?? session.goal),
-              const SizedBox(width: 8),
-              Text(
-                '$completed/$total концептов',
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-              if (eta != null) ...[
-                const SizedBox(width: 8),
-                StatusBadge(
-                  '\u23f1 ${eta.remainingMinutesMin}\u2013${eta.remainingMinutesMax} мин',
-                  variant: eta.pace == PaceClass.faster
-                      ? BadgeVariant.success
-                      : eta.pace == PaceClass.slower
-                          ? BadgeVariant.warning
-                          : BadgeVariant.info,
+          if (isWideLayout(context))
+            Row(
+              children: [
+                ..._gap(badges),
+                const Spacer(),
+                planToggle,
+                const SizedBox(width: 12),
+                finishButton,
+              ],
+            )
+          else
+            // Узкий экран: бейджи переносятся, действия уходят на свою
+            // строку — один Row из бейджей и кнопок здесь не помещается.
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 6,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: badges,
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(child: planToggle),
+                    const SizedBox(width: 12),
+                    finishButton,
+                  ],
                 ),
               ],
-              const Spacer(),
-              GestureDetector(
-                onTap: () => setState(() => _showPlan = !_showPlan),
-                child: Text(
-                  _showPlan ? 'Скрыть план' : 'Показать план',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: Theme.of(context).colorScheme.primary,
-                      ),
-                ),
-              ),
-              const SizedBox(width: 12),
-              AppButton(
-                'Завершить',
-                variant: AppButtonVariant.danger,
-                size: AppButtonSize.sm,
-                busy: ss.loading,
-                onPressed: _finalizeSession,
-              ),
-            ],
-          ),
+            ),
           const SizedBox(height: 8),
           ProgressBar(value: pct),
         ],
@@ -597,18 +637,38 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Row(
-              children: [
-                Text(
-                  activity.nodeLabel,
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w600,
-                      ),
-                ),
-                const Spacer(),
-                _buildBreadcrumb(activity),
-              ],
-            ),
+            if (isWideLayout(context))
+              Row(
+                children: [
+                  Flexible(
+                    child: Text(
+                      activity.nodeLabel,
+                      style:
+                          Theme.of(context).textTheme.titleMedium?.copyWith(
+                                fontWeight: FontWeight.w600,
+                              ),
+                    ),
+                  ),
+                  const Spacer(),
+                  _buildBreadcrumb(activity),
+                ],
+              )
+            else
+              // Узкий экран: заголовок и цепочку шагов в одну строку
+              // не уложить — разносим по строкам.
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    activity.nodeLabel,
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
+                  ),
+                  const SizedBox(height: 8),
+                  _buildBreadcrumb(activity),
+                ],
+              ),
             const SizedBox(height: 12),
             Text(
               step.title,
@@ -643,18 +703,23 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
 
   Widget _buildBreadcrumb(LearningActivity activity) {
     const stepLabels = ['Объяснение', 'Пример', 'Проверка', 'Применение'];
-    return Row(
-      mainAxisSize: MainAxisSize.min,
+    // Wrap вместо Row: на узком экране цепочка шагов переносится на новую
+    // строку, а не вылезает за карточку; в один строке ведёт себя как Row.
+    return Wrap(
+      spacing: 6,
+      runSpacing: 6,
       children: [
-        for (var i = 0; i < activity.steps.length; i++) ...[
-          if (i > 0) const SizedBox(width: 6),
+        for (var i = 0; i < activity.steps.length; i++)
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
             decoration: BoxDecoration(
               color: activity.steps[i].isAnswered
                   ? AppColors.ok.withValues(alpha: 0.15)
                   : i == activity.currentStep
-                      ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.15)
+                      ? Theme.of(context)
+                          .colorScheme
+                          .primary
+                          .withValues(alpha: 0.15)
                       : AppColors.textMuted(context).withValues(alpha: 0.1),
               borderRadius: BorderRadius.circular(6),
             ),
@@ -666,11 +731,12 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                         : i == activity.currentStep
                             ? Theme.of(context).colorScheme.primary
                             : AppColors.textMuted(context),
-                    fontWeight: i == activity.currentStep ? FontWeight.w600 : FontWeight.normal,
+                    fontWeight: i == activity.currentStep
+                        ? FontWeight.w600
+                        : FontWeight.normal,
                   ),
             ),
           ),
-        ],
       ],
     );
   }

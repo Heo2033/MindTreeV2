@@ -83,9 +83,13 @@ class _LearnerModelScreenState extends ConsumerState<LearnerModelScreen> {
                     ),
               ),
               const SizedBox(width: 8),
-              StatusBadge(
-                graph.topicName ?? widget.topicId,
-                variant: BadgeVariant.muted,
+              // Flexible: длинное название темы обрезается многоточием,
+              // а не выталкивает строку за край экрана.
+              Flexible(
+                child: StatusBadge(
+                  graph.topicName ?? widget.topicId,
+                  variant: BadgeVariant.muted,
+                ),
               ),
               const Spacer(),
               if (ls.loading) const Loader(size: LoaderSize.sm),

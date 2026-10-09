@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import 'package:mindtree_flutter/providers/ui_stores.dart';
+import 'package:mindtree_flutter/ui/adaptive.dart';
 import 'package:mindtree_flutter/ui/nav/topic_nav.dart';
 import 'package:mindtree_flutter/ui/widgets/badge.dart';
 import 'package:mindtree_flutter/ui/widgets/branch_switcher.dart';
@@ -64,6 +65,11 @@ class _TopicShellState extends ConsumerState<TopicShell> {
     final topicName = graphState.topicName;
     final nodeCount = graphState.nodes.length;
     final section = sectionForIndex(index);
+    // Широкий экран — прежний вид: rail слева и ряд чипов под шапкой.
+    // Узкий — нижняя панель разделов, чипы внутри тела экрана (у `bottom`
+    // в AppBar фиксированная высота, перенос строк в нём не поместится).
+    final wide = isWideLayout(context);
+    final showBranches = section != null && section.hasSubNav;
 
     return Scaffold(
       appBar: AppBar(
@@ -95,7 +101,7 @@ class _TopicShellState extends ConsumerState<TopicShell> {
             ],
           ],
         ),
-        bottom: section != null && section.hasSubNav
+        bottom: wide && showBranches
             ? PreferredSize(
                 preferredSize: const Size.fromHeight(52),
                 child: BranchSwitcher(
@@ -105,25 +111,52 @@ class _TopicShellState extends ConsumerState<TopicShell> {
               )
             : null,
       ),
-      body: Row(
-        children: [
-          NavigationRail(
-            selectedIndex: index,
-            onDestinationSelected: (i) => widget.navigationShell.goBranch(i),
-            labelType: NavigationRailLabelType.all,
-            destinations: [
-              for (final d in kTopicSectionsWithMore)
-                NavigationRailDestination(
-                  icon: Icon(d.icon),
-                  selectedIcon: Icon(d.selectedIcon),
-                  label: Text(d.label),
+      body: wide
+          ? Row(
+              children: [
+                NavigationRail(
+                  selectedIndex: index,
+                  onDestinationSelected: (i) =>
+                      widget.navigationShell.goBranch(i),
+                  labelType: NavigationRailLabelType.all,
+                  destinations: [
+                    for (final d in kTopicSectionsWithMore)
+                      NavigationRailDestination(
+                        icon: Icon(d.icon),
+                        selectedIcon: Icon(d.selectedIcon),
+                        label: Text(d.label),
+                      ),
+                  ],
                 ),
-            ],
-          ),
-          const VerticalDivider(width: 1, thickness: 1),
-          Expanded(child: widget.navigationShell),
-        ],
-      ),
+                const VerticalDivider(width: 1, thickness: 1),
+                Expanded(child: widget.navigationShell),
+              ],
+            )
+          : Column(
+              children: [
+                if (showBranches)
+                  BranchSwitcher(
+                    section: section,
+                    currentLocation: widget.location,
+                  ),
+                Expanded(child: widget.navigationShell),
+              ],
+            ),
+      bottomNavigationBar: wide
+          ? null
+          : NavigationBar(
+              selectedIndex: index,
+              onDestinationSelected: (i) => widget.navigationShell.goBranch(i),
+              labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
+              destinations: [
+                for (final d in kTopicSectionsWithMore)
+                  NavigationDestination(
+                    icon: Icon(d.icon),
+                    selectedIcon: Icon(d.selectedIcon),
+                    label: d.label,
+                  ),
+              ],
+            ),
     );
   }
 }

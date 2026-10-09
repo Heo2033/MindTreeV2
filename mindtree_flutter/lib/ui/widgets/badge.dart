@@ -42,6 +42,10 @@ class StatusBadge extends StatelessWidget {
           ],
           Text(
             label,
+            // В узких контейнерах (Flexible/Expanded) подпись обрезается
+            // многоточием, а не вылезает за бейдж.
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
             style: Theme.of(context).textTheme.labelSmall?.copyWith(
                   color: fg,
                   fontWeight: FontWeight.w600,

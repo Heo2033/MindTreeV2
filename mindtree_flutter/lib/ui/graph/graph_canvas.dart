@@ -4,11 +4,25 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
 import 'package:mindtree_flutter/domain/models/models.dart';
+import 'package:mindtree_flutter/ui/adaptive.dart';
 import 'package:mindtree_flutter/ui/graph/graph_layout.dart';
 import 'package:mindtree_flutter/ui/theme/app_theme.dart';
 
 const double _minZoom = 0.05;
 const double _maxZoom = 8.0;
+
+/// Минимальный читаемый размер подписи на экране (logical px) и потолок
+/// компенсации кегля, чтобы карточка не разрасталась втрое.
+const double _minReadableFont = 11;
+const double _maxFontBoost = 3.0;
+
+/// Минимальный тач-таргет узла на экране (logical px), когда он уменьшен
+/// масштабом; до этого размера hit-test расширяется за границы карточки.
+const double _minTouchTarget = 44.0;
+
+/// Максимальное расширение hit-test с одной стороны (logical px).
+const double _maxHitSlop = 24.0;
+
 
 /// Interactive knowledge-tree canvas: pan (drag) + zoom (pinch / mouse wheel),
 /// bezier edges and rounded-rect node cards drawn with a [CustomPainter].
@@ -309,11 +323,38 @@ class GraphCanvasState extends State<GraphCanvas> {
     if (view == null) return null;
     final p = view.screenToGesture(screenPoint);
     final w = _inverseTransform(_gesture, p);
+    // Мировые → экранные единицы: нужны для расширения тач-зоны, когда узел
+    // на экране меньше минимального тач-таргета (частый случай на телефоне).
+    final scale = view.base * _scaleOf(_gesture);
     for (final n in widget.nodes.reversed) {
-      if (w.dx >= n.x &&
-          w.dx <= n.x + n.w &&
-          w.dy >= n.y &&
-          w.dy <= n.y + n.h) {
+      var left = n.x;
+      var top = n.y;
+      var right = n.x + n.w;
+      var bottom = n.y + n.h;
+      if (scale > 0) {
+        if (n.w * scale < _minTouchTarget) {
+          final grow = math.min(
+                _maxHitSlop,
+                (_minTouchTarget - n.w * scale) / 2,
+              ) /
+              scale;
+          left -= grow;
+          right += grow;
+        }
+        if (n.h * scale < _minTouchTarget) {
+          final grow = math.min(
+                _maxHitSlop,
+                (_minTouchTarget - n.h * scale) / 2,
+              ) /
+              scale;
+          top -= grow;
+          bottom += grow;
+        }
+      }
+      if (w.dx >= left &&
+          w.dx <= right &&
+          w.dy >= top &&
+          w.dy <= bottom) {
         return n;
       }
     }
@@ -393,6 +434,10 @@ class GraphCanvasState extends State<GraphCanvas> {
                     gesture: _gesture,
                     fit: fit,
                     baseScale: base,
+                    // На узком экране подписи компенсируются по масштабу
+                    // (иначе при подгонке дерева кегль падает до 3–4 px);
+                    // широкий экран рисуется как раньше.
+                    compensateText: size.width < kWideBreakpoint,
                     showLegend: widget.showLegend,
                     background: scheme.surfaceContainerHighest,
                     surface: scheme.surface,
@@ -425,6 +470,9 @@ class _GraphPainter extends CustomPainter {
   final double baseScale;
   final bool showLegend;
 
+  /// Компенсировать ли кегль подписей при уменьшении масштаба (узкий экран).
+  final bool compensateText;
+
   final Color background;
   final Color surface;
   final Color text;
@@ -445,6 +493,7 @@ class _GraphPainter extends CustomPainter {
     required this.fit,
     required this.baseScale,
     required this.showLegend,
+    required this.compensateText,
     required this.background,
     required this.surface,
     required this.text,
@@ -575,7 +624,7 @@ class _GraphPainter extends CustomPainter {
         text: label,
         style: TextStyle(
           color: color,
-          fontSize: 10,
+          fontSize: _font(10),
           fontWeight: FontWeight.w600,
         ),
       ),
@@ -654,6 +703,10 @@ class _GraphPainter extends CustomPainter {
   }
 
   void _drawCompactNode(Canvas canvas, GraphLayoutNode n, Rect rect, Color dot) {
+    // Текст компенсируется по масштабу и может вырасти за пределы карточки —
+    // обрезаем по её границам, чтобы не наезжать на соседей.
+    canvas.save();
+    canvas.clipRect(rect);
     canvas.drawCircle(
       Offset(rect.left + 11, rect.center.dy),
       3,
@@ -661,7 +714,7 @@ class _GraphPainter extends CustomPainter {
     );
     final label = _makeText(
       n.node.label,
-      fontSize: 12,
+      fontSize: _font(12),
       color: text.withValues(alpha: 0.95),
       fontWeight: FontWeight.w600,
       maxLines: 1,
@@ -673,16 +726,20 @@ class _GraphPainter extends CustomPainter {
       canvas,
       Offset(rect.left + 20, rect.center.dy - label.height / 2),
     );
+    canvas.restore();
   }
 
   void _drawFullNode(Canvas canvas, GraphLayoutNode n, Rect rect, Color dot) {
+    // См. _drawCompactNode: компенсированный кегль обрезается карточкой.
+    canvas.save();
+    canvas.clipRect(rect);
     final left = rect.left + 10;
     final top = rect.top + 8;
     canvas.drawCircle(Offset(left + 5, top + 6), 3.5, Paint()..color = dot);
 
     final label = _makeText(
       n.node.label,
-      fontSize: 13,
+      fontSize: _font(13),
       color: text,
       fontWeight: FontWeight.w700,
       maxLines: 2,
@@ -694,15 +751,21 @@ class _GraphPainter extends CustomPainter {
     if (n.node.oneLiner.isNotEmpty) {
       final oneLiner = _makeText(
         n.node.oneLiner,
-        fontSize: 11,
+        fontSize: _font(11),
         color: subtext,
         fontWeight: FontWeight.w400,
         maxLines: 2,
         ellipsis: '…',
       );
       oneLiner.layout(maxWidth: rect.width - 24);
-      oneLiner.paint(canvas, Offset(left + 14, top + label.height + 3));
+      final oy = top + label.height + 3;
+      // Если после заголовка внутри карточки не остаётся места, подпись
+      // не рисуем: заголовок уже читаем, а половина строки смотрится хуже.
+      if (oy + oneLiner.height <= rect.bottom - 6) {
+        oneLiner.paint(canvas, Offset(left + 14, oy));
+      }
     }
+    canvas.restore();
   }
 
   TextPainter _makeText(
@@ -726,6 +789,23 @@ class _GraphPainter extends CustomPainter {
       maxLines: maxLines,
       ellipsis: ellipsis,
     );
+  }
+
+  /// Экранный масштаб: мировые координаты → logical px на экране.
+  double get _screenScale => baseScale * gesture.getMaxScaleOnAxis();
+
+  /// Кегль подписи с компенсацией масштаба.
+  ///
+  /// Дерево подгоняется под экран, поэтому на телефоне карточка часто
+  /// занимает 0.2–0.4 от своей мировой ширины, и фиксированные 11–13 px
+  /// превращаются в 3–4 px на экране. Компенсация поднимает кегль так,
+  /// чтобы на экране было не меньше [_minReadableFont], но не более чем
+  /// в [_maxFontBoost] раз (дальше пользователь зумит).
+  double _font(double fontSize) {
+    if (!compensateText) return fontSize;
+    final eff = _screenScale;
+    if (eff <= 0 || eff >= 1) return fontSize;
+    return math.min(_minReadableFont / eff, fontSize * _maxFontBoost);
   }
 
   void _paintHoverUI(Canvas canvas) {
@@ -850,6 +930,7 @@ class _GraphPainter extends CustomPainter {
         oldDelegate.gesture != gesture ||
         oldDelegate.fit != fit ||
         oldDelegate.baseScale != baseScale ||
+        oldDelegate.compensateText != compensateText ||
         oldDelegate.showLegend != showLegend;
   }
 }

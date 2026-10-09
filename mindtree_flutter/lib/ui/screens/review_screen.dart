@@ -351,10 +351,15 @@ class _Flashcard extends StatelessWidget {
             children: [
               Icon(Icons.lightbulb_outline, size: 22, color: scheme.primary),
               const SizedBox(width: 8),
-              Text(
-                card.label,
-                style: theme.textTheme.titleMedium
-                    ?.copyWith(fontWeight: FontWeight.w700),
+              // Flexible: длинная подпись карточки переносится по центру,
+              // а не вылезает за края карточки на узком экране.
+              Flexible(
+                child: Text(
+                  card.label,
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.titleMedium
+                      ?.copyWith(fontWeight: FontWeight.w700),
+                ),
               ),
             ],
           ),

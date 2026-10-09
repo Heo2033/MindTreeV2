@@ -6,6 +6,7 @@ import 'package:mindtree_flutter/domain/models/models.dart';
 import 'package:mindtree_flutter/data/database/mindtree_repository.dart';
 import 'package:mindtree_flutter/providers/app_providers.dart';
 import 'package:mindtree_flutter/providers/ui_stores.dart';
+import 'package:mindtree_flutter/ui/adaptive.dart';
 import 'package:mindtree_flutter/ui/labels.dart';
 import 'package:mindtree_flutter/ui/widgets/badge.dart';
 import 'package:mindtree_flutter/ui/widgets/button.dart';
@@ -573,6 +574,47 @@ class _AlternativePath extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
+    final wide = isWideLayout(context);
+    final button = AppButton(
+      'Начать сессию',
+      icon: Icons.play_arrow,
+      size: AppButtonSize.sm,
+      variant: AppButtonVariant.secondary,
+      busy: busy,
+      onPressed: busy ? null : onStart,
+      // На узком экране кнопка занимает свою строку целиком: рядом с текстом
+      // она вытесняла бы описание в две-три строки.
+      fullWidth: !wide,
+    );
+    final textBlock = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Flexible(
+              child: Text(
+                path.title,
+                style: theme.textTheme.bodyMedium
+                    ?.copyWith(fontWeight: FontWeight.w600),
+              ),
+            ),
+            const SizedBox(width: 8),
+            StatusBadge(_time, variant: BadgeVariant.muted),
+          ],
+        ),
+        if (path.description.isNotEmpty) ...[
+          const SizedBox(height: 2),
+          Text(
+            path.description,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.bodySmall
+                ?.copyWith(color: scheme.onSurfaceVariant),
+          ),
+        ],
+      ],
+    );
+
     return Container(
       margin: const EdgeInsets.only(bottom: 6),
       padding: const EdgeInsets.all(10),
@@ -581,52 +623,32 @@ class _AlternativePath extends StatelessWidget {
         borderRadius: BorderRadius.circular(10),
         border: Border.all(color: scheme.outlineVariant),
       ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(Icons.alt_route, size: 18, color: scheme.primary),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Column(
+      child: wide
+          ? Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                Icon(Icons.alt_route, size: 18, color: scheme.primary),
+                const SizedBox(width: 8),
+                Expanded(child: textBlock),
+                const SizedBox(width: 8),
+                button,
+              ],
+            )
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
                 Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Flexible(
-                      child: Text(
-                        path.title,
-                        style: theme.textTheme.bodyMedium
-                            ?.copyWith(fontWeight: FontWeight.w600),
-                      ),
-                    ),
+                    Icon(Icons.alt_route, size: 18, color: scheme.primary),
                     const SizedBox(width: 8),
-                    StatusBadge(_time, variant: BadgeVariant.muted),
+                    Expanded(child: textBlock),
                   ],
                 ),
-                if (path.description.isNotEmpty) ...[
-                  const SizedBox(height: 2),
-                  Text(
-                    path.description,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: theme.textTheme.bodySmall
-                        ?.copyWith(color: scheme.onSurfaceVariant),
-                  ),
-                ],
+                const SizedBox(height: 8),
+                button,
               ],
             ),
-          ),
-          const SizedBox(width: 8),
-          AppButton(
-            'Начать сессию',
-            icon: Icons.play_arrow,
-            size: AppButtonSize.sm,
-            variant: AppButtonVariant.secondary,
-            busy: busy,
-            onPressed: busy ? null : onStart,
-          ),
-        ],
-      ),
     );
   }
 }

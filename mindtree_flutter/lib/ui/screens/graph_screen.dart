@@ -7,6 +7,7 @@ import 'package:go_router/go_router.dart';
 import 'package:mindtree_flutter/domain/engines/knowledge_graph_engine.dart';
 import 'package:mindtree_flutter/domain/models/models.dart';
 import 'package:mindtree_flutter/providers/ui_stores.dart';
+import 'package:mindtree_flutter/ui/adaptive.dart';
 import 'package:mindtree_flutter/ui/graph/graph_canvas.dart';
 import 'package:mindtree_flutter/ui/graph/graph_layout.dart';
 import 'package:mindtree_flutter/ui/widgets/badge.dart';
@@ -191,8 +192,9 @@ class _GraphScreenState extends ConsumerState<GraphScreen> {
                   onFit: () => _canvasKey.currentState?.fitView(),
                 ),
               ),
-              // MiniMap (как web ReactFlow MiniMap)
-              if (layout.nodes.isNotEmpty)
+              // MiniMap (как web ReactFlow MiniMap). На узком экране он
+              // занимает слишком много места поверх дерева — прячем.
+              if (layout.nodes.isNotEmpty && isWideLayout(context))
                 Positioned(
                   bottom: 16,
                   left: 16,

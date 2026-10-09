@@ -351,10 +351,14 @@ class _SectionPicker extends StatelessWidget {
                 children: [
                   Icon(Icons.adjust, color: scheme.primary, size: 20),
                   const SizedBox(width: 8),
-                  Text(
-                    'Выберите раздел для фокусировки',
-                    style: theme.textTheme.titleSmall
-                        ?.copyWith(fontWeight: FontWeight.w700),
+                  // Expanded — заголовок переносится, а не вылезает за
+                  // карточку на узком экране и при крупном шрифте.
+                  Expanded(
+                    child: Text(
+                      'Выберите раздел для фокусировки',
+                      style: theme.textTheme.titleSmall
+                          ?.copyWith(fontWeight: FontWeight.w700),
+                    ),
                   ),
                 ],
               ),
@@ -548,31 +552,30 @@ class _PlanRow extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Row(
+                    // Wrap вместо Row: бейджи не вытесняют заголовок — при
+                    // нехватке ширины они уходят на свою строку.
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 4,
+                      crossAxisAlignment: WrapCrossAlignment.center,
                       children: [
-                        Flexible(
-                          child: Text(
-                            node.label,
-                            style: theme.textTheme.bodyMedium
-                                ?.copyWith(fontWeight: FontWeight.w600),
-                          ),
+                        Text(
+                          node.label,
+                          style: theme.textTheme.bodyMedium
+                              ?.copyWith(fontWeight: FontWeight.w600),
                         ),
-                        if (isWeak) ...[
-                          const SizedBox(width: 6),
+                        if (isWeak)
                           StatusBadge(
                             'Слабое',
                             variant: BadgeVariant.warning,
                             icon: Icons.report_problem_outlined,
                           ),
-                        ],
-                        if (node.contentLoaded) ...[
-                          const SizedBox(width: 6),
+                        if (node.contentLoaded)
                           StatusBadge(
                             'Готово',
                             variant: BadgeVariant.success,
                             icon: Icons.check_circle_outline,
                           ),
-                        ],
                       ],
                     ),
                     if (node.oneLiner.isNotEmpty)

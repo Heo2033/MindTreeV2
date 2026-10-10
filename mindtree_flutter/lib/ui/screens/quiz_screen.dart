@@ -280,8 +280,10 @@ class _QuizScreenState extends ConsumerState<QuizScreen> {
         ],
       );
     }
-    if (_finished) return _buildSummary();
-    if (_assessment == null) return _buildStartCard();
+    // Стартовая и итоговая карточки на телефоне могут быть выше экрана
+    // (системный масштаб шрифта, разбор в экзамене) — обе в скролле.
+    if (_finished) return SingleChildScrollView(child: _buildSummary());
+    if (_assessment == null) return SingleChildScrollView(child: _buildStartCard());
     return _buildQuestion();
   }
 

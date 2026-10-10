@@ -152,23 +152,29 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                                             ?.copyWith(fontWeight: FontWeight.w600),
                                       ),
                                       const SizedBox(height: 6),
-                                      Row(
+                                      // Wrap, а не Row: на телефоне после
+                                      // бейджа тексту «Цель…» оставалось ~140 px
+                                      // и он складывался в узкий столбик; Wrap
+                                      // уводит текст на свою строку на всю ширину.
+                                      Wrap(
+                                        spacing: 8,
+                                        runSpacing: 4,
+                                        crossAxisAlignment:
+                                            WrapCrossAlignment.center,
                                         children: [
                                           StatusBadge(
                                             levelLabel[topic.targetLevel.raw] ??
                                                 topic.targetLevel.raw,
                                           ),
-                                          const SizedBox(width: 8),
-                                          Expanded(
-                                            child: Text(
-                                              'Цель: ${goalLabel[topic.goal.raw] ?? topic.goal.raw}',
-                                              style: Theme.of(context)
-                                                  .textTheme
-                                                  .bodySmall
-                                                  ?.copyWith(
-                                                    color: AppColors.textMuted(context),
-                                                  ),
-                                            ),
+                                          Text(
+                                            'Цель: ${goalLabel[topic.goal.raw] ?? topic.goal.raw}',
+                                            style: Theme.of(context)
+                                                .textTheme
+                                                .bodySmall
+                                                ?.copyWith(
+                                                  color:
+                                                      AppColors.textMuted(context),
+                                                ),
                                           ),
                                         ],
                                       ),

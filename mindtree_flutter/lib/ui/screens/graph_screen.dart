@@ -284,17 +284,28 @@ class _GraphScreenState extends ConsumerState<GraphScreen> {
           ),
         ),
         if (selected != null)
-          _DetailPanel(
-            node: selected,
-            canReveal: selectedActions?.canReveal ?? false,
-            canDeepen: selectedActions?.canDeepen ?? false,
-            expanding: _expanding.contains(selected.id),
-            generating: _generating.contains(selected.id),
-            onExpand: () => _onExpand(selected.id),
-            onGenerate: () => _onGenerate(selected.id),
-            onOpenFocus: () =>
-                context.go('/topic/learn/focus'),
-            onClose: () => setState(() => _selectedId = null),
+          ConstrainedBox(
+            constraints: isWideLayout(context)
+                ? const BoxConstraints()
+                : BoxConstraints(
+                    // Узкий экран: панель деталей не должна выталкивать
+                    // канвас и вылезать за низ (RenderFlex overflow).
+                    maxHeight: MediaQuery.sizeOf(context).height * 0.45,
+                  ),
+            child: SingleChildScrollView(
+              child: _DetailPanel(
+                node: selected,
+                canReveal: selectedActions?.canReveal ?? false,
+                canDeepen: selectedActions?.canDeepen ?? false,
+                expanding: _expanding.contains(selected.id),
+                generating: _generating.contains(selected.id),
+                onExpand: () => _onExpand(selected.id),
+                onGenerate: () => _onGenerate(selected.id),
+                onOpenFocus: () =>
+                    context.go('/topic/learn/focus'),
+                onClose: () => setState(() => _selectedId = null),
+              ),
+            ),
           ),
         if (selected != null) const SizedBox(height: 8),
       ],

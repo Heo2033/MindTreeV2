@@ -135,6 +135,37 @@ class _GraphScreenState extends ConsumerState<GraphScreen> {
       return a.canReveal;
     }).toList();
 
+    final narrow = !isWideLayout(context);
+    // Панель деталей узла: на узком экране — оверлей поверх канваса, иначе
+    // тулбар+панель на большом системном шрифте вылезали за низ (RenderFlex
+    // overflow). На широком — как раньше, под канвасом.
+    final Widget? detailPanel = selected == null
+        ? null
+        : _DetailPanel(
+            node: selected,
+            canReveal: selectedActions?.canReveal ?? false,
+            canDeepen: selectedActions?.canDeepen ?? false,
+            expanding: _expanding.contains(selected.id),
+            generating: _generating.contains(selected.id),
+            onExpand: () => _onExpand(selected.id),
+            onGenerate: () => _onGenerate(selected.id),
+            onOpenFocus: () => context.go('/topic/learn/focus'),
+            onClose: () => setState(() => _selectedId = null),
+          );
+    final Widget? panelOverlay = detailPanel == null || !narrow
+        ? null
+        : Positioned(
+            left: 12,
+            right: 12,
+            bottom: 12,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.sizeOf(context).height * 0.45,
+              ),
+              child: SingleChildScrollView(child: detailPanel),
+            ),
+          );
+
     return Column(
       children: [
         _Toolbar(
@@ -182,16 +213,19 @@ class _GraphScreenState extends ConsumerState<GraphScreen> {
                   context.go('/topic/learn/focus');
                 },
               ),
-              // Controls: zoom in/out/fit (как web Controls)
-              Positioned(
-                bottom: 16,
-                right: 16,
-                child: _GraphControls(
-                  onZoomIn: () => _canvasKey.currentState?.zoomBy(1.3),
-                  onZoomOut: () => _canvasKey.currentState?.zoomBy(1 / 1.3),
-                  onFit: () => _canvasKey.currentState?.fitView(),
+              // Controls: zoom in/out/fit (как web Controls). На телефоне при
+              // открытой панели их закрывает оверлей — прячем (зум остаётся
+              // пинчем/жестами).
+              if (!(selected != null && narrow))
+                Positioned(
+                  bottom: 16,
+                  right: 16,
+                  child: _GraphControls(
+                    onZoomIn: () => _canvasKey.currentState?.zoomBy(1.3),
+                    onZoomOut: () => _canvasKey.currentState?.zoomBy(1 / 1.3),
+                    onFit: () => _canvasKey.currentState?.fitView(),
+                  ),
                 ),
-              ),
               // MiniMap (как web ReactFlow MiniMap). На узком экране он
               // занимает слишком много места поверх дерева — прячем.
               if (layout.nodes.isNotEmpty && isWideLayout(context))
@@ -254,6 +288,9 @@ class _GraphScreenState extends ConsumerState<GraphScreen> {
                     ),
                   ),
                 ),
+              // Панель деталей узла поверх канваса (только узкий экран) —
+              // не растягивает колонку, overflow невозможен.
+              ?panelOverlay,
               if (layout.nodes.isEmpty && !state.pipeline.running)
                 Center(
                   child: Column(
@@ -283,31 +320,11 @@ class _GraphScreenState extends ConsumerState<GraphScreen> {
             ],
           ),
         ),
-        if (selected != null)
-          ConstrainedBox(
-            constraints: isWideLayout(context)
-                ? const BoxConstraints()
-                : BoxConstraints(
-                    // Узкий экран: панель деталей не должна выталкивать
-                    // канвас и вылезать за низ (RenderFlex overflow).
-                    maxHeight: MediaQuery.sizeOf(context).height * 0.45,
-                  ),
-            child: SingleChildScrollView(
-              child: _DetailPanel(
-                node: selected,
-                canReveal: selectedActions?.canReveal ?? false,
-                canDeepen: selectedActions?.canDeepen ?? false,
-                expanding: _expanding.contains(selected.id),
-                generating: _generating.contains(selected.id),
-                onExpand: () => _onExpand(selected.id),
-                onGenerate: () => _onGenerate(selected.id),
-                onOpenFocus: () =>
-                    context.go('/topic/learn/focus'),
-                onClose: () => setState(() => _selectedId = null),
-              ),
-            ),
-          ),
-        if (selected != null) const SizedBox(height: 8),
+        // Широкий экран: панель под канвасом, как было до мобильной адаптации.
+        if (detailPanel != null && !narrow) ...[
+          detailPanel,
+          const SizedBox(height: 8),
+        ],
       ],
     );
   }

@@ -151,6 +151,11 @@ class GraphCanvasState extends State<GraphCanvas> {
   @visibleForTesting
   String? get debugHoveredEdgeId => _hoveredEdgeId;
 
+  /// World → экранные координаты **в системе канваса** (без учёта позиции
+  /// канваса на экране); для глобальных добавьте offset канваса. Тест-хук.
+  @visibleForTesting
+  Offset debugWorldToScreen(Offset world) => _worldToScreen(world);
+
   Matrix4? _startGesture;
   Offset _startFocal = Offset.zero;
 
@@ -712,16 +717,16 @@ class _GraphPainter extends CustomPainter {
       3,
       Paint()..color = dot,
     );
-    final label = _makeText(
+    final maxW = math.max(16.0, rect.width - 28);
+    final label = _fittedLabel(
       n.node.label,
       fontSize: _font(12),
       color: text.withValues(alpha: 0.95),
       fontWeight: FontWeight.w600,
       maxLines: 1,
-      ellipsis: '…',
+      maxWidth: maxW,
+      maxHeight: rect.height - 2,
     );
-    final maxW = math.max(16.0, rect.width - 28);
-    label.layout(maxWidth: maxW);
     label.paint(
       canvas,
       Offset(rect.left + 20, rect.center.dy - label.height / 2),
@@ -737,31 +742,31 @@ class _GraphPainter extends CustomPainter {
     final top = rect.top + 8;
     canvas.drawCircle(Offset(left + 5, top + 6), 3.5, Paint()..color = dot);
 
-    final label = _makeText(
+    final label = _fittedLabel(
       n.node.label,
       fontSize: _font(13),
       color: text,
       fontWeight: FontWeight.w700,
       maxLines: 2,
-      ellipsis: '…',
+      maxWidth: rect.width - 40,
+      maxHeight: rect.height - 14, // поля 8 сверху + 6 снизу
     );
-    label.layout(maxWidth: rect.width - 40);
     label.paint(canvas, Offset(left + 14, top));
 
     if (n.node.oneLiner.isNotEmpty) {
-      final oneLiner = _makeText(
-        n.node.oneLiner,
-        fontSize: _font(11),
-        color: subtext,
-        fontWeight: FontWeight.w400,
-        maxLines: 2,
-        ellipsis: '…',
-      );
-      oneLiner.layout(maxWidth: rect.width - 24);
       final oy = top + label.height + 3;
-      // Если после заголовка внутри карточки не остаётся места, подпись
-      // не рисуем: заголовок уже читаем, а половина строки смотрится хуже.
-      if (oy + oneLiner.height <= rect.bottom - 6) {
+      final remaining = rect.bottom - 6 - oy;
+      // Подпись вписываем в оставшуюся высоту (не рисуем только огрызок
+      // меньше 8 px — заголовок важнее).
+      if (remaining > 8) {
+        final oneLiner = _fittedLabel(
+          n.node.oneLiner,
+          fontSize: _font(11),
+          color: subtext,
+          maxLines: 2,
+          maxWidth: rect.width - 24,
+          maxHeight: remaining,
+        );
         oneLiner.paint(canvas, Offset(left + 14, oy));
       }
     }
@@ -789,6 +794,37 @@ class _GraphPainter extends CustomPainter {
       maxLines: maxLines,
       ellipsis: ellipsis,
     );
+  }
+
+  /// Подпись, вписанная в карточку узла. Компенсация кегля по масштабу
+  /// ([_font]) поднимает шрифт вплоть до ×3 — если узлу на экране мало,
+  /// текст резался границами карточки и «не влезал». Здесь кегль дополнительно
+  /// ограничивается высотой карточки: если не влез — уменьшаем пропорционально
+  /// и перерисовываем (текст всегда целиком внутри узла).
+  TextPainter _fittedLabel(
+    String text, {
+    required double fontSize,
+    required Color color,
+    FontWeight? fontWeight,
+    required int maxLines,
+    required double maxWidth,
+    required double maxHeight,
+  }) {
+    TextPainter make(double size) => _makeText(
+          text,
+          fontSize: size,
+          color: color,
+          fontWeight: fontWeight,
+          maxLines: maxLines,
+          ellipsis: '…',
+        );
+    var label = make(fontSize);
+    label.layout(maxWidth: maxWidth);
+    if (label.height > maxHeight && label.height > 0) {
+      label = make(fontSize * (maxHeight / label.height));
+      label.layout(maxWidth: maxWidth);
+    }
+    return label;
   }
 
   /// Экранный масштаб: мировые координаты → logical px на экране.

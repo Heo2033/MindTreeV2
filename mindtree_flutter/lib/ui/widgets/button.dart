@@ -49,12 +49,19 @@ class AppButton extends StatelessWidget {
                 Icon(icon, size: isLg ? 18 : 14, color: fg),
                 const SizedBox(width: 6),
               ],
-              Text(
-                label,
-                style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                      color: fg,
-                      fontWeight: FontWeight.w600,
-                    ),
+              // Flexible: без него Text в Row получает неограниченную ширину,
+              // не переносится и на телефоне вылезает за край кнопки
+              // (RenderFlex overflow на 79/50 px у тулбара и панели графа).
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                        color: fg,
+                        fontWeight: FontWeight.w600,
+                      ),
+                ),
               ),
             ],
           );
